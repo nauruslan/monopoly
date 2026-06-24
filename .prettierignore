@@ -4,4 +4,4 @@ coverage
 pnpm-lock.yaml
 *.md
 public/*
-legacy/*
+docs/*

@@ -8,14 +8,7 @@ import prettierPlugin from "eslint-plugin-prettier";
 export default [
   // 1. Игнорируемые пути
   {
-    ignores: [
-      "dist/**",
-      "node_modules/**",
-      "coverage/**",
-      "*.config.js",
-      "*.config.ts",
-      "legacy/**",
-    ],
+    ignores: ["dist/**", "node_modules/**", "coverage/**", "*.config.js", "*.config.ts", "docs/**"],
   },
 
   // 2. Базовые JS-правила

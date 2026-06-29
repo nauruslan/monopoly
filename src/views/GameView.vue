@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import Board from "../components/Board.vue";
 import PlayersPanel from "../components/PlayersPanel.vue";
+import ActionsPanel from "../components/ActionsPanel.vue";
 import { BOARD } from "../data/board";
 import type { Cell as CellType } from "../types/cell";
 import type { Player } from "../types/player";
@@ -67,8 +68,22 @@ const mockPlayers = ref<Player[]>([
 
 const currentPlayerId = "p1";
 
+const canRoll = ref(true);
+const canBuy = ref(true);
+const canEndTurn = ref(true);
+
 function onCellClick(cell: CellType) {
   console.log("Clicked cell:", cell);
+}
+
+function onRoll() {
+  console.log("🎲 Roll clicked");
+}
+function onBuy() {
+  console.log("🏠 Buy clicked");
+}
+function onEndTurn() {
+  console.log("✅ End turn");
 }
 </script>
 
@@ -82,6 +97,14 @@ function onCellClick(cell: CellType) {
     </Board>
     <aside class="sidebar">
       <PlayersPanel :players="mockPlayers" :current-player-id="currentPlayerId" />
+      <ActionsPanel
+        :can-roll="canRoll"
+        :can-buy="canBuy"
+        :can-end-turn="canEndTurn"
+        @roll="onRoll"
+        @buy="onBuy"
+        @end-turn="onEndTurn"
+      />
     </aside>
   </div>
 </template>

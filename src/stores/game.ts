@@ -166,6 +166,27 @@ export const useGameStore = defineStore("game", () => {
     state.value.phase = "BUILDING";
   }
 
+  const lastDrawnCard = ref<Card | null>(null);
+
+  function drawChanceCard(): Card {
+    return drawFromDeck("chance");
+  }
+
+  function drawTreasuryCard(): Card {
+    return drawFromDeck("treasury");
+  }
+
+  function drawFromDeck(deck: "chance" | "treasury"): Card {
+    const card = drawCard(deck);
+    const player = currentPlayer.value;
+    if (player) {
+      applyCardEffect(card, player);
+    }
+    lastDrawnCard.value = card;
+    state.value.phase = "BUILDING";
+    return card;
+  }
+
   function applyCardEffect(card: Card, player: PlayerType) {
     switch (card.effect.kind) {
       case "money":
@@ -191,6 +212,7 @@ export const useGameStore = defineStore("game", () => {
     state,
     currentPlayer,
     currentCell,
+    lastDrawnCard,
     initGame,
     endTurn,
     rollAndMove,
@@ -198,5 +220,8 @@ export const useGameStore = defineStore("game", () => {
     buyProperty,
     declineBuy,
     applyCardEffect,
+    drawChanceCard,
+    drawTreasuryCard,
+    drawFromDeck,
   };
 });

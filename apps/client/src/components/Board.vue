@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import CellComp from "./Cell.vue";
 import Dice from "./Dice.vue";
-import type { Cell as CellType } from "../types/cell";
+import type { Cell as CellType } from "@monopoly/shared";
 
 const props = defineProps<{
   cells: CellType[];

@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import type { Cell } from "../types/cell";
-import type { Player } from "../types/player";
+import type { Cell, Player } from "@monopoly/shared";
 
 defineProps<{
   cell: Cell | null;

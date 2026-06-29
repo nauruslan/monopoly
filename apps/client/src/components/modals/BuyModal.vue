@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Modal from "../Modal.vue";
-import type { Cell } from "../../types/cell";
+import type { Cell } from "@monopoly/shared";
 
 defineProps<{
   show: boolean;

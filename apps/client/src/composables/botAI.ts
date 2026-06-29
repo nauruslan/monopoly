@@ -1,5 +1,4 @@
-import type { Player } from "../types/player";
-import type { GameState } from "../types/game";
+import type { GameState, Player } from "@monopoly/shared";
 
 export type BotAction = "ROLL" | "BUY" | "END_TURN";
 

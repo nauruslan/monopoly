@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Cell } from "../types/cell";
+import type { Cell } from "@monopoly/shared";
 
 const props = defineProps<{
   cell: Cell;

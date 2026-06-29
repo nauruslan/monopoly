@@ -9,8 +9,8 @@ import BuyModal from "../components/modals/BuyModal.vue";
 import CardModal from "../components/modals/CardModal.vue";
 import JailModal from "../components/modals/JailModal.vue";
 import { useGameStore } from "../stores/game";
-import type { Cell } from "../types/cell";
-import { drawCard } from "../data/cards";
+import type { Cell } from "@monopoly/shared";
+import { drawCard } from "@monopoly/shared";
 
 const route = useRoute();
 const game = useGameStore();

@@ -1,14 +1,10 @@
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
-import type { GameState, Phase } from "../types/game";
-import type { Player } from "../types/player";
-import type { Cell } from "../types/cell";
-import { BOARD } from "../data/board";
-import { DEFAULT_SETTINGS } from "../types/game";
+import type { GameState, Phase, Player, Cell, Card } from "@monopoly/shared";
+import { BOARD, DEFAULT_SETTINGS, drawCard } from "@monopoly/shared";
 import { rollDice } from "../composables/useDice";
-import { drawCard, type Card } from "../data/cards";
 import { decideBotAction } from "../composables/botAI";
-import type { Player as PlayerType } from "../types/player";
+import type { Player as PlayerType } from "@monopoly/shared";
 
 export const useGameStore = defineStore("game", () => {
   const state = ref<GameState>({

@@ -1,25 +1,35 @@
-# 🎲 Монополия Online
+# Monopoly (online)
 
-Многопользовательская онлайн-игра «Монополия» на Vue 3 + Vite + TypeScript.
+Клиент-серверная реализация Монополии на Vue 3 (Pinia, Vue Router) + планируемый NestJS-бэкенд.
 
-## 🚀 Запуск
+## Структура репозитория
 
-# Установка зависимостей
+```
+monopoly-monorepo/
+├── apps/
+│   ├── client/         Vue 3 + Vite + Pinia — игровой UI
+│   └── server/         (заглушка) место под будущий NestJS-бэкенд
+├── packages/
+│   └── shared/         Общие TypeScript-типы и данные (доска, карточки)
+├── package.json        Корневой манифест монорепо
+├── pnpm-workspace.yaml Список workspace-пакетов
+└── tsconfig.base.json  Общая база для TS-конфигов пакетов
+```
+
+## Команды
+
+| Скрипт | Что делает |
+|---|---|
+| `pnpm dev` | Параллельно запускает `dev` во всех workspace-пакетах |
+| `pnpm dev:client` | Только клиент (`http://localhost:5173`) |
+| `pnpm dev:server` | Только сервер (заглушка) |
+| `pnpm build` | Сборка всех пакетов |
+| `pnpm typecheck` | Проверка типов во всех пакетах |
+| `pnpm lint` / `lint:fix` | ESLint по всему монорепо |
+| `pnpm format` / `format:check` | Prettier по всему монорепо |
+| `pnpm infra:up` / `infra:down` | Docker Compose с PostgreSQL и Redis (Step 22+) |
+
+## Установка
+
+```bash
 pnpm install
-
-# Запуск dev-сервера (http://localhost:5173)
-pnpm dev
-
-# Сборка production-версии
-pnpm build
-
-# Предпросмотр production-сборки
-pnpm preview
-
-## 📚 Стек
-
-- **Vue 3** (Composition API)
-- **TypeScript** (strict mode)
-- **Vite** (сборщик)
-- **Pinia** (стейт-менеджер)
-- **Vue Router** (роутинг)

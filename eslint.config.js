@@ -4,11 +4,21 @@ import vue from "eslint-plugin-vue";
 import vueParser from "vue-eslint-parser";
 import prettier from "eslint-config-prettier";
 import prettierPlugin from "eslint-plugin-prettier";
+import { fileURLToPath } from "node:url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 export default [
   // 1. Игнорируемые пути
   {
-    ignores: ["dist/**", "node_modules/**", "coverage/**", "*.config.js", "*.config.ts", "docs/**"],
+    ignores: [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/coverage/**",
+      "**/*.config.js",
+      "**/*.config.ts",
+      "docs/**",
+    ],
   },
 
   // 2. Базовые JS-правила
@@ -20,7 +30,7 @@ export default [
   // 4. Правила Vue (для .vue файлов)
   ...vue.configs["flat/recommended"],
 
-  // 5. Главный блок конфигурации для всего проекта
+  // 5. Главный блок конфигурации для всего монорепо
   {
     files: ["**/*.{js,mjs,cjs,ts,vue}"],
     languageOptions: {
@@ -32,6 +42,15 @@ export default [
         ecmaVersion: 2022,
         sourceType: "module",
         extraFileExtensions: [".vue"],
+        // Явно указываем корень для парсера, чтобы он корректно резолвил
+        // алиасы (@monopoly/shared) из обоих workspace-пакетов.
+        tsconfigRootDir: __dirname,
+        project: [
+          "./apps/client/tsconfig.app.json",
+          "./apps/client/tsconfig.node.json",
+          "./apps/server/tsconfig.json",
+          "./packages/shared/tsconfig.json",
+        ],
       },
       globals: {
         // Браузерные глобальные переменные
@@ -50,6 +69,12 @@ export default [
         HTMLElement: "readonly",
         HTMLInputElement: "readonly",
         MouseEvent: "readonly",
+        // Node-глобалы (используются в apps/server)
+        process: "readonly",
+        Buffer: "readonly",
+        __dirname: "readonly",
+        __filename: "readonly",
+        global: "readonly",
       },
     },
     rules: {
@@ -83,7 +108,7 @@ export default [
 
   // 6. Спец-блок для тестов
   {
-    files: ["**/*.{test,spec}.ts", "src/test/**/*"],
+    files: ["**/*.{test,spec}.ts", "**/test/**/*"],
     rules: {
       "@typescript-eslint/no-explicit-any": "off",
       "no-console": "off",

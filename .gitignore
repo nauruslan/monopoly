@@ -1,4 +1,4 @@
-# Logs
+# === Logs ===
 logs
 *.log
 npm-debug.log*
@@ -7,15 +7,27 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# === Dependencies ===
 node_modules
-.DS_Store
+.pnpm-store
+
+# === Build output ===
 dist
 dist-ssr
-coverage
-*.local
-docs
+build
+*.tsbuildinfo
 
-# Editor directories and files
+# === Local env / secrets ===
+.env
+.env.local
+.env.*.local
+*.local
+
+# === Tests / coverage ===
+coverage
+__screenshots__
+
+# === Editor / IDE ===
 .vscode
 .vscode/*
 !.vscode/extensions.json
@@ -26,16 +38,20 @@ docs
 *.sln
 *.sw?
 
-*.tsbuildinfo
-
+# === ESLint cache ===
 .eslintcache
 
-# Cypress
+# === Cypress / Playwright artifacts ===
 /cypress/videos/
 /cypress/screenshots/
 
-# Vitest
-__screenshots__/
-
-# Vite
+# === Vite dev artifacts ===
 *.timestamp-*-*.mjs
+
+# === OS junk ===
+.DS_Store
+Thumbs.db
+
+# === Dev ===
+docs
+.gigacode

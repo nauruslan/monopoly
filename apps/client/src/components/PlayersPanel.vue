@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Player } from "../types/player";
+import type { Player } from "@monopoly/shared";
 
 defineProps<{
   players: Player[];

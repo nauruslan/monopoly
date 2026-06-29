@@ -5,6 +5,7 @@ import PlayersPanel from "../components/PlayersPanel.vue";
 import ActionsPanel from "../components/ActionsPanel.vue";
 import BuyModal from "../components/modals/BuyModal.vue";
 import CardModal from "../components/modals/CardModal.vue";
+import CellTooltip from "../components/CellTooltip.vue";
 import { BOARD } from "../data/board";
 import type { Cell as CellType } from "../types/cell";
 import type { Player } from "../types/player";
@@ -79,8 +80,19 @@ const showCardModal = ref(false);
 const cardText = ref("");
 const isTreasuryCard = ref(false);
 
-function onCellClick(cell: CellType) {
-  console.log("Clicked cell:", cell);
+const hoveredCell = ref<CellType | null>(null);
+const tooltipPos = ref({ x: 0, y: 0 });
+
+function onCellClick(payload: { cell: CellType; event: MouseEvent }) {
+  hoveredCell.value = payload.cell;
+  tooltipPos.value = {
+    x: payload.event.clientX + 12,
+    y: payload.event.clientY + 12,
+  };
+}
+
+function onCellLeave() {
+  hoveredCell.value = null;
 }
 
 function onRoll() {
@@ -99,7 +111,7 @@ function onEndTurn() {
 </script>
 
 <template>
-  <div class="game-container">
+  <div class="game-container" @mouseleave="onCellLeave">
     <Board :cells="BOARD" :players="mockPlayers" @cell-click="onCellClick">
       <template #center>
         <div class="logo">Монополия</div>
@@ -143,6 +155,13 @@ function onEndTurn() {
       :card-text="cardText"
       :is-treasury="isTreasuryCard"
       @close="showCardModal = false"
+    />
+
+    <CellTooltip
+      :cell="hoveredCell"
+      :owner="mockPlayers.find((p) => p.id === hoveredCell?.ownerId)"
+      :x="tooltipPos.x"
+      :y="tooltipPos.y"
     />
   </div>
 </template>

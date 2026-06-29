@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import type { Cell } from "../types/cell";
 
-defineProps<{
+const props = defineProps<{
   cell: Cell;
   // Опциональный prop — HEX-цвет владельца (для подсветки)
   ownerColor?: string;
 }>();
 
 const emit = defineEmits<{
-  (e: "click", cell: Cell): void;
+  (e: "click", cell: Cell, event: MouseEvent): void;
 }>();
+
+function onClick(e: MouseEvent) {
+  emit("click", props.cell, e);
+}
 </script>
 
 <template>
@@ -30,7 +34,7 @@ const emit = defineEmits<{
       // CSS-переменная для цвета владельца
       '--owner-color': ownerColor || 'transparent',
     }"
-    @click="emit('click', cell)"
+    @click="onClick"
   >
     <!-- Цветная полоска сверху (для клеток с группой) -->
     <div v-if="cell.color" class="color-bar" :style="{ background: cell.color }"></div>

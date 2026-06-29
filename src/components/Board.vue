@@ -15,8 +15,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: "cell-click", cell: CellType): void;
+  (e: "cell-click", payload: { cell: CellType; event: MouseEvent }): void;
 }>();
+
+function onCellClick(cell: CellType, event: MouseEvent) {
+  emit("cell-click", { cell, event });
+}
 
 // Mock-значения кубиков (пока статичные)
 const diceValues = ref<[number, number]>([3, 5]);
@@ -67,7 +71,7 @@ function ownerColor(cell: CellType): string | undefined {
             gridColumn: getGridPos(i).col,
             gridRow: getGridPos(i).row,
           }"
-          @click="emit('cell-click', cell)"
+          @click="onCellClick(cell, $event)"
         >
           <div
             v-for="p in playersOnCell.get(cell.id) || []"

@@ -1,16 +1,20 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed } from "vue";
+import { useRoute } from "vue-router";
 import Board from "../components/Board.vue";
 import PlayersPanel from "../components/PlayersPanel.vue";
 import ActionsPanel from "../components/ActionsPanel.vue";
+import CellTooltip from "../components/CellTooltip.vue";
 import BuyModal from "../components/modals/BuyModal.vue";
 import CardModal from "../components/modals/CardModal.vue";
-import CellTooltip from "../components/CellTooltip.vue";
 import { BOARD } from "../data/board";
-import type { Cell as CellType } from "../types/cell";
+import type { Cell } from "../types/cell";
 import type { Player } from "../types/player";
 
-const mockPlayers = ref<Player[]>([
+const route = useRoute();
+const gameId = route.params.id;
+
+const players = ref<Player[]>([
   {
     id: "p1",
     displayName: "Игрок 1",
@@ -21,7 +25,6 @@ const mockPlayers = ref<Player[]>([
     position: 0,
     inJail: false,
     jailTurns: 0,
-    jailCards: 0,
     properties: [],
     isBankrupt: false,
   },
@@ -35,7 +38,6 @@ const mockPlayers = ref<Player[]>([
     position: 0,
     inJail: false,
     jailTurns: 0,
-    jailCards: 0,
     properties: [],
     isBankrupt: false,
   },
@@ -49,7 +51,6 @@ const mockPlayers = ref<Player[]>([
     position: 0,
     inJail: false,
     jailTurns: 0,
-    jailCards: 0,
     properties: [],
     isBankrupt: false,
   },
@@ -63,47 +64,43 @@ const mockPlayers = ref<Player[]>([
     position: 0,
     inJail: false,
     jailTurns: 0,
-    jailCards: 0,
     properties: [],
     isBankrupt: false,
   },
 ]);
 
 const currentPlayerId = "p1";
-
-const canRoll = ref(true);
-const canBuy = ref(true);
-const canEndTurn = ref(true);
+const diceValues = ref<[number, number]>([1, 1]);
+const diceRolling = ref(false);
 
 const showBuyModal = ref(false);
 const showCardModal = ref(false);
 const cardText = ref("");
 const isTreasuryCard = ref(false);
 
-const hoveredCell = ref<CellType | null>(null);
+const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
 
-function onCellClick(payload: { cell: CellType; event: MouseEvent }) {
-  hoveredCell.value = payload.cell;
-  tooltipPos.value = {
-    x: payload.event.clientX + 12,
-    y: payload.event.clientY + 12,
-  };
-}
+const currentCell = computed<Cell | null>(() => {
+  const p = players.value.find((p) => p.id === currentPlayerId);
+  return p ? BOARD[p.position] || null : null;
+});
 
-function onCellLeave() {
-  hoveredCell.value = null;
+const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
+
+function onCellClick(cell: Cell, e: MouseEvent) {
+  hoveredCell.value = cell;
+  tooltipPos.value = { x: e.clientX + 12, y: e.clientY + 12 };
 }
 
 function onRoll() {
-  console.log("🎲 Roll clicked");
+  console.log("🎲 Roll");
 }
 function onBuy() {
   showBuyModal.value = true;
 }
 function onConfirmBuy() {
   showBuyModal.value = false;
-  console.log("✅ Bought");
 }
 function onEndTurn() {
   console.log("✅ End turn");
@@ -111,19 +108,15 @@ function onEndTurn() {
 </script>
 
 <template>
-  <div class="game-container" @mouseleave="onCellLeave">
-    <Board :cells="BOARD" :players="mockPlayers" @cell-click="onCellClick">
-      <template #center>
-        <div class="logo">Монополия</div>
-        <div class="logo-sub">neon edition</div>
-      </template>
-    </Board>
+  <div class="game-container">
+    <Board :cells="BOARD" :players="players" @cell-click="onCellClick" />
+
     <aside class="sidebar">
-      <PlayersPanel :players="mockPlayers" :current-player-id="currentPlayerId" />
+      <PlayersPanel :players="players" :current-player-id="currentPlayerId" />
       <ActionsPanel
-        :can-roll="canRoll"
-        :can-buy="canBuy"
-        :can-end-turn="canEndTurn"
+        :can-roll="true"
+        :can-buy="true"
+        :can-end-turn="true"
         @roll="onRoll"
         @buy="onBuy"
         @end-turn="onEndTurn"
@@ -132,20 +125,8 @@ function onEndTurn() {
 
     <BuyModal
       :show="showBuyModal"
-      :cell="{
-        id: 1,
-        name: 'Старая дорога',
-        type: 'PROPERTY',
-        group: 'brown',
-        color: '#8B4513',
-        price: 60,
-        rent: 2,
-        housePrice: 50,
-        mortgageValue: 30,
-        houses: 0,
-        isMortgaged: false,
-      }"
-      :money="1500"
+      :cell="currentCell"
+      :money="players[0]!.money"
       @close="showBuyModal = false"
       @confirm="onConfirmBuy"
     />
@@ -157,12 +138,7 @@ function onEndTurn() {
       @close="showCardModal = false"
     />
 
-    <CellTooltip
-      :cell="hoveredCell"
-      :owner="mockPlayers.find((p) => p.id === hoveredCell?.ownerId)"
-      :x="tooltipPos.x"
-      :y="tooltipPos.y"
-    />
+    <CellTooltip :cell="hoveredCell" :owner="cellOwner" :x="tooltipPos.x" :y="tooltipPos.y" />
   </div>
 </template>
 
@@ -171,11 +147,10 @@ function onEndTurn() {
   display: flex;
   gap: 24px;
   padding: 20px;
-  max-width: 1200px;
+  max-width: 1560px;
   margin: 0 auto;
-  justify-content: center;
+  align-items: flex-start;
 }
-
 .sidebar {
   flex: 1;
   min-width: 300px;

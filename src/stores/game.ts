@@ -5,6 +5,8 @@ import type { Player } from "../types/player";
 import { BOARD } from "../data/board";
 import { DEFAULT_SETTINGS } from "../types/game";
 import { rollDice } from "../composables/useDice";
+import { drawCard, type Card } from "../data/cards";
+import type { Player as PlayerType } from "../types/player";
 
 export const useGameStore = defineStore("game", () => {
   const state = ref<GameState>({
@@ -146,6 +148,45 @@ export const useGameStore = defineStore("game", () => {
     state.value.phase = "JAIL_DECISION";
   }
 
+  function buyProperty(): boolean {
+    const cell = currentCell.value;
+    const player = currentPlayer.value;
+    if (!cell || !player) return false;
+    if (cell.ownerId) return false;
+    if (cell.price === undefined || player.money < cell.price) return false;
+
+    player.money -= cell.price;
+    player.properties.push(cell.id);
+    cell.ownerId = player.id;
+    state.value.phase = "BUILDING";
+    return true;
+  }
+
+  function declineBuy() {
+    state.value.phase = "BUILDING";
+  }
+
+  function applyCardEffect(card: Card, player: PlayerType) {
+    switch (card.effect.kind) {
+      case "money":
+        player.money += card.effect.amount;
+        break;
+      case "move":
+        player.position = card.effect.target;
+        if (card.effect.money) player.money += card.effect.money;
+        break;
+      case "move-relative":
+        player.position = (player.position + card.effect.steps + 40) % 40;
+        break;
+      case "goto-jail":
+        sendToJail();
+        break;
+      case "jail-free":
+        player.jailCards += 1;
+        break;
+    }
+  }
+
   return {
     state,
     currentPlayer,
@@ -154,5 +195,8 @@ export const useGameStore = defineStore("game", () => {
     endTurn,
     rollAndMove,
     sendToJail,
+    buyProperty,
+    declineBuy,
+    applyCardEffect,
   };
 });

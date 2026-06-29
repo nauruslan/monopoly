@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { useRoute } from "vue-router";
 import Board from "../components/Board.vue";
 import PlayersPanel from "../components/PlayersPanel.vue";
@@ -9,6 +9,7 @@ import BuyModal from "../components/modals/BuyModal.vue";
 import CardModal from "../components/modals/CardModal.vue";
 import { useGameStore } from "../stores/game";
 import type { Cell } from "../types/cell";
+import { drawCard } from "../data/cards";
 
 const route = useRoute();
 const game = useGameStore();
@@ -51,10 +52,44 @@ async function onRoll() {
   diceValues.value = [Math.ceil(Math.random() * 6), Math.ceil(Math.random() * 6)];
   diceRolling.value = false;
 }
+watch(
+  () => game.currentPlayer?.position,
+  (newPos, oldPos) => {
+    if (newPos === oldPos) return;
+    const cell = game.currentCell;
+    const player = game.currentPlayer;
+    if (!cell || !player) return;
+
+    setTimeout(() => {
+      if (cell.type === "CHANCE") {
+        const card = drawCard("chance");
+        game.applyCardEffect(card, player);
+        cardText.value = card.text;
+        isTreasuryCard.value = false;
+        showCardModal.value = true;
+      } else if (cell.type === "TREASURY") {
+        const card = drawCard("treasury");
+        game.applyCardEffect(card, player);
+        cardText.value = card.text;
+        isTreasuryCard.value = true;
+        showCardModal.value = true;
+      } else if (cell.type === "TAX" && cell.taxAmount) {
+        player.money -= cell.taxAmount;
+      } else if (cell.type === "GOTO_JAIL") {
+        game.sendToJail();
+      }
+    }, 600);
+  },
+);
+
 function onBuy() {
   showBuyModal.value = true;
 }
 function onConfirmBuy() {
+  if (game.buyProperty()) showBuyModal.value = false;
+}
+function onDeclineBuy() {
+  game.declineBuy();
   showBuyModal.value = false;
 }
 function onEndTurn() {
@@ -82,7 +117,7 @@ function onEndTurn() {
       :show="showBuyModal"
       :cell="currentCell"
       :money="players[0]?.money ?? 0"
-      @close="showBuyModal = false"
+      @close="onDeclineBuy"
       @confirm="onConfirmBuy"
     />
 

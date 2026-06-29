@@ -11,21 +11,14 @@ defineProps<{
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "confirm"): void;
+  (e: "decline"): void;
 }>();
 </script>
 
 <template>
-  <Modal
-    :show="show"
-    title="🏠 Купить"
-    :subtitle="cell?.name"
-    @close="emit('close')"
-  >
+  <Modal :show="show" title="🏠 Купить" :subtitle="cell?.name" @close="emit('close')">
     <div v-if="cell" class="property-card">
-      <div
-        class="property-card-header"
-        :style="{ background: cell.color || '#555' }"
-      >
+      <div class="property-card-header" :style="{ background: cell.color || '#555' }">
         {{ cell.name }}
       </div>
       <div class="property-card-body">
@@ -60,9 +53,7 @@ const emit = defineEmits<{
       >
         Купить ₽{{ cell?.price }}
       </button>
-      <button class="action-btn btn-cancel" @click="emit('close')">
-        Пропустить
-      </button>
+      <button class="action-btn btn-cancel" @click="emit('decline')">Пропустить</button>
     </div>
   </Modal>
 </template>

@@ -7,71 +7,23 @@ import ActionsPanel from "../components/ActionsPanel.vue";
 import CellTooltip from "../components/CellTooltip.vue";
 import BuyModal from "../components/modals/BuyModal.vue";
 import CardModal from "../components/modals/CardModal.vue";
-import { BOARD } from "../data/board";
+import { useGameStore } from "../stores/game";
 import type { Cell } from "../types/cell";
-import type { Player } from "../types/player";
 
 const route = useRoute();
-const gameId = route.params.id;
+const game = useGameStore();
+// route-параметр пока не используется напрямую
+const _gameId = route.params.id;
 
-const players = ref<Player[]>([
-  {
-    id: "p1",
-    displayName: "Игрок 1",
-    kind: "human",
-    color: "#FF4D4D",
-    icon: "🔴",
-    money: 1500,
-    position: 0,
-    inJail: false,
-    jailTurns: 0,
-    properties: [],
-    isBankrupt: false,
-  },
-  {
-    id: "p2",
-    displayName: "Бот 1",
-    kind: "bot",
-    color: "#4D9EFF",
-    icon: "🔵",
-    money: 1500,
-    position: 0,
-    inJail: false,
-    jailTurns: 0,
-    properties: [],
-    isBankrupt: false,
-  },
-  {
-    id: "p3",
-    displayName: "Бот 2",
-    kind: "bot",
-    color: "#4CFF4C",
-    icon: "🟢",
-    money: 1500,
-    position: 0,
-    inJail: false,
-    jailTurns: 0,
-    properties: [],
-    isBankrupt: false,
-  },
-  {
-    id: "p4",
-    displayName: "Бот 3",
-    kind: "bot",
-    color: "#FFD700",
-    icon: "🟡",
-    money: 1500,
-    position: 0,
-    inJail: false,
-    jailTurns: 0,
-    properties: [],
-    isBankrupt: false,
-  },
-]);
+const players = computed(() => game.state.players);
+const cells = computed(() => game.state.board);
+const currentPlayerId = computed(() => game.currentPlayer?.id || "");
 
-const currentPlayerId = "p1";
-const diceValues = ref<[number, number]>([1, 1]);
-const diceRolling = ref(false);
+// Локальное состояние UI (будет реализовано в следующих шагах)
+
+const _diceValues = ref<[number, number]>([1, 1]);
+
+const _diceRolling = ref(false);
 
 const showBuyModal = ref(false);
 const showCardModal = ref(false);
@@ -81,16 +33,16 @@ const isTreasuryCard = ref(false);
 const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
 
-const currentCell = computed<Cell | null>(() => {
-  const p = players.value.find((p) => p.id === currentPlayerId);
-  return p ? BOARD[p.position] || null : null;
-});
+const currentCell = computed<Cell | null>(() => game.currentCell);
 
 const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
 
-function onCellClick(cell: Cell, e: MouseEvent) {
-  hoveredCell.value = cell;
-  tooltipPos.value = { x: e.clientX + 12, y: e.clientY + 12 };
+function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
+  hoveredCell.value = payload.cell;
+  tooltipPos.value = {
+    x: payload.event.clientX + 12,
+    y: payload.event.clientY + 12,
+  };
 }
 
 function onRoll() {
@@ -109,7 +61,7 @@ function onEndTurn() {
 
 <template>
   <div class="game-container">
-    <Board :cells="BOARD" :players="players" @cell-click="onCellClick" />
+    <Board :cells="cells" :players="players" @cell-click="onCellClick" />
 
     <aside class="sidebar">
       <PlayersPanel :players="players" :current-player-id="currentPlayerId" />
@@ -126,7 +78,7 @@ function onEndTurn() {
     <BuyModal
       :show="showBuyModal"
       :cell="currentCell"
-      :money="players[0]!.money"
+      :money="players[0]?.money ?? 0"
       @close="showBuyModal = false"
       @confirm="onConfirmBuy"
     />

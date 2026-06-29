@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
 import { ref } from "vue";
+import { useGameStore } from "../stores/game";
 
 const router = useRouter();
+const game = useGameStore();
 
 const playerName = localStorage.getItem("playerName") || "Гость";
 
@@ -21,10 +23,14 @@ function createGame() {
   // Валидация: название не должно быть пустым
   if (!newGameName.value.trim()) return;
 
-  // Генерируем случайный ID игры
-  const id = Math.random().toString(36).substring(7);
+  // Формируем список игроков: реальный пользователь + боты
+  const me = localStorage.getItem("playerName") || "Игрок";
+  const botNames = ["Бот 1", "Бот 2", "Бот 3"];
+  const names = [me, ...botNames.slice(0, botCount.value)];
 
-  router.push(`/game/${id}`);
+  game.initGame(names);
+
+  router.push(`/game/${game.state.id}`);
 }
 
 // Заглушки для будущих кнопок
@@ -174,9 +180,7 @@ function joinGame(gameId: string) {
 
 .form-group select {
   cursor: pointer;
-  /* Убираем нативную стрелку в Firefox */
   appearance: none;
-  /* Кастомная стрелка */
   background-image: url("data:image/svg+xml;utf8,<svg fill='white' viewBox='0 0 24 24'><path d='M7 10l5 5 5-5z'/></svg>");
   background-repeat: no-repeat;
   background-position: right 12px center;

@@ -129,6 +129,7 @@ function onDeclineBuy() {
 }
 function onEndTurn() {
   console.log("✅ End turn");
+  game.endTurn();
 }
 </script>
 

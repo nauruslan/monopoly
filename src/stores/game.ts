@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import type { GameState, Phase } from "../types/game";
 import type { Player } from "../types/player";
 import type { Cell } from "../types/cell";
@@ -7,6 +7,7 @@ import { BOARD } from "../data/board";
 import { DEFAULT_SETTINGS } from "../types/game";
 import { rollDice } from "../composables/useDice";
 import { drawCard, type Card } from "../data/cards";
+import { decideBotAction } from "../composables/botAI";
 import type { Player as PlayerType } from "../types/player";
 
 export const useGameStore = defineStore("game", () => {
@@ -84,6 +85,30 @@ export const useGameStore = defineStore("game", () => {
     state.value.phase = "ROLLING";
     state.value.lastActivityAt = new Date().toISOString();
   }
+
+  watch(
+    () => state.value.currentPlayerIndex,
+    async () => {
+      const player = currentPlayer.value;
+      if (!player) return;
+      if (player.kind !== "bot") return;
+      if (state.value.status !== "active") return;
+
+      await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
+
+      if (state.value.phase === "ROLLING") {
+        await rollAndMove();
+      } else if (state.value.phase === "BUY_DECISION") {
+        const action = decideBotAction(player, state.value);
+        if (action === "BUY") buyProperty();
+        await new Promise((r) => setTimeout(r, 500));
+        endTurn();
+      } else if (state.value.phase === "BUILDING") {
+        await new Promise((r) => setTimeout(r, 500));
+        endTurn();
+      }
+    },
+  );
 
   async function rollAndMove() {
     if (!currentPlayer.value || state.value.phase !== "ROLLING") return;

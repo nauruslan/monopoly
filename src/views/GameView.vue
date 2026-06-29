@@ -3,6 +3,8 @@ import { ref } from "vue";
 import Board from "../components/Board.vue";
 import PlayersPanel from "../components/PlayersPanel.vue";
 import ActionsPanel from "../components/ActionsPanel.vue";
+import BuyModal from "../components/modals/BuyModal.vue";
+import CardModal from "../components/modals/CardModal.vue";
 import { BOARD } from "../data/board";
 import type { Cell as CellType } from "../types/cell";
 import type { Player } from "../types/player";
@@ -72,6 +74,11 @@ const canRoll = ref(true);
 const canBuy = ref(true);
 const canEndTurn = ref(true);
 
+const showBuyModal = ref(false);
+const showCardModal = ref(false);
+const cardText = ref("");
+const isTreasuryCard = ref(false);
+
 function onCellClick(cell: CellType) {
   console.log("Clicked cell:", cell);
 }
@@ -80,7 +87,11 @@ function onRoll() {
   console.log("🎲 Roll clicked");
 }
 function onBuy() {
-  console.log("🏠 Buy clicked");
+  showBuyModal.value = true;
+}
+function onConfirmBuy() {
+  showBuyModal.value = false;
+  console.log("✅ Bought");
 }
 function onEndTurn() {
   console.log("✅ End turn");
@@ -106,6 +117,33 @@ function onEndTurn() {
         @end-turn="onEndTurn"
       />
     </aside>
+
+    <BuyModal
+      :show="showBuyModal"
+      :cell="{
+        id: 1,
+        name: 'Старая дорога',
+        type: 'PROPERTY',
+        group: 'brown',
+        color: '#8B4513',
+        price: 60,
+        rent: 2,
+        housePrice: 50,
+        mortgageValue: 30,
+        houses: 0,
+        isMortgaged: false,
+      }"
+      :money="1500"
+      @close="showBuyModal = false"
+      @confirm="onConfirmBuy"
+    />
+
+    <CardModal
+      :show="showCardModal"
+      :card-text="cardText"
+      :is-treasury="isTreasuryCard"
+      @close="showCardModal = false"
+    />
   </div>
 </template>
 

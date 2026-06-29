@@ -166,6 +166,24 @@ export const useGameStore = defineStore("game", () => {
     state.value.phase = "BUILDING";
   }
 
+  function payJailFine() {
+    const player = currentPlayer.value;
+    if (!player || !player.inJail) return;
+    player.money = Math.max(0, player.money - 50);
+    player.inJail = false;
+    player.jailTurns = 0;
+    state.value.phase = "ROLLING";
+  }
+
+  function useJailCard() {
+    const player = currentPlayer.value;
+    if (!player || !player.inJail || player.jailCards === 0) return;
+    player.jailCards -= 1;
+    player.inJail = false;
+    player.jailTurns = 0;
+    state.value.phase = "ROLLING";
+  }
+
   const lastDrawnCard = ref<Card | null>(null);
 
   function drawChanceCard(): Card {
@@ -208,6 +226,10 @@ export const useGameStore = defineStore("game", () => {
     }
   }
 
+  function setPhase(phase: Phase) {
+    state.value.phase = phase;
+  }
+
   return {
     state,
     currentPlayer,
@@ -219,6 +241,9 @@ export const useGameStore = defineStore("game", () => {
     sendToJail,
     buyProperty,
     declineBuy,
+    payJailFine,
+    useJailCard,
+    setPhase,
     applyCardEffect,
     drawChanceCard,
     drawTreasuryCard,

@@ -7,6 +7,7 @@ import ActionsPanel from "../components/ActionsPanel.vue";
 import CellTooltip from "../components/CellTooltip.vue";
 import BuyModal from "../components/modals/BuyModal.vue";
 import CardModal from "../components/modals/CardModal.vue";
+import JailModal from "../components/modals/JailModal.vue";
 import { useGameStore } from "../stores/game";
 import type { Cell } from "../types/cell";
 import { drawCard } from "../data/cards";
@@ -29,12 +30,16 @@ const showCardModal = ref(false);
 const cardText = ref("");
 const isTreasuryCard = ref(false);
 
+const showJailModal = ref(false);
+
 const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
 
 const currentCell = computed<Cell | null>(() => game.currentCell);
 
-const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
+const cellOwner = computed(() =>
+  players.value.find((p) => p.id === currentCell.value?.ownerId),
+);
 
 function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
   hoveredCell.value = payload.cell;
@@ -52,6 +57,31 @@ async function onRoll() {
   diceValues.value = [Math.ceil(Math.random() * 6), Math.ceil(Math.random() * 6)];
   diceRolling.value = false;
 }
+
+watch(
+  () => game.state.phase,
+  (newPhase) => {
+    if (newPhase === "JAIL_DECISION") showJailModal.value = true;
+    else showJailModal.value = false;
+  },
+);
+
+function onPayJailFine() {
+  game.payJailFine();
+  showJailModal.value = false;
+}
+
+function onUseJailCard() {
+  game.useJailCard();
+  showJailModal.value = false;
+}
+
+function onTryDouble() {
+  showJailModal.value = false;
+  game.setPhase("ROLLING");
+  game.rollAndMove();
+}
+
 watch(
   () => game.currentPlayer?.position,
   (newPos, oldPos) => {
@@ -128,7 +158,22 @@ function onEndTurn() {
       @close="showCardModal = false"
     />
 
-    <CellTooltip :cell="hoveredCell" :owner="cellOwner" :x="tooltipPos.x" :y="tooltipPos.y" />
+    <JailModal
+      :show="showJailModal"
+      :jail-cards="game.currentPlayer?.jailCards || 0"
+      :money="game.currentPlayer?.money || 0"
+      @pay="onPayJailFine"
+      @use-card="onUseJailCard"
+      @try-double="onTryDouble"
+      @close="showJailModal = false"
+    />
+
+    <CellTooltip
+      :cell="hoveredCell"
+      :owner="cellOwner"
+      :x="tooltipPos.x"
+      :y="tooltipPos.y"
+    />
   </div>
 </template>
 

@@ -37,9 +37,7 @@ const tooltipPos = ref({ x: 0, y: 0 });
 
 const currentCell = computed<Cell | null>(() => game.currentCell);
 
-const cellOwner = computed(() =>
-  players.value.find((p) => p.id === currentCell.value?.ownerId),
-);
+const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
 
 function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
   hoveredCell.value = payload.cell;
@@ -107,6 +105,13 @@ watch(
         player.money -= cell.taxAmount;
       } else if (cell.type === "GOTO_JAIL") {
         game.sendToJail();
+      } else if (
+        (cell.type === "PROPERTY" || cell.type === "RAILROAD" || cell.type === "UTILITY") &&
+        cell.ownerId &&
+        cell.ownerId !== player.id
+      ) {
+        const rent = game.calculateRent(cell, cell.ownerId);
+        if (rent > 0) game.payRent(cell.ownerId, rent);
       }
     }, 600);
   },
@@ -168,12 +173,7 @@ function onEndTurn() {
       @close="showJailModal = false"
     />
 
-    <CellTooltip
-      :cell="hoveredCell"
-      :owner="cellOwner"
-      :x="tooltipPos.x"
-      :y="tooltipPos.y"
-    />
+    <CellTooltip :cell="hoveredCell" :owner="cellOwner" :x="tooltipPos.x" :y="tooltipPos.y" />
   </div>
 </template>
 

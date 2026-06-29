@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import type { GameState, Phase } from "../types/game";
 import type { Player } from "../types/player";
+import type { Cell } from "../types/cell";
 import { BOARD } from "../data/board";
 import { DEFAULT_SETTINGS } from "../types/game";
 import { rollDice } from "../composables/useDice";
@@ -184,6 +185,89 @@ export const useGameStore = defineStore("game", () => {
     state.value.phase = "ROLLING";
   }
 
+  function ownsMonopoly(cell: Cell, player: Player): boolean {
+    if (!cell.group) return false;
+    const groupCells = state.value.board.filter((c) => c.group === cell.group);
+    return groupCells.every((c) => c.ownerId === player.id);
+  }
+
+  function canBuildHouse(cellId: number): boolean {
+    const player = currentPlayer.value;
+    if (!player) return false;
+    const cell = state.value.board[cellId];
+    if (!cell) return false;
+    if (cell.ownerId !== player.id) return false;
+    if (!ownsMonopoly(cell, player)) return false;
+    if (cell.houses >= 4) return false;
+    if (cell.housePrice === undefined || player.money < cell.housePrice) return false;
+
+    // Правило равномерного строительства
+    if (cell.group) {
+      const groupCells = state.value.board.filter((c) => c.group === cell.group);
+      const minHouses = Math.min(...groupCells.map((c) => c.houses));
+      if (cell.houses > minHouses) return false;
+    }
+    return true;
+  }
+
+  function buildHouse(cellId: number): boolean {
+    const player = currentPlayer.value;
+    if (!player) return false;
+    if (!canBuildHouse(cellId)) return false;
+    const cell = state.value.board[cellId];
+    if (!cell || cell.housePrice === undefined) return false;
+    player.money -= cell.housePrice;
+    const next: 0 | 1 | 2 | 3 | 4 | 5 =
+      cell.houses < 5 ? ((cell.houses + 1) as 0 | 1 | 2 | 3 | 4 | 5) : 5;
+    cell.houses = next;
+    return true;
+  }
+
+  function calculateRent(cell: Cell, ownerId: string, diceRoll?: [number, number]): number {
+    if (cell.isMortgaged) return 0;
+    const owner = state.value.players.find((p) => p.id === ownerId);
+    if (!owner) return 0;
+
+    if (cell.type === "PROPERTY") {
+      if (cell.houses === 0 && ownsMonopoly(cell, owner)) {
+        return (cell.rent ?? 0) * 2;
+      }
+      if (cell.houses > 0 && cell.rentTable && cell.rentTable[cell.houses] !== undefined) {
+        return cell.rentTable[cell.houses]!;
+      }
+      return cell.rent ?? 0;
+    }
+
+    if (cell.type === "RAILROAD") {
+      const rrCount = owner.properties.filter((pid) => {
+        const c = state.value.board[pid];
+        return c && c.type === "RAILROAD";
+      }).length;
+      return [25, 50, 100, 200][rrCount - 1] ?? 25;
+    }
+
+    if (cell.type === "UTILITY") {
+      const utilCount = owner.properties.filter((pid) => {
+        const c = state.value.board[pid];
+        return c && c.type === "UTILITY";
+      }).length;
+      const mult = utilCount === 2 ? 10 : 4;
+      return diceRoll ? mult * (diceRoll[0] + diceRoll[1]) : 0;
+    }
+
+    return 0;
+  }
+
+  function payRent(toPlayerId: string, amount: number): boolean {
+    const payer = currentPlayer.value;
+    const receiver = state.value.players.find((p) => p.id === toPlayerId);
+    if (!payer || !receiver) return false;
+    if (amount <= 0) return true;
+    payer.money -= amount;
+    receiver.money += amount;
+    return true;
+  }
+
   const lastDrawnCard = ref<Card | null>(null);
 
   function drawChanceCard(): Card {
@@ -243,6 +327,11 @@ export const useGameStore = defineStore("game", () => {
     declineBuy,
     payJailFine,
     useJailCard,
+    ownsMonopoly,
+    canBuildHouse,
+    buildHouse,
+    calculateRent,
+    payRent,
     setPhase,
     applyCardEffect,
     drawChanceCard,

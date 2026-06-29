@@ -19,11 +19,9 @@ const players = computed(() => game.state.players);
 const cells = computed(() => game.state.board);
 const currentPlayerId = computed(() => game.currentPlayer?.id || "");
 
-// Локальное состояние UI (будет реализовано в следующих шагах)
-
-const _diceValues = ref<[number, number]>([1, 1]);
-
-const _diceRolling = ref(false);
+// Локальное состояние UI
+const diceValues = ref<[number, number]>([1, 1]);
+const diceRolling = ref(false);
 
 const showBuyModal = ref(false);
 const showCardModal = ref(false);
@@ -45,8 +43,13 @@ function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
   };
 }
 
-function onRoll() {
-  console.log("🎲 Roll");
+async function onRoll() {
+  if (game.state.phase !== "ROLLING") return;
+  diceRolling.value = true;
+  await new Promise((r) => setTimeout(r, 800));
+  await game.rollAndMove();
+  diceValues.value = [Math.ceil(Math.random() * 6), Math.ceil(Math.random() * 6)];
+  diceRolling.value = false;
 }
 function onBuy() {
   showBuyModal.value = true;

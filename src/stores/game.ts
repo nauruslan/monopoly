@@ -4,6 +4,7 @@ import type { GameState, Phase } from "../types/game";
 import type { Player } from "../types/player";
 import { BOARD } from "../data/board";
 import { DEFAULT_SETTINGS } from "../types/game";
+import { rollDice } from "../composables/useDice";
 
 export const useGameStore = defineStore("game", () => {
   const state = ref<GameState>({
@@ -81,11 +82,77 @@ export const useGameStore = defineStore("game", () => {
     state.value.lastActivityAt = new Date().toISOString();
   }
 
+  async function rollAndMove() {
+    if (!currentPlayer.value || state.value.phase !== "ROLLING") return;
+
+    const [d1, d2] = rollDice();
+    const steps = d1 + d2;
+    const isDouble = d1 === d2;
+    const player = currentPlayer.value;
+
+    // Логика тюрьмы
+    if (player.inJail) {
+      if (isDouble) {
+        player.inJail = false;
+        player.jailTurns = 0;
+      } else {
+        player.jailTurns += 1;
+        if (player.jailTurns >= 3) {
+          player.money = Math.max(0, player.money - 50);
+          player.inJail = false;
+          player.jailTurns = 0;
+        } else {
+          endTurn();
+          return;
+        }
+      }
+    }
+
+    state.value.phase = "MOVING";
+
+    // Правило 3 дублей
+    if (isDouble) {
+      const currentDoubles = (state.value as any).consecutiveDoubles || 0;
+      const newDoubles = currentDoubles + 1;
+      (state.value as any).consecutiveDoubles = newDoubles;
+      if (newDoubles >= 3) {
+        sendToJail();
+        (state.value as any).consecutiveDoubles = 0;
+        return;
+      }
+    } else {
+      (state.value as any).consecutiveDoubles = 0;
+    }
+
+    // Анимированное движение
+    for (let i = 0; i < steps; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      player.position = (player.position + 1) % 40;
+      if (player.position === 0) {
+        player.money += DEFAULT_SETTINGS.goSalary;
+      }
+    }
+
+    state.value.phase = "BUY_DECISION";
+  }
+
+  function sendToJail() {
+    const player = currentPlayer.value;
+    if (!player) return;
+    player.position = 10;
+    player.inJail = true;
+    player.jailTurns = 0;
+    (state.value as any).consecutiveDoubles = 0;
+    state.value.phase = "JAIL_DECISION";
+  }
+
   return {
     state,
     currentPlayer,
     currentCell,
     initGame,
     endTurn,
+    rollAndMove,
+    sendToJail,
   };
 });

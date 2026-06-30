@@ -21,27 +21,21 @@ export default [
     ],
   },
 
-  // 2. Базовые JS-правила
+  // 2. Базовые правила JS
   js.configs.recommended,
 
-  // 3. Правила TypeScript
+  // 3. Правила TypeScript (общие для клиента и сервера)
   ...tseslint.configs.recommended,
 
-  // 4. Правила Vue (для .vue файлов)
-  ...vue.configs["flat/recommended"],
-
-  // 5. Главный блок конфигурации для всего монорепо
+  // 4. Главный блок — общие правила для всего монорепо
   {
     files: ["**/*.{js,mjs,cjs,ts,vue}"],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
-      parser: vueParser,
       parserOptions: {
-        parser: tseslint.parser,
         ecmaVersion: 2022,
         sourceType: "module",
-        extraFileExtensions: [".vue"],
         // Явно указываем корень для парсера, чтобы он корректно резолвил
         // алиасы (@monopoly/shared) из обоих workspace-пакетов.
         tsconfigRootDir: __dirname,
@@ -53,32 +47,18 @@ export default [
         ],
       },
       globals: {
-        // Браузерные глобальные переменные
-        window: "readonly",
-        document: "readonly",
+        // Общие для всего проекта
         console: "readonly",
         setTimeout: "readonly",
         clearTimeout: "readonly",
         setInterval: "readonly",
         clearInterval: "readonly",
-        localStorage: "readonly",
-        sessionStorage: "readonly",
-        fetch: "readonly",
-        URL: "readonly",
-        URLSearchParams: "readonly",
-        HTMLElement: "readonly",
-        HTMLInputElement: "readonly",
-        MouseEvent: "readonly",
-        // Node-глобалы (используются в apps/server)
         process: "readonly",
         Buffer: "readonly",
-        __dirname: "readonly",
-        __filename: "readonly",
-        global: "readonly",
+        URL: "readonly",
       },
     },
     rules: {
-      // TypeScript-специфика
       "@typescript-eslint/no-unused-vars": [
         "warn",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
@@ -88,16 +68,8 @@ export default [
         "error",
         { prefer: "type-imports", fixStyle: "inline-type-imports" },
       ],
-
-      // Vue
-      "vue/multi-word-component-names": "off",
-      "vue/no-v-html": "warn",
-      "vue/html-self-closing": [
-        "error",
-        { html: { void: "always", normal: "always", component: "always" } },
-      ],
-
-      // Общие правила чистоты
+      "@typescript-eslint/explicit-function-return-type": "off",
+      "@typescript-eslint/explicit-module-boundary-types": "off",
       "no-console": ["warn", { allow: ["warn", "error", "info"] }],
       "no-debugger": "warn",
       "no-var": "error",
@@ -106,7 +78,59 @@ export default [
     },
   },
 
-  // 6. Спец-блок для тестов
+  // 5. Vue-специфичные правила ТОЛЬКО для клиента
+  {
+    files: ["apps/client/**/*.{ts,vue}"],
+    plugins: { vue },
+    languageOptions: {
+      parser: vueParser,
+      parserOptions: {
+        parser: tseslint.parser,
+        extraFileExtensions: [".vue"],
+        tsconfigRootDir: __dirname,
+        project: [
+          "./apps/client/tsconfig.app.json",
+          "./apps/client/tsconfig.node.json",
+          "./packages/shared/tsconfig.json",
+        ],
+      },
+      globals: {
+        // Браузерные
+        window: "readonly",
+        document: "readonly",
+        localStorage: "readonly",
+        sessionStorage: "readonly",
+        fetch: "readonly",
+        HTMLElement: "readonly",
+        HTMLInputElement: "readonly",
+        MouseEvent: "readonly",
+      },
+    },
+    rules: {
+      ...vue.configs["flat/recommended"].rules,
+      "vue/multi-word-component-names": "off",
+      "vue/no-v-html": "warn",
+      "vue/html-self-closing": [
+        "error",
+        { html: { void: "always", normal: "always", component: "always" } },
+      ],
+    },
+  },
+
+  // 6. NestJS-специфичные правила ТОЛЬКО для сервера
+  {
+    files: ["apps/server/**/*.ts"],
+    rules: {
+      // Декораторы NestJS иногда требуют any
+      "@typescript-eslint/no-explicit-any": "off",
+      // process.env доступен только на сервере
+      "no-process-env": "off",
+      // Можно использовать console.log для дебага на старте
+      "no-console": "off",
+    },
+  },
+
+  // 7. Тесты
   {
     files: ["**/*.{test,spec}.ts", "**/test/**/*"],
     rules: {
@@ -115,7 +139,7 @@ export default [
     },
   },
 
-  // 7. Prettier
+  // 8. Prettier — ВСЕГДА последним!
   prettier,
   {
     plugins: { prettier: prettierPlugin },

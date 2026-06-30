@@ -1,15 +1,32 @@
-// Временная точка входа серверной части.
-// В следующих шагах сюда добавятся: NestFactory, JWT-аутентификация,
-// Drizzle-ORM и WebSocket-гейтвеи для игровой логики.
+import { NestFactory } from "@nestjs/core";
+import { ValidationPipe, Logger } from "@nestjs/common";
+import { AppModule } from "./app.module";
 
-import { BOARD } from "@monopoly/shared";
+async function bootstrap() {
+  const logger = new Logger("Bootstrap");
+  const app = await NestFactory.create(AppModule);
 
-function main(): void {
-  // eslint-disable-next-line no-console
-  console.info(
-    `[server] bootstrap ok; board has ${BOARD.length} cells. ` +
-      `Real implementation comes in Step 22+.`,
+  // CORS — позволяет фронтенду на http://localhost:5173 обращаться к API
+  app.enableCors({
+    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    credentials: true,
+  });
+
+  // Глобальный ValidationPipe — валидирует все DTO
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
   );
+
+  const port = parseInt(process.env.PORT || "3000", 10);
+  await app.listen(port);
+  logger.log(`🚀 Сервер запущен на http://localhost:${port}`);
 }
 
-main();
+bootstrap().catch((err) => {
+  console.error("❌ Ошибка запуска:", err);
+  process.exit(1);
+});

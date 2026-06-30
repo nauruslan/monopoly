@@ -39,6 +39,12 @@ export interface GameState {
   round: number;
   players: Player[];
   board: Cell[];
+  /**
+   * Зерно (seed) для детерминированного RNG.
+   * Генерируется на сервере при создании партии через crypto.randomBytes(16)
+   * и сохраняется в games.rng_seed для последующего replay.
+   */
+  seed: string;
   winnerId?: string;
   createdAt: string;
   lastActivityAt: string;

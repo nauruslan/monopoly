@@ -6,6 +6,11 @@ import { rollDice } from "../composables/useDice";
 import { decideBotAction } from "../composables/botAI";
 import type { Player as PlayerType } from "@monopoly/shared";
 
+// Временный placeholder на стороне клиента. Когда сервер создаёт партию,
+// он генерирует криптослучайный seed и
+// сохраняет его в stateSnapshot.seed и в games.rng_seed.
+const PLACEHOLDER_SEED = "client-init";
+
 export const useGameStore = defineStore("game", () => {
   const state = ref<GameState>({
     id: "",
@@ -16,6 +21,7 @@ export const useGameStore = defineStore("game", () => {
     round: 1,
     players: [],
     board: BOARD.map((c) => ({ ...c })),
+    seed: PLACEHOLDER_SEED,
     createdAt: new Date().toISOString(),
     lastActivityAt: new Date().toISOString(),
   });

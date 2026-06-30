@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "gp_game_seat_unique_idx" ON "game_players" USING btree ("game_id","seat");

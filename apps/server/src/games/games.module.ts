@@ -5,6 +5,8 @@ import { JailHandlerService } from "./handlers/jail-handler.service";
 import { CardHandlerService } from "./handlers/card-handler.service";
 import { RentCalculator } from "./handlers/rent-calculator";
 import { BankruptcyService } from "./handlers/bankruptcy.service";
+import { GameGateway } from "../gateways/game.gateway";
+import { AuthModule } from "../auth/auth.module";
 
 /**
  * GamesModule — игровое ядро сервера.
@@ -14,10 +16,16 @@ import { BankruptcyService } from "./handlers/bankruptcy.service";
  * они уже зарегистрированы в `AppModule` как глобальные провайдеры
  * (см. `app.module.ts`).
  *
- * Экспортируем `GamesService`, чтобы будущий WebSocket Gateway
- * (Шаг 27) мог его инжектить.
+ * Содержит WebSocket-шлюз `GameGateway` (Шаг 27), которому нужны
+ * `GamesService` (для применения действий) и `AuthService` (для
+ * верификации JWT при подключении). Оба берём через `imports: [AuthModule]`
+ * (для `AuthService`) и текущий модуль (для `GamesService`).
+ *
+ * Экспортируем `GamesService` и `GameGateway`, чтобы другие модули
+ * могли ими пользоваться.
  */
 @Module({
+  imports: [AuthModule],
   providers: [
     GamesService,
     GameInitializerService,
@@ -25,7 +33,8 @@ import { BankruptcyService } from "./handlers/bankruptcy.service";
     CardHandlerService,
     RentCalculator,
     BankruptcyService,
+    GameGateway,
   ],
-  exports: [GamesService],
+  exports: [GamesService, GameGateway],
 })
 export class GamesModule {}

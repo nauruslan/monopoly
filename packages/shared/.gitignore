@@ -1,0 +1,10 @@
+# Скомпилированные TypeScript файлы, которые случайно могут появиться
+# в src/ при локальной сборке shared-пакета. Их быть не должно —
+# main/exports в package.json указывают напрямую на src/index.ts.
+*.js
+*.js.map
+
+# dist и кэши
+dist/
+node_modules/
+*.tsbuildinfo

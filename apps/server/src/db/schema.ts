@@ -10,7 +10,8 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-const createdAt = () => timestamp({ mode: "date", withTimezone: true }).notNull().defaultNow();
+const createdAt = () =>
+  timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow();
 
 /**
  * users — таблица пользователей

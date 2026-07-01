@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "tsc && tsc-alias",
-    "dev": "ts-node-dev -r tsconfig-paths/register src/main.ts",
+    "dev": "tsx watch -r tsconfig-paths/register src/main.ts",
+    "dev:once": "tsx -r tsconfig-paths/register src/main.ts",
     "start": "node dist/apps/server/src/main.js",
     "test": "jest",
     "test:cov": "jest --coverage",
@@ -62,6 +63,7 @@
     "ts-node-dev": "^2.0.0",
     "tsc-alias": "^1.8.17",
     "tsconfig-paths": "^4.2.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.6.2",
     "typescript-eslint": "^8.62.0"
   }

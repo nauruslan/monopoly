@@ -40,6 +40,12 @@ export interface GameState {
   players: Player[];
   board: Cell[];
   /**
+   * Настройки текущей партии.
+   * Инициализируются в `GameInitializerService` и сохраняются в snapshot,
+   * чтобы при перезагрузке сцены правила не сбрасывались.
+   */
+  settings: GameSettings;
+  /**
    * Зерно (seed) для детерминированного RNG.
    * Генерируется на сервере при создании партии через crypto.randomBytes(16)
    * и сохраняется в games.rng_seed для последующего replay.

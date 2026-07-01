@@ -11,6 +11,9 @@ export type { Player, PlayerKind } from "./types/player";
 export type { GameState, GameSettings, Phase } from "./types/game";
 export { DEFAULT_SETTINGS } from "./types/game";
 
+// === Типы: действия ===
+export type { GameAction } from "./types/action";
+
 // === Данные: доска ===
 export { BOARD } from "./data/board";
 

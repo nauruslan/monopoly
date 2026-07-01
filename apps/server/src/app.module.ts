@@ -3,6 +3,7 @@ import { ConfigModule } from "@nestjs/config";
 import { AuthModule } from "./auth/auth.module";
 import { GamesModule } from "./games/games.module";
 import { GameRepository } from "./db/repositories/game.repository";
+import { DbService } from "./db/db.service";
 
 @Module({
   imports: [
@@ -13,7 +14,7 @@ import { GameRepository } from "./db/repositories/game.repository";
     AuthModule,
     GamesModule,
   ],
-  providers: [GameRepository],
-  exports: [GameRepository],
+  providers: [DbService, GameRepository],
+  exports: [DbService, GameRepository],
 })
 export class AppModule {}

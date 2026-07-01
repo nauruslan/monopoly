@@ -1,7 +1,7 @@
 import { Injectable, BadRequestException, ConflictException } from "@nestjs/common";
 import { randomBytes } from "node:crypto";
 import { eq, and, desc } from "drizzle-orm";
-import { db } from "../index";
+import { DbService } from "../db.service";
 import { games, gamePlayers } from "../schema";
 import type { GameState } from "@monopoly/shared";
 
@@ -14,6 +14,11 @@ function generateSeed(): string {
 
 @Injectable()
 export class GameRepository {
+  constructor(private readonly dbService: DbService) {}
+
+  private get db() {
+    return this.dbService.db;
+  }
   /**
    * Создать новую партию.
    * - Если в `state.seed` пришёл валидный seed от клиента/инициатора — используем его.
@@ -30,7 +35,7 @@ export class GameRepository {
 
     const stateWithSeed: GameState = { ...state, seed: finalSeed };
 
-    const [game] = await db
+    const [game] = await this.db
       .insert(games)
       .values({
         stateSnapshot: stateWithSeed,
@@ -43,12 +48,12 @@ export class GameRepository {
   }
 
   async findById(id: string) {
-    const [game] = await db.select().from(games).where(eq(games.id, id));
+    const [game] = await this.db.select().from(games).where(eq(games.id, id));
     return game;
   }
 
   async findActive() {
-    return db
+    return this.db
       .select()
       .from(games)
       .where(eq(games.status, "waiting"))
@@ -62,7 +67,7 @@ export class GameRepository {
     // обновить игру раньше нас — UPDATE не найдёт ни одной строки и
     // мы выбросим ConflictException. Это защищает от race condition
     // при одновременных обновлениях одного и того же стейта.
-    const [game] = await db
+    const [game] = await this.db
       .update(games)
       .set({
         stateSnapshot: snapshot,
@@ -86,7 +91,7 @@ export class GameRepository {
   }
 
   async addPlayer(gameId: string, playerId: string, seat: number, isBot = false) {
-    const [player] = await db
+    const [player] = await this.db
       .insert(gamePlayers)
       .values({
         gameId,

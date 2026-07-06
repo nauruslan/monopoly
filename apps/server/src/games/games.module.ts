@@ -14,9 +14,9 @@ import { AuthModule } from "../auth/auth.module";
  * Регистрирует оркестратор (`GamesService`) и все хендлеры отдельных
  * механик. `GameRepository` и `DbService` НЕ объявляем здесь повторно —
  * они уже зарегистрированы в `AppModule` как глобальные провайдеры
- * (см. `app.module.ts`).
+ * (`app.module.ts`).
  *
- * Содержит WebSocket-шлюз `GameGateway` (Шаг 27), которому нужны
+ * Содержит WebSocket-шлюз `GameGateway`, которому нужны
  * `GamesService` (для применения действий) и `AuthService` (для
  * верификации JWT при подключении). Оба берём через `imports: [AuthModule]`
  * (для `AuthService`) и текущий модуль (для `GamesService`).
@@ -35,6 +35,15 @@ import { AuthModule } from "../auth/auth.module";
     BankruptcyService,
     GameGateway,
   ],
-  exports: [GamesService, GameGateway],
+  exports: [
+    GamesService,
+    GameGateway,
+    // handler-ы экспортируем на случай будущих WS-команд (например,
+    // "списать ренту" вне хода игрока).
+    RentCalculator,
+    JailHandlerService,
+    CardHandlerService,
+    BankruptcyService,
+  ],
 })
 export class GamesModule {}

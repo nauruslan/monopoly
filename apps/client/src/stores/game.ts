@@ -419,9 +419,19 @@ export const useGameStore = defineStore("game", () => {
     socket.emit(
       "game:action",
       { gameId: gameId.value, action },
-      (response: { ok: boolean; error?: string }) => {
+      (response: {
+        ok: boolean;
+        data?: { state?: GameState; dice?: [number, number]; card?: Card | null };
+        error?: string;
+      }) => {
         if (!response.ok) {
           console.error("Action failed:", response.error);
+          return;
+        }
+        // Сервер может вернуть `card` (Шанс/Казна) — кладём его в
+        // `lastDrawnCard`, чтобы UI мог показать `CardModal`.
+        if (response.data?.card) {
+          lastDrawnCard.value = response.data.card;
         }
       },
     );

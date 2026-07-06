@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Board from "../components/Board.vue";
 import PlayersPanel from "../components/PlayersPanel.vue";
@@ -12,7 +12,6 @@ import { useAuthStore } from "../stores/auth";
 import { useGameStore } from "../stores/game";
 import { useSocket, disconnectSocket } from "../composables/useSocket";
 import type { Cell, GameAction } from "@monopoly/shared";
-import { drawCard } from "@monopoly/shared";
 
 const route = useRoute();
 const router = useRouter();
@@ -58,11 +57,6 @@ onMounted(() => {
   }
 });
 
-onUnmounted(() => {
-  // Не отключаем socket — он singleton, переиспользуется.
-  // Для logout используется disconnectSocket() отдельно.
-});
-
 function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
   hoveredCell.value = payload.cell;
   tooltipPos.value = {
@@ -72,21 +66,20 @@ function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
 }
 
 function dispatchAction(action: GameAction) {
-  // Локальный rollAndMove оставлен для анимации (UI/тесты Step29).
-  // Основной путь — отправка на сервер через WS.
+  // Сервер — единственный источник правды. Клиент только отправляет действие
+  // и обновляет state из broadcast `game:state`.
   game.sendAction(action);
 }
 
 async function onRoll() {
   if (game.state.phase !== "ROLLING") return;
   diceRolling.value = true;
-  await new Promise((r) => setTimeout(r, 800));
-  // Локальная анимация движения (UI), затем синхронизация с сервером.
-  await game.rollAndMove();
+  // Локальная анимация броска костей (UI). Реальные значения придут
+  // вместе с broadcast `game:state` от сервера.
   diceValues.value = [Math.ceil(Math.random() * 6), Math.ceil(Math.random() * 6)];
+  await new Promise((r) => setTimeout(r, 800));
   diceRolling.value = false;
-  const player = game.currentPlayer;
-  if (player) dispatchAction({ type: "ROLL_DICE" });
+  dispatchAction({ type: "ROLL_DICE" });
 }
 
 watch(
@@ -98,58 +91,42 @@ watch(
 );
 
 function onPayJailFine() {
-  game.payJailFine();
   showJailModal.value = false;
   dispatchAction({ type: "PAY_JAIL_FINE" });
 }
 
 function onUseJailCard() {
-  game.useJailCard();
   showJailModal.value = false;
   dispatchAction({ type: "USE_JAIL_CARD" });
 }
 
 function onTryDouble() {
   showJailModal.value = false;
-  game.setPhase("ROLLING");
-  game.rollAndMove();
   dispatchAction({ type: "ROLL_DICE" });
 }
 
+// Watch на смену позиции — нужен только для UI-анимации.
+// Реальная логика (рента, покупка, карточки) теперь применяется на сервере
+// и приходит в `game.state` через broadcast `game:state`.
 watch(
   () => game.currentPlayer?.position,
   (newPos, oldPos) => {
     if (newPos === oldPos) return;
-    const cell = game.currentCell;
-    const player = game.currentPlayer;
-    if (!cell || !player) return;
+    // Если сервер прислал новую позицию — фишка переместится
+    // автоматически за счёт реактивности Vue. Никаких локальных мутаций.
+    void newPos;
+  },
+);
 
-    setTimeout(() => {
-      if (cell.type === "CHANCE") {
-        const card = drawCard("chance");
-        game.applyCardEffect(card, player);
-        cardText.value = card.text;
-        isTreasuryCard.value = false;
-        showCardModal.value = true;
-      } else if (cell.type === "TREASURY") {
-        const card = drawCard("treasury");
-        game.applyCardEffect(card, player);
-        cardText.value = card.text;
-        isTreasuryCard.value = true;
-        showCardModal.value = true;
-      } else if (cell.type === "TAX" && cell.taxAmount) {
-        player.money -= cell.taxAmount;
-      } else if (cell.type === "GOTO_JAIL") {
-        game.sendToJail();
-      } else if (
-        (cell.type === "PROPERTY" || cell.type === "RAILROAD" || cell.type === "UTILITY") &&
-        cell.ownerId &&
-        cell.ownerId !== player.id
-      ) {
-        const rent = game.calculateRent(cell, cell.ownerId);
-        if (rent > 0) game.payRent(cell.ownerId, rent);
-      }
-    }, 600);
+// Watch на серверную карточку (Шанс/Казна) — открываем модалку.
+watch(
+  () => game.lastDrawnCard,
+  (card) => {
+    if (card) {
+      cardText.value = card.text;
+      isTreasuryCard.value = card.deck === "treasury";
+      showCardModal.value = true;
+    }
   },
 );
 
@@ -157,19 +134,15 @@ function onBuy() {
   showBuyModal.value = true;
 }
 function onConfirmBuy() {
-  if (game.buyProperty()) {
-    showBuyModal.value = false;
-    dispatchAction({ type: "BUY_PROPERTY" });
-  }
+  showBuyModal.value = false;
+  dispatchAction({ type: "BUY_PROPERTY" });
 }
 function onDeclineBuy() {
-  game.declineBuy();
   showBuyModal.value = false;
   dispatchAction({ type: "DECLINE_BUY" });
 }
 function onEndTurn() {
   console.log("✅ End turn");
-  game.endTurn();
   dispatchAction({ type: "END_TURN" });
 }
 

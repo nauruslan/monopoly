@@ -117,14 +117,21 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage("lobby:create")
   async onCreate(@ConnectedSocket() client: Socket, @MessageBody() req: { playerNames: string[] }) {
     const userId = client.data.userId as string;
-    const isGuest = client.data.isGuest as boolean;
-
-    const result = await this.games.createGame(req.playerNames, isGuest ? undefined : userId);
+    // ВАЖНО: `userId` нужен и для гостя, и для зарегистрированного —
+    // именно по нему `GamesService` строит маппинг `userId → playerId`,
+    // чтобы `onAction` мог определить, чьё действие пришло.
+    // Гость — это полноценная запись в `users` (AuthService.createGuest),
+    // у неё есть валидный uuid, который можно класть в `games.host_id`.
+    const result = await this.games.createGame(req.playerNames, userId);
 
     client.join(`game:${result.gameId}`);
     client.data.gameId = result.gameId;
 
     this.logger.log(`Game created via WS: ${result.gameId}`);
+
+    // Рассылаем стейт всем в комнате (на будущее — когда другие игроки
+    // будут подключаться через lobby:join, они сразу увидят state).
+    this.server.to(`game:${result.gameId}`).emit("game:state", result.state);
 
     return { ok: true, data: result };
   }
@@ -164,22 +171,20 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const state = await this.games.getGameState(req.gameId);
       if (!state) return { ok: false, error: "Партия не найдена" };
 
-      // ВАЖНО: НЕ ищем первого human — у нас multiplayer, и все подключённые
-      // игроки имеют kind === "human". Ищем того, чей userId совпадает.
-      // В простой версии — сравниваем с player.userId (если добавим это поле),
-      // либо ищем в gamePlayers по userId.
-      const player = state.players.find(
-        (p) => (p as unknown as { userId?: string }).userId === userId,
-      );
-      if (!player) {
+      // Резолвим `player.id` через маппинг `userId → playerId`, который
+      // `GamesService` наполняет в `createGame()`. В shared-типе `Player`
+      // нет поля `userId`, поэтому держим маппинг отдельно.
+      // это заменится на полноценную таблицу участников.
+      const playerId = this.games.resolvePlayerId(req.gameId, userId);
+      if (!playerId) {
         return { ok: false, error: "Это не ваш игрок в этой партии" };
       }
 
-      const result = await this.games.applyAction(req.gameId, player.id, req.action);
+      const result = await this.games.applyAction(req.gameId, playerId, req.action);
 
       this.server.to(`game:${req.gameId}`).emit("game:state", result.state);
 
-      return { ok: true, data: result };
+      return { ok: true, data: { state: result.state, dice: result.dice, card: result.card } };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Action error: ${message}`);

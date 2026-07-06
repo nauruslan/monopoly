@@ -1,4 +1,11 @@
-import { Injectable, Logger, ForbiddenException, NotFoundException } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  ForbiddenException,
+  NotFoundException,
+  Inject,
+  forwardRef,
+} from "@nestjs/common";
 import type { GameState, GameAction } from "@monopoly/shared";
 import { GameRepository } from "../db/repositories/game.repository";
 import { GameInitializerService } from "./game-initializer.service";
@@ -18,8 +25,6 @@ import { GameInitializerService } from "./game-initializer.service";
  *
  * Кеш `activeGames` — простой `Map` в памяти процесса. При перезапуске
  * сервера он восстанавливается через `getGameState` (lazy load из БД).
- * Если в будущем переедем на Redis — заменим на `cache-manager-redis-yet@^5`,
- * совместимый с `@nestjs/common@11` из коробки.
  */
 @Injectable()
 export class GamesService {
@@ -27,9 +32,17 @@ export class GamesService {
   private activeGames = new Map<string, GameState>();
 
   constructor(
-    private readonly repo: GameRepository,
+    @Inject(forwardRef(() => GameRepository)) private readonly repo: GameRepository,
+    @Inject(forwardRef(() => GameInitializerService))
     private readonly initializer: GameInitializerService,
-  ) {}
+  ) {
+    if (!this.initializer) {
+      console.error("[GamesService] GameInitializerService не заинжектирован!");
+    }
+    if (!this.repo) {
+      console.error("[GamesService] GameRepository не заинжектирован!");
+    }
+  }
 
   /**
    * Создать новую партию.
@@ -118,7 +131,7 @@ export class GamesService {
 
     switch (action.type) {
       case "ROLL_DICE":
-        // TODO (Шаг 27/28): бросок кубиков + анимированное движение.
+        // TODO : бросок кубиков + анимированное движение.
         break;
       case "BUY_PROPERTY":
         // TODO: логика покупки.

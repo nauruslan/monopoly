@@ -1,10 +1,14 @@
-import { Body, Controller, Post } from "@nestjs/common";
+import { Body, Controller, Post, Inject, forwardRef } from "@nestjs/common";
 import { AuthService, type AuthTokens } from "./auth.service";
 import { RegisterDto, LoginDto, GuestDto } from "./dto";
 
 @Controller("auth")
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(@Inject(forwardRef(() => AuthService)) private readonly auth: AuthService) {
+    if (!this.auth) {
+      console.error("[AuthController] AuthService не заинжектирован!");
+    }
+  }
 
   @Post("register")
   async register(@Body() dto: RegisterDto): Promise<AuthTokens> {

@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "build": "tsc && tsc-alias",
-    "dev": "tsx watch -r tsconfig-paths/register src/main.ts",
-    "dev:once": "tsx -r tsconfig-paths/register src/main.ts",
+    "dev": "tsx watch --tsconfig tsconfig.json -r tsconfig-paths/register src/main.ts",
+    "dev:once": "tsx --tsconfig tsconfig.json -r tsconfig-paths/register src/main.ts",
     "start": "node dist/apps/server/src/main.js",
+    "dev:swc": "nest start --watch",
+    "start:swc": "node -r tsconfig-paths/register dist/apps/server/src/main.js",
     "test": "jest",
     "test:cov": "jest --coverage",
     "typecheck": "tsc --noEmit",

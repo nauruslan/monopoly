@@ -5,6 +5,8 @@ import { BOARD, DEFAULT_SETTINGS, drawCard } from "@monopoly/shared";
 import { rollDice } from "../composables/useDice";
 import { decideBotAction } from "../composables/botAI";
 import type { Player as PlayerType } from "@monopoly/shared";
+import { getSocket } from "../composables/useSocket";
+import type { GameAction } from "@monopoly/shared";
 
 // Временный placeholder на стороне клиента. Когда сервер создаёт партию,
 // он генерирует криптослучайный seed и
@@ -25,6 +27,13 @@ export const useGameStore = defineStore("game", () => {
     createdAt: new Date().toISOString(),
     lastActivityAt: new Date().toISOString(),
   });
+
+  // ============ WS-STATE ============
+  // Дополнение к существующему GameStore для синхронизации с сервером
+  // Локальная логика ниже НЕ заменяется.
+  const gameId = ref<string>("");
+  const isConnected = ref(false);
+  const socketError = ref<string | null>(null);
 
   const currentPlayer = computed<Player | null>(
     () => state.value.players[state.value.currentPlayerIndex] || null,
@@ -341,8 +350,88 @@ export const useGameStore = defineStore("game", () => {
     state.value.phase = phase;
   }
 
+  // ============ WS-ACTIONS ============
+  // Эти методы работают ПАРАЛЛЕЛЬНО
+  // и подключают клиента к серверу через socket.io.
+
+  function connectAndJoin(gId: string) {
+    gameId.value = gId;
+    const socket = getSocket();
+    if (!socket) {
+      console.error("Socket not initialized. Call useSocket(token) first.");
+      return;
+    }
+
+    socket.on("game:state", (newState: GameState) => {
+      state.value = newState;
+    });
+    socket.on("lobby:update", () => {
+      /* обновление списка игроков */
+    });
+    socket.on("game:error", (e: { message: string }) => {
+      socketError.value = e.message;
+    });
+
+    socket.emit(
+      "lobby:join",
+      { gameId: gId },
+      (response: { ok: boolean; data?: { state: GameState }; error?: string }) => {
+        if (response.ok && response.data) {
+          state.value = response.data.state;
+          isConnected.value = true;
+        } else {
+          socketError.value = response.error ?? "Join failed";
+        }
+      },
+    );
+  }
+
+  function createGameOnServer(playerNames: string[]) {
+    const socket = getSocket();
+    if (!socket) return Promise.reject(new Error("No socket"));
+
+    return new Promise<{ gameId: string; state: GameState }>((resolve, reject) => {
+      socket.emit(
+        "lobby:create",
+        { playerNames },
+        (response: {
+          ok: boolean;
+          data?: { gameId: string; state: GameState };
+          error?: string;
+        }) => {
+          if (response.ok && response.data) {
+            state.value = response.data.state;
+            gameId.value = response.data.gameId;
+            isConnected.value = true;
+            resolve(response.data);
+          } else {
+            reject(new Error(response.error ?? "Create failed"));
+          }
+        },
+      );
+    });
+  }
+
+  function sendAction(action: GameAction) {
+    const socket = getSocket();
+    if (!socket || !gameId.value) return;
+
+    socket.emit(
+      "game:action",
+      { gameId: gameId.value, action },
+      (response: { ok: boolean; error?: string }) => {
+        if (!response.ok) {
+          console.error("Action failed:", response.error);
+        }
+      },
+    );
+  }
+
   return {
     state,
+    gameId,
+    isConnected,
+    socketError,
     currentPlayer,
     currentCell,
     lastDrawnCard,
@@ -364,5 +453,8 @@ export const useGameStore = defineStore("game", () => {
     drawChanceCard,
     drawTreasuryCard,
     drawFromDeck,
+    connectAndJoin,
+    createGameOnServer,
+    sendAction,
   };
 });

@@ -1,3 +1,4 @@
+import { Inject, forwardRef } from "@nestjs/common";
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -47,9 +48,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private userSockets = new Map<string, Socket>();
 
   constructor(
-    private readonly games: GamesService,
-    private readonly auth: AuthService,
-  ) {}
+    @Inject(forwardRef(() => GamesService)) private readonly games: GamesService,
+    @Inject(forwardRef(() => AuthService)) private readonly auth: AuthService,
+  ) {
+    if (!this.auth) {
+      console.error("[GameGateway] AuthService не заинжектирован!");
+    }
+    if (!this.games) {
+      console.error("[GameGateway] GamesService не заинжектирован!");
+    }
+  }
 
   /**
    * Обработка нового подключения

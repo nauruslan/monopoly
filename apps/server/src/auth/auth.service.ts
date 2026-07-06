@@ -1,4 +1,10 @@
-import { Injectable, UnauthorizedException, ConflictException } from "@nestjs/common";
+import {
+  Injectable,
+  UnauthorizedException,
+  ConflictException,
+  Inject,
+  forwardRef,
+} from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import bcrypt from "bcrypt";
 import { randomUUID } from "crypto";
@@ -17,9 +23,13 @@ export class AuthService {
   private static readonly BCRYPT_ROUNDS = 12;
 
   constructor(
-    private readonly users: UserRepository,
-    private readonly jwt: JwtService,
-  ) {}
+    @Inject(forwardRef(() => UserRepository)) private readonly users: UserRepository,
+    @Inject(forwardRef(() => JwtService)) private readonly jwt: JwtService,
+  ) {
+    if (!this.users) {
+      console.error("[AuthService] UserRepository не заинжектирован!");
+    }
+  }
 
   async register(dto: RegisterDto): Promise<AuthTokens> {
     const existing = await this.users.findByEmail(dto.email);

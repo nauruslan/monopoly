@@ -1,11 +1,15 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Inject, forwardRef } from "@nestjs/common";
 import { eq } from "drizzle-orm";
 import { DbService } from "../db.service";
 import { users, type DbUser } from "../schema";
 
 @Injectable()
 export class UserRepository {
-  constructor(private readonly dbService: DbService) {}
+  constructor(@Inject(forwardRef(() => DbService)) private readonly dbService: DbService) {
+    if (!this.dbService) {
+      console.error("[UserRepository] DbService не заинжектирован!");
+    }
+  }
 
   private get db() {
     return this.dbService.db;

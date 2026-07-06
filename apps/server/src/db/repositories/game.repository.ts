@@ -1,4 +1,10 @@
-import { Injectable, BadRequestException, ConflictException } from "@nestjs/common";
+import {
+  Injectable,
+  BadRequestException,
+  ConflictException,
+  Inject,
+  forwardRef,
+} from "@nestjs/common";
 import { randomBytes } from "node:crypto";
 import { eq, and, desc } from "drizzle-orm";
 import { DbService } from "../db.service";
@@ -14,7 +20,11 @@ function generateSeed(): string {
 
 @Injectable()
 export class GameRepository {
-  constructor(private readonly dbService: DbService) {}
+  constructor(@Inject(forwardRef(() => DbService)) private readonly dbService: DbService) {
+    if (!this.dbService) {
+      console.error("[GameRepository] DbService не заинжектирован!");
+    }
+  }
 
   private get db() {
     return this.dbService.db;

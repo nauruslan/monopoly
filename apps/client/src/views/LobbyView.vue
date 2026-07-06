@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { useGameStore } from "../stores/game";
+import { useAuthStore } from "../stores/auth";
+import { useSocket, getSocket } from "../composables/useSocket";
 
 const router = useRouter();
 const game = useGameStore();
+const auth = useAuthStore();
 
 const playerName = localStorage.getItem("playerName") || "Гость";
 
@@ -18,19 +21,78 @@ const showCreate = ref(false);
 const newGameName = ref("");
 const botCount = ref(3); // по умолчанию 3 бота
 
-// Функция создания игры
-function createGame() {
+// Состояние процесса создания
+const creating = ref(false);
+const createError = ref<string | null>(null);
+
+/**
+ * Ожидание готовности сокета. Вызывается перед отправкой
+ * первого события ('lobby:create') — без этого emit может
+ * уйти до того, как handshake завершится.
+ */
+function waitForSocket(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = getSocket();
+    if (!socket) {
+      reject(new Error("Socket not initialized"));
+      return;
+    }
+    if (socket.connected) {
+      resolve();
+      return;
+    }
+    const onConnect = () => {
+      socket?.off("connect_error", onError);
+      resolve();
+    };
+    const onError = (err: Error) => {
+      socket?.off("connect", onConnect);
+      reject(err);
+    };
+    socket.once("connect", onConnect);
+    socket.once("connect_error", onError);
+  });
+}
+
+// Инициализируем WS-соединение сразу при входе в лобби.
+// Без этого createGameOnServer() не сможет отправить 'lobby:create'
+// и вернёт ошибку "No socket".
+onMounted(() => {
+  if (auth.token) {
+    useSocket(auth.token);
+  } else {
+    console.warn("LobbyView: токен отсутствует, редирект на /login");
+    router.push("/login");
+  }
+});
+
+// Функция создания игры (через сервер по WS)
+async function createGame() {
   // Валидация: название не должно быть пустым
   if (!newGameName.value.trim()) return;
+
+  creating.value = true;
+  createError.value = null;
 
   // Формируем список игроков: реальный пользователь + боты
   const me = localStorage.getItem("playerName") || "Игрок";
   const botNames = ["Бот 1", "Бот 2", "Бот 3"];
   const names = [me, ...botNames.slice(0, botCount.value)];
 
-  game.initGame(names);
-
-  router.push(`/game/${game.state.id}`);
+  try {
+    // Дожидаемся установки WS-соединения
+    await waitForSocket();
+    // gameId и state приходят с сервера (game.createGameOnServer вызывает
+    // socket.emit('lobby:create', ...) и записывает state в стор).
+    const { gameId } = await game.createGameOnServer(names);
+    showCreate.value = false;
+    router.push(`/game/${gameId}`);
+  } catch (e: any) {
+    console.error("createGame failed:", e);
+    createError.value = e?.message ?? "Не удалось создать игру";
+  } finally {
+    creating.value = false;
+  }
 }
 
 // Заглушки для будущих кнопок
@@ -79,12 +141,12 @@ function joinGame(gameId: string) {
 
         <div class="form-group">
           <label>Название</label>
-          <input v-model="newGameName" type="text" placeholder="Моя партия" />
+          <input v-model="newGameName" type="text" placeholder="Моя партия" :disabled="creating" />
         </div>
 
         <div class="form-group">
           <label>Количество ботов</label>
-          <select v-model.number="botCount">
+          <select v-model.number="botCount" :disabled="creating">
             <option :value="0">Без ботов (только я)</option>
             <option :value="1">1 бот</option>
             <option :value="2">2 бота</option>
@@ -92,9 +154,16 @@ function joinGame(gameId: string) {
           </select>
         </div>
 
+        <div v-if="createError" class="error">{{ createError }}</div>
+
         <div class="modal-actions">
-          <button class="action-btn btn-roll" @click="createGame">Создать</button>
-          <button class="action-btn btn-cancel" @click="showCreate = false">Отмена</button>
+          <button class="action-btn btn-roll" :disabled="creating" @click="createGame">
+            <span v-if="creating">⏳ Создаём...</span>
+            <span v-else>Создать</span>
+          </button>
+          <button class="action-btn btn-cancel" :disabled="creating" @click="showCreate = false">
+            Отмена
+          </button>
         </div>
       </div>
     </div>
@@ -209,6 +278,11 @@ function joinGame(gameId: string) {
   transition: all 0.25s var(--ease-out);
 }
 
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .btn-roll {
   background: linear-gradient(135deg, var(--accent), var(--accent2));
   color: #fff;
@@ -217,6 +291,12 @@ function joinGame(gameId: string) {
 .btn-buy {
   background: linear-gradient(135deg, var(--green), var(--accent));
   color: #fff;
+}
+
+.error {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #ff6b6b;
 }
 
 @media (max-width: 600px) {

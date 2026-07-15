@@ -53,13 +53,14 @@ export const BOARD: Cell[] = [
     isMortgaged: false,
   },
 
-  // id 4 — подоходный налог (платишь 200₽)
+  // id 4 — Подоходный налог (фиксированная сумма 200₽, модалка «Заплатите»)
   {
     id: 4,
     name: "Подоходный налог",
     type: "TAX",
     icon: "💰",
     taxAmount: 200,
+    taxVariant: "income",
     houses: 0,
     isMortgaged: false,
   },
@@ -472,12 +473,13 @@ export const BOARD: Cell[] = [
     houses: 0,
     isMortgaged: false,
   },
+  // id 38 — Роскошный налог (вытягивается карточка-формула из колоды LUXURY_TAX_CARDS).
   {
     id: 38,
     name: "Роскошный налог",
     type: "TAX",
     icon: "💎",
-    taxAmount: 100,
+    taxVariant: "luxury",
     houses: 0,
     isMortgaged: false,
   },

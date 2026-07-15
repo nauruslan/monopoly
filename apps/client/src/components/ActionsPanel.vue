@@ -3,6 +3,8 @@ defineProps<{
   canRoll: boolean;
   canBuy: boolean;
   canEndTurn: boolean;
+  // флаг «выпал дубль, бросьте ещё раз» (правило дубля).
+  mustRollAgain?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -15,6 +17,9 @@ const emit = defineEmits<{
 <template>
   <div class="panel">
     <div class="panel-title">Действия</div>
+    <div v-if="mustRollAgain" class="double-banner" role="status" aria-live="polite">
+      🎯 Дубль! Бросьте кубики ещё раз.
+    </div>
     <div class="actions">
       <button class="action-btn btn-roll" :disabled="!canRoll" @click="emit('roll')">
         🎲 Бросить кубики
@@ -28,6 +33,31 @@ const emit = defineEmits<{
 </template>
 
 <style scoped>
+.double-banner {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  background: linear-gradient(135deg, rgba(155, 109, 255, 0.25), rgba(255, 215, 0, 0.2));
+  border: 1px solid rgba(155, 109, 255, 0.6);
+  border-radius: 8px;
+  color: #f5e9ff;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  animation: double-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes double-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(155, 109, 255, 0.5);
+  }
+  50% {
+    transform: scale(1.02);
+    box-shadow: 0 0 0 6px rgba(155, 109, 255, 0);
+  }
+}
+
 .actions {
   display: flex;
   gap: 8px;

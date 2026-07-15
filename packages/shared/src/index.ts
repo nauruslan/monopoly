@@ -8,15 +8,18 @@ export type { Cell, CellType, PropertyGroup } from "./types/cell";
 export type { Player, PlayerKind } from "./types/player";
 
 // === Типы: игра ===
-export type { GameState, GameSettings, Phase } from "./types/game";
+export type { GameState, GameSettings, Phase, TradeOffer, CardDeckState } from "./types/game";
 export { DEFAULT_SETTINGS } from "./types/game";
 
 // === Типы: действия ===
 export type { GameAction } from "./types/action";
 
+// === Типы: события (Step28.2) ===
+export type { GameEvent, GameEventKind } from "./types/event";
+
 // === Данные: доска ===
 export { BOARD } from "./data/board";
 
 // === Данные: карточки ===
-export { CHANCE_CARDS, TREASURY_CARDS, drawCard } from "./data/cards";
+export { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS, shuffle, drawCard } from "./data/cards";
 export type { Card, CardEffect } from "./data/cards";

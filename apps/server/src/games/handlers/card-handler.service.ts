@@ -1,69 +1,200 @@
 import { Injectable } from "@nestjs/common";
-import { CHANCE_CARDS, TREASURY_CARDS, type Card } from "@monopoly/shared";
+import {
+  CHANCE_CARDS,
+  TREASURY_CARDS,
+  LUXURY_TAX_CARDS,
+  shuffle,
+  type Card,
+} from "@monopoly/shared";
 import type { Player, GameState } from "@monopoly/shared";
+import seedrandom from "seedrandom";
 
 /**
- * Обработчик карточек Шанс / Общественная казна.
+ * CardHandlerService — обработчик карточек Шанс / Общественная казна / Роскошный налог.
  *
- * На вход получает тип колоды, текущего игрока и state.
- * Возвращает вытянутую карточку (для отображения на клиенте).
+ * ВАЖНО: после рефакторинга FSM (фазы CARD_REVEAL → CARD_EFFECT)
+ * сервис разделён на ДВЕ функции:
  *
- * Логика максимально близка к клиентскому `applyCardEffect` из
- * `apps/client/src/stores/game.ts`, но без зависимости от Vue/Pinia.
+ * 1. `drawFromDeck(deck, state)` — достаёт очередную карту из ЗАРАНЕЕ
+ *    перемешанной колоды (`state.cardDecks[deck]`), инкрементирует курсор.
+ *    Если курсор дошёл до конца — колода перемешивается заново (новый
+ *    проход RNG через `state.seed`, чтобы остаться детерминированным).
+ *    НЕ применяет эффект, НЕ мутирует state игрока.
+ *    Возвращает карту для показа в модалке.
  *
- * TODO (Шаг 28+): использовать детерминированный RNG на основе `state.seed`
- * и `state.rngCursor`, чтобы реплеи были воспроизводимыми.
+ * 2. `applyEffect()` — применяет эффект карты к игроку/стейту.
+ *    Вызывается в фазе `CARD_EFFECT` (ПОСЛЕ закрытия модалки).
+ *
+ * Если эффект карты — `move` / `move-relative` / `go-salary` / `goto-jail`,
+ * то после применения сервер должен перевести партию в:
+ *  - `move` / `move-relative` / `go-salary` → фазу `MOVE_ANIMATION`
+ *    (телепорт-анимация фишки на новую клетку);
+ *  - `goto-jail` → фазу `JAIL_DECISION`;
+ *  - остальные (`money`, `jail-free`, `luxury-tax-house`) → фазу `BUILDING`
+ *    (или в `ROLLING` при `mustRollAgain`).
  */
 @Injectable()
 export class CardHandlerService {
   /**
-   * Вытянуть случайную карточку из нужной колоды и применить её эффект
-   * к игроку (мутация по ссылке, как принято в этой кодовой базе).
+   * Достать очередную карту из указанной колоды.
+   *
+   * Алгоритм:
+   *  1) Найти `state.cardDecks[deck]`. Если нет — fallback на случайную
+   *     карту из констант (для обратной совместимости со старыми
+   *     снапшотами БД).
+   *  2) Прочитать `cards[cursor]`, инкрементировать `cursor`.
+   *  3) Если `cursor === cards.length` — перетасовать заново,
+   *     сбросить `cursor = 0`, и взять cards[0] (новая партия раунда).
+   *  4) Найти полную `Card` по id в массиве-источнике (CHANCE/TREASURY/LUXURY).
+   *
+   * @param deck "chance" | "treasury" | "luxury-tax"
+   * @param state полный state партии
    */
-  draw(deck: "chance" | "treasury", player: Player, state: GameState): Card {
-    const cards = deck === "chance" ? CHANCE_CARDS : TREASURY_CARDS;
-    // Math.random() — пока допустимо; заменим на seeded RNG в Шаге 28.
-    const card = cards[Math.floor(Math.random() * cards.length)]!;
+  drawFromDeck(deck: "chance" | "treasury" | "luxury-tax", state: GameState): Card {
+    const allCards: readonly Card[] =
+      deck === "chance" ? CHANCE_CARDS : deck === "treasury" ? TREASURY_CARDS : LUXURY_TAX_CARDS;
 
+    const sourceName =
+      deck === "chance" ? "chance" : deck === "treasury" ? "treasury" : "luxury-tax";
+
+    // Lazy init: если у state нет cardDecks (старый снапшот) — построим.
+    if (!state.cardDecks) {
+      this.rebuildDecks(state);
+    }
+
+    let cardIds = state.cardDecks![sourceName].cards;
+    let cursor = state.cardDecks![sourceName].cursor;
+
+    // Если курсор на конце или карточек меньше, чем в исходной колоде —
+    // перетасовываем заново.
+    if (cursor >= cardIds.length) {
+      const rng = seedrandom(`${state.seed}:reshuffle:${sourceName}:${Date.now()}`);
+      cardIds = shuffle(allCards, rng).map((c) => c.id);
+      cursor = 0;
+      state.cardDecks![sourceName] = { cards: cardIds, cursor };
+    }
+
+    const cardId = cardIds[cursor]!;
+    state.cardDecks![sourceName].cursor = cursor + 1;
+
+    const card = allCards.find((c) => c.id === cardId);
+    if (!card) {
+      // Защита: id мог устареть. Возьмём первую попавшуюся.
+      return allCards[0]!;
+    }
+    return card;
+  }
+
+  /**
+   * Legacy-метод для обратной совместимости. Использовался в старом коде
+   * через `draw(deck, state)`. Теперь это тонкая обёртка над `drawFromDeck`.
+   */
+  draw(deck: "chance" | "treasury", state: GameState): Card {
+    return this.drawFromDeck(deck, state);
+  }
+
+  /**
+   * Построить все три колоды с нуля на основе `state.seed`.
+   */
+  private rebuildDecks(state: GameState): void {
+    const make = (source: readonly Card[], rng: () => number) => ({
+      cards: shuffle(source, rng).map((c) => c.id),
+      cursor: 0,
+    });
+    state.cardDecks = {
+      chance: make(CHANCE_CARDS, seedrandom(`${state.seed}:deck:chance`)),
+      treasury: make(TREASURY_CARDS, seedrandom(`${state.seed}:deck:treasury`)),
+      "luxury-tax": make(LUXURY_TAX_CARDS, seedrandom(`${state.seed}:deck:luxury-tax`)),
+    };
+  }
+
+  /**
+   * Применить эффект карты к игроку/стейту.
+   *
+   * НЕ вызывает анимаций и НЕ меняет `state.phase` — этим занимается GamesService.
+   *
+   * @param card уже вытянутая карта
+   * @param player игрок, на которого действует карта
+   * @param state полный state (мутируется)
+   * @returns информация о результате: нужно ли переместить фишку и куда
+   */
+  applyEffect(
+    card: Card,
+    player: Player,
+    state: GameState,
+  ):
+    | { kind: "stay" }
+    | { kind: "move"; target: number; passedGo?: boolean }
+    | { kind: "move-relative"; steps: number; passedGo?: boolean }
+    | { kind: "goto-jail" } {
     switch (card.effect.kind) {
-      case "money":
+      case "money": {
         // Положительная или отрицательная сумма (`amount` уже со знаком).
         player.money += card.effect.amount;
-        break;
+        return { kind: "stay" };
+      }
 
-      case "move":
-        // Телепорт на конкретную клетку. Если есть `money` (бонус за
-        // прохождение GO) — начисляем (например, ch1: "Вперёд + ₽200").
-        player.position = card.effect.target;
+      case "move": {
+        // Телепорт на конкретную клетку.
+        // Если есть `money` (бонус за прохождение GO) — начисляем.
         if (card.effect.money !== undefined) {
           player.money += card.effect.money;
         }
-        break;
+        return { kind: "move", target: card.effect.target };
+      }
 
-      case "move-relative":
+      case "go-salary": {
+        // Карточка «Отправляйтесь на Вперёд. Получите goSalary».
+        // Начисляем goSalary всегда, перемещаем на клетку 0.
+        player.money += state.settings.goSalary;
+        return { kind: "move", target: 0, passedGo: true };
+      }
+
+      case "move-relative": {
         // Сдвиг на N клеток (вперёд/назад) с оборачиванием по 40.
-        player.position = (player.position + card.effect.steps + 40) % 40;
-        break;
+        // Серверная сторона сама посчитает passedGo.
+        return { kind: "move-relative", steps: card.effect.steps };
+      }
 
-      case "goto-jail":
+      case "goto-jail": {
         // Прямой переход в тюрьму (минуя клетку GOTO_JAIL на доске).
+        // Сбрасываем флаги и помечаем как inJail.
         player.position = 10;
         player.inJail = true;
         player.jailTurns = 0;
         player.consecutiveDoubles = 0;
-        break;
+        return { kind: "goto-jail" };
+      }
 
-      case "jail-free":
+      case "jail-free": {
         // Выдаём карточку "выйди из тюрьмы бесплатно".
         player.jailCards += 1;
-        break;
+        return { kind: "stay" };
+      }
+
+      case "luxury-tax-house": {
+        // Формула налога на имущество:
+        //   perProperty ₽ за каждый участок (PROPERTY/RAILROAD/UTILITY),
+        //   perHouse    ₽ за каждый ДОМ (houses от 1 до 4),
+        //   perHotel    ₽ за каждый ОТЕЛЬ (houses === 5).
+        const { perHouse, perHotel, perProperty } = card.effect;
+        let houses = 0;
+        let hotels = 0;
+        let properties = 0;
+        for (const cellId of player.properties) {
+          const cell = state.board[cellId];
+          if (!cell) continue;
+          if (cell.isMortgaged) continue; // заложенная не считается
+          properties += 1;
+          if (cell.houses >= 1 && cell.houses <= 4) houses += cell.houses;
+          else if (cell.houses === 5) hotels += 1;
+        }
+        const total = perHouse * houses + perHotel * hotels + perProperty * properties;
+        // Списываем; баланс НЕ уходит в минус (защита от двойного банкротства —
+        // банкротство запускается в games.service).
+        player.money = Math.max(0, player.money - total);
+        return { kind: "stay" };
+      }
     }
-
-    // Поле `state` оставлено в сигнатуре намеренно — здесь могут быть
-    // эффекты, меняющие глобальное состояние (например, "все игроки платят
-    // тебе ₽50"). Пока таких карточек нет, но точка расширения уже есть.
-    void state;
-
-    return card;
   }
 }

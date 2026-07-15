@@ -1,18 +1,34 @@
 import { defineStore } from "pinia";
-import { ref, computed, watch } from "vue";
-import type { GameState, Phase, Player, Cell, Card } from "@monopoly/shared";
-import { BOARD, DEFAULT_SETTINGS, drawCard } from "@monopoly/shared";
-import { rollDice } from "../composables/useDice";
-import { decideBotAction } from "../composables/botAI";
-import type { Player as PlayerType } from "@monopoly/shared";
-import { getSocket } from "../composables/useSocket";
+import { ref, computed } from "vue";
+import type { GameState, Phase, Player, Card } from "@monopoly/shared";
+import { BOARD, DEFAULT_SETTINGS } from "@monopoly/shared";
+import { getSocket, setLastGameId } from "../composables/useSocket";
 import type { GameAction } from "@monopoly/shared";
 
-// Временный placeholder на стороне клиента. Когда сервер создаёт партию,
-// он генерирует криптослучайный seed и
-// сохраняет его в stateSnapshot.seed и в games.rng_seed.
-const PLACEHOLDER_SEED = "client-init";
-
+/**
+ * Игровой стор Pinia.
+ *
+ * ВАЖНО: (FSM) сервер — единственный источник правды.
+ * Клиент НЕ мутирует `state` локально. Все игровые операции
+ * (бросок, покупка, залог, торг, ...) отправляются на сервер
+ * через `sendAction(action)`, а обновлённое `state` приходит
+ * через WS-событие `game:state`.
+ *
+ * ## Фазовая синхронизация
+ *
+ * Каждая «визуальная» фаза на клиенте запускает анимацию, и по её завершении
+ * клиент отправляет соответствующее `CONFIRM_*` действие:
+ *
+ * - `DICE_ANIMATION`      → 2 секунды крутки кубиков → `CONFIRM_DICE_ANIMATION`
+ * - `MOVE_ANIMATION`      → 450мс × N шагов фишки → `CONFIRM_MOVE_ANIMATION`
+ * - `CARD_REVEAL`         → показ модалки → пользователь жмёт OK → `CONFIRM_CARD`
+ * - `RESOLVING_LANDING`   → 400мс пауза → `CONFIRM_LANDING`
+ * - `END_TURN`            → 500мс пауза → `CONFIRM_END_TURN`
+ *
+ * Сервер сам не двигает фишку, пока клиент не подтвердит, что анимация
+ * закончилась. Это гарантирует, что эффекты клеток (CHANCE, TAX, ...)
+ * срабатывают ТОЛЬКО после полной остановки фишки.
+ */
 export const useGameStore = defineStore("game", () => {
   const state = ref<GameState>({
     id: "",
@@ -23,17 +39,31 @@ export const useGameStore = defineStore("game", () => {
     round: 1,
     players: [],
     board: BOARD.map((c) => ({ ...c })),
-    seed: PLACEHOLDER_SEED,
+    settings: { ...DEFAULT_SETTINGS },
+    seed: "client-init",
     createdAt: new Date().toISOString(),
     lastActivityAt: new Date().toISOString(),
   });
 
   // ============ WS-STATE ============
-  // Дополнение к существующему GameStore для синхронизации с сервером
-  // Локальная логика ниже НЕ заменяется.
   const gameId = ref<string>("");
   const isConnected = ref(false);
   const socketError = ref<string | null>(null);
+
+  // ============ DICE (значения приходят с сервера) ============
+  const diceValues = ref<[number, number]>([1, 1]);
+  const diceRolling = ref(false);
+  const lastDiceRoll = ref<[number, number] | null>(null);
+  const lastDicePlayerId = ref<string | null>(null);
+  const lastDiceIsDouble = ref(false);
+
+  // ============ CARDS (последняя карточка с сервера) ============
+  const lastDrawnCard = ref<Card | null>(null);
+  /**
+   * `true` пока фаза `CARD_REVEAL`. Используется для UI-индикации,
+   * что карточка ещё не применена.
+   */
+  const cardPendingConfirm = ref(false);
 
   const currentPlayer = computed<Player | null>(
     () => state.value.players[state.value.currentPlayerIndex] || null,
@@ -45,331 +75,66 @@ export const useGameStore = defineStore("game", () => {
     return state.value.board[p.position] || null;
   });
 
-  function initGame(playerNames: string[]) {
-    const colors = [
-      "#FF4D4D",
-      "#4D9EFF",
-      "#4CFF4C",
-      "#FFD700",
-      "#FF8C42",
-      "#8152cf",
-      "#ab90e3",
-      "#22d3ee",
-    ];
-    const icons = ["🔴", "🔵", "🟢", "🟡", "🟠", "🟣", "🟤", "⚪"];
-    state.value.id = Math.random().toString(36).substring(2, 9);
-    state.value.status = "active";
-    state.value.round = 1;
-    state.value.currentPlayerIndex = 0;
-    state.value.phase = "ROLLING";
-    state.value.players = playerNames.map((name, i) => ({
-      id: `p${i + 1}`,
-      displayName: name,
-      kind: i === 0 ? "human" : "bot",
-      color: colors[i % colors.length]!,
-      icon: icons[i % icons.length]!,
-      money: DEFAULT_SETTINGS.startingMoney,
-      position: 0,
-      inJail: false,
-      jailTurns: 0,
-      jailCards: 0,
-      properties: [],
-      isBankrupt: false,
-    }));
-    state.value.board = BOARD.map((c) => ({
-      ...c,
-      ownerId: undefined,
-      houses: 0,
-      isMortgaged: false,
-    }));
-    state.value.createdAt = new Date().toISOString();
-    state.value.lastActivityAt = new Date().toISOString();
-  }
-
-  function endTurn() {
-    if (state.value.players.length === 0) return;
-    state.value.currentPlayerIndex =
-      (state.value.currentPlayerIndex + 1) % state.value.players.length;
-    if (state.value.currentPlayerIndex === 0) {
-      state.value.round += 1;
-    }
-    state.value.phase = "ROLLING";
-    state.value.lastActivityAt = new Date().toISOString();
-  }
-
-  watch(
-    () => state.value.currentPlayerIndex,
-    async () => {
-      const player = currentPlayer.value;
-      if (!player) return;
-      if (player.kind !== "bot") return;
-      if (state.value.status !== "active") return;
-
-      await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
-
-      if (state.value.phase === "ROLLING") {
-        await rollAndMove();
-      } else if (state.value.phase === "BUY_DECISION") {
-        const action = decideBotAction(player, state.value);
-        if (action === "BUY") buyProperty();
-        await new Promise((r) => setTimeout(r, 500));
-        endTurn();
-      } else if (state.value.phase === "BUILDING") {
-        await new Promise((r) => setTimeout(r, 500));
-        endTurn();
-      }
-    },
-  );
-
-  async function rollAndMove() {
-    if (!currentPlayer.value || state.value.phase !== "ROLLING") return;
-
-    const [d1, d2] = rollDice();
-    const steps = d1 + d2;
-    const isDouble = d1 === d2;
-    const player = currentPlayer.value;
-
-    // Логика тюрьмы
-    if (player.inJail) {
-      if (isDouble) {
-        player.inJail = false;
-        player.jailTurns = 0;
-      } else {
-        player.jailTurns += 1;
-        if (player.jailTurns >= 3) {
-          player.money = Math.max(0, player.money - 50);
-          player.inJail = false;
-          player.jailTurns = 0;
-        } else {
-          endTurn();
-          return;
-        }
-      }
-    }
-
-    state.value.phase = "MOVING";
-
-    // Правило 3 дублей
-    if (isDouble) {
-      const currentDoubles = (state.value as any).consecutiveDoubles || 0;
-      const newDoubles = currentDoubles + 1;
-      (state.value as any).consecutiveDoubles = newDoubles;
-      if (newDoubles >= 3) {
-        sendToJail();
-        (state.value as any).consecutiveDoubles = 0;
-        return;
-      }
-    } else {
-      (state.value as any).consecutiveDoubles = 0;
-    }
-
-    // Анимированное движение
-    for (let i = 0; i < steps; i++) {
-      await new Promise((r) => setTimeout(r, 300));
-      player.position = (player.position + 1) % 40;
-      if (player.position === 0) {
-        player.money += DEFAULT_SETTINGS.goSalary;
-      }
-    }
-
-    state.value.phase = "BUY_DECISION";
-  }
-
-  function sendToJail() {
-    const player = currentPlayer.value;
-    if (!player) return;
-    player.position = 10;
-    player.inJail = true;
-    player.jailTurns = 0;
-    (state.value as any).consecutiveDoubles = 0;
-    state.value.phase = "JAIL_DECISION";
-  }
-
-  function buyProperty(): boolean {
-    const cell = currentCell.value;
-    const player = currentPlayer.value;
-    if (!cell || !player) return false;
-    if (cell.ownerId) return false;
-    if (cell.price === undefined || player.money < cell.price) return false;
-
-    player.money -= cell.price;
-    player.properties.push(cell.id);
-    cell.ownerId = player.id;
-    state.value.phase = "BUILDING";
-    return true;
-  }
-
-  function declineBuy() {
-    state.value.phase = "BUILDING";
-  }
-
-  function payJailFine() {
-    const player = currentPlayer.value;
-    if (!player || !player.inJail) return;
-    player.money = Math.max(0, player.money - 50);
-    player.inJail = false;
-    player.jailTurns = 0;
-    state.value.phase = "ROLLING";
-  }
-
-  function useJailCard() {
-    const player = currentPlayer.value;
-    if (!player || !player.inJail || player.jailCards === 0) return;
-    player.jailCards -= 1;
-    player.inJail = false;
-    player.jailTurns = 0;
-    state.value.phase = "ROLLING";
-  }
-
-  function ownsMonopoly(cell: Cell, player: Player): boolean {
-    if (!cell.group) return false;
-    const groupCells = state.value.board.filter((c) => c.group === cell.group);
-    return groupCells.every((c) => c.ownerId === player.id);
-  }
-
-  function canBuildHouse(cellId: number): boolean {
-    const player = currentPlayer.value;
-    if (!player) return false;
-    const cell = state.value.board[cellId];
-    if (!cell) return false;
-    if (cell.ownerId !== player.id) return false;
-    if (!ownsMonopoly(cell, player)) return false;
-    if (cell.houses >= 4) return false;
-    if (cell.housePrice === undefined || player.money < cell.housePrice) return false;
-
-    // Правило равномерного строительства
-    if (cell.group) {
-      const groupCells = state.value.board.filter((c) => c.group === cell.group);
-      const minHouses = Math.min(...groupCells.map((c) => c.houses));
-      if (cell.houses > minHouses) return false;
-    }
-    return true;
-  }
-
-  function buildHouse(cellId: number): boolean {
-    const player = currentPlayer.value;
-    if (!player) return false;
-    if (!canBuildHouse(cellId)) return false;
-    const cell = state.value.board[cellId];
-    if (!cell || cell.housePrice === undefined) return false;
-    player.money -= cell.housePrice;
-    const next: 0 | 1 | 2 | 3 | 4 | 5 =
-      cell.houses < 5 ? ((cell.houses + 1) as 0 | 1 | 2 | 3 | 4 | 5) : 5;
-    cell.houses = next;
-    return true;
-  }
-
-  function calculateRent(cell: Cell, ownerId: string, diceRoll?: [number, number]): number {
-    if (cell.isMortgaged) return 0;
-    const owner = state.value.players.find((p) => p.id === ownerId);
-    if (!owner) return 0;
-
-    if (cell.type === "PROPERTY") {
-      if (cell.houses === 0 && ownsMonopoly(cell, owner)) {
-        return (cell.rent ?? 0) * 2;
-      }
-      if (cell.houses > 0 && cell.rentTable && cell.rentTable[cell.houses] !== undefined) {
-        return cell.rentTable[cell.houses]!;
-      }
-      return cell.rent ?? 0;
-    }
-
-    if (cell.type === "RAILROAD") {
-      const rrCount = owner.properties.filter((pid) => {
-        const c = state.value.board[pid];
-        return c && c.type === "RAILROAD";
-      }).length;
-      return [25, 50, 100, 200][rrCount - 1] ?? 25;
-    }
-
-    if (cell.type === "UTILITY") {
-      const utilCount = owner.properties.filter((pid) => {
-        const c = state.value.board[pid];
-        return c && c.type === "UTILITY";
-      }).length;
-      const mult = utilCount === 2 ? 10 : 4;
-      return diceRoll ? mult * (diceRoll[0] + diceRoll[1]) : 0;
-    }
-
-    return 0;
-  }
-
-  function payRent(toPlayerId: string, amount: number): boolean {
-    const payer = currentPlayer.value;
-    const receiver = state.value.players.find((p) => p.id === toPlayerId);
-    if (!payer || !receiver) return false;
-    if (amount <= 0) return true;
-    payer.money -= amount;
-    receiver.money += amount;
-    return true;
-  }
-
-  const lastDrawnCard = ref<Card | null>(null);
-
-  function drawChanceCard(): Card {
-    return drawFromDeck("chance");
-  }
-
-  function drawTreasuryCard(): Card {
-    return drawFromDeck("treasury");
-  }
-
-  function drawFromDeck(deck: "chance" | "treasury"): Card {
-    const card = drawCard(deck);
-    const player = currentPlayer.value;
-    if (player) {
-      applyCardEffect(card, player);
-    }
-    lastDrawnCard.value = card;
-    state.value.phase = "BUILDING";
-    return card;
-  }
-
-  function applyCardEffect(card: Card, player: PlayerType) {
-    switch (card.effect.kind) {
-      case "money":
-        player.money += card.effect.amount;
-        break;
-      case "move":
-        player.position = card.effect.target;
-        if (card.effect.money) player.money += card.effect.money;
-        break;
-      case "move-relative":
-        player.position = (player.position + card.effect.steps + 40) % 40;
-        break;
-      case "goto-jail":
-        sendToJail();
-        break;
-      case "jail-free":
-        player.jailCards += 1;
-        break;
-    }
-  }
-
-  function setPhase(phase: Phase) {
-    state.value.phase = phase;
-  }
-
-  // ============ WS-ACTIONS ============
-  // Эти методы работают ПАРАЛЛЕЛЬНО
-  // и подключают клиента к серверу через socket.io.
+  // ============ WS-CONNECTION ============
 
   function connectAndJoin(gId: string) {
     gameId.value = gId;
+    setLastGameId(gId);
     const socket = getSocket();
     if (!socket) {
       console.error("Socket not initialized. Call useSocket(token) first.");
       return;
     }
 
+    socket.off("game:state");
+    socket.off("lobby:update");
+    socket.off("game:error");
+    socket.off("game:dice");
+    socket.off("game:card");
+
     socket.on("game:state", (newState: GameState) => {
+      console.log(
+        `[game.ts] game:state received: phase=${newState.phase} currentPlayer=${
+          newState.players[newState.currentPlayerIndex]?.id
+        } pos=${newState.players[newState.currentPlayerIndex]?.position}`,
+      );
       state.value = newState;
+      // Сбрасываем cardPendingConfirm при смене фазы с CARD_REVEAL.
+      if (newState.phase !== "CARD_REVEAL" && newState.phase !== "CARD_EFFECT") {
+        cardPendingConfirm.value = false;
+      }
+      if (newState.phase === "CARD_REVEAL") {
+        cardPendingConfirm.value = true;
+      }
     });
     socket.on("lobby:update", () => {
       /* обновление списка игроков */
     });
     socket.on("game:error", (e: { message: string }) => {
       socketError.value = e.message;
+    });
+
+    socket.on(
+      "game:dice",
+      (payload: { playerId: string; dice: [number, number]; isDouble: boolean }) => {
+        console.log(
+          `[game.ts] game:dice received: [${payload.dice[0]}, ${payload.dice[1]}] playerId=${payload.playerId} isDouble=${payload.isDouble}`,
+        );
+        // Сервер прислал значения кубиков в начале фазы DICE_ANIMATION.
+        // Запускаем 2-секундную CSS-анимацию: Dice.vue эмитит 'roll-done'
+        // через ROLL_MS, и GameView отправляет CONFIRM_DICE_ANIMATION.
+        diceValues.value = payload.dice;
+        lastDiceRoll.value = payload.dice;
+        lastDicePlayerId.value = payload.playerId;
+        lastDiceIsDouble.value = payload.isDouble;
+        diceRolling.value = true;
+      },
+    );
+
+    socket.on("game:card", (payload: { playerId: string; card: Card }) => {
+      console.log(`[game.ts] game:card received: playerId=${payload.playerId}`);
+      lastDrawnCard.value = payload.card;
+      cardPendingConfirm.value = true;
     });
 
     socket.emit(
@@ -402,6 +167,7 @@ export const useGameStore = defineStore("game", () => {
           if (response.ok && response.data) {
             state.value = response.data.state;
             gameId.value = response.data.gameId;
+            setLastGameId(response.data.gameId);
             isConnected.value = true;
             resolve(response.data);
           } else {
@@ -412,6 +178,10 @@ export const useGameStore = defineStore("game", () => {
     });
   }
 
+  /**
+   * Отправить действие на сервер. UI никогда не мутирует `state` локально —
+   * сервер пришлёт обновлённый `game:state` после применения.
+   */
   function sendAction(action: GameAction) {
     const socket = getSocket();
     if (!socket || !gameId.value) return;
@@ -428,13 +198,28 @@ export const useGameStore = defineStore("game", () => {
           console.error("Action failed:", response.error);
           return;
         }
-        // Сервер может вернуть `card` (Шанс/Казна) — кладём его в
-        // `lastDrawnCard`, чтобы UI мог показать `CardModal`.
         if (response.data?.card) {
           lastDrawnCard.value = response.data.card;
+          cardPendingConfirm.value = true;
         }
       },
     );
+  }
+
+  // ============ DICE ANIMATION (UI-only) ============
+  function setDiceRolling(v: boolean) {
+    diceRolling.value = v;
+  }
+  function setDiceValues(v: [number, number]) {
+    diceValues.value = v;
+  }
+
+  /**
+   * Сбросить последнюю карточку (вызывается после `CONFIRM_CARD`).
+   */
+  function clearLastDrawnCard() {
+    lastDrawnCard.value = null;
+    cardPendingConfirm.value = false;
   }
 
   return {
@@ -442,29 +227,20 @@ export const useGameStore = defineStore("game", () => {
     gameId,
     isConnected,
     socketError,
+    diceValues,
+    diceRolling,
+    lastDiceRoll,
+    lastDicePlayerId,
+    lastDiceIsDouble,
     currentPlayer,
     currentCell,
     lastDrawnCard,
-    initGame,
-    endTurn,
-    rollAndMove,
-    sendToJail,
-    buyProperty,
-    declineBuy,
-    payJailFine,
-    useJailCard,
-    ownsMonopoly,
-    canBuildHouse,
-    buildHouse,
-    calculateRent,
-    payRent,
-    setPhase,
-    applyCardEffect,
-    drawChanceCard,
-    drawTreasuryCard,
-    drawFromDeck,
+    cardPendingConfirm,
     connectAndJoin,
     createGameOnServer,
     sendAction,
+    setDiceRolling,
+    setDiceValues,
+    clearLastDrawnCard,
   };
 });

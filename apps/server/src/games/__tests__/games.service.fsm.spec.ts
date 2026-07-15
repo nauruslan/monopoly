@@ -1,0 +1,302 @@
+/**
+ * FSM-интеграционные тесты `GamesService`.
+ *
+ * Цель — проверить, что applyAction правильно переключает фазы и
+ * отклоняет недопустимые действия в текущей фазе (Phase FSM).
+ *
+ * Зависимости (GameRepository, GameInitializerService, etc.) замоканы,
+ * чтобы тест был детерминированным и не требовал БД.
+ *
+ * ## Изменения после рефакторинга FSM
+ *
+ * Раньше `ROLL_DICE` сразу переводил фазу в `MOVING`/`RESOLVING_LANDING`.
+ * Теперь поток:
+ *
+ *   ROLLING → ROLL_DICE → DICE_ANIMATION
+ *            → CONFIRM_DICE_ANIMATION → MOVE_ANIMATION
+ *            → CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING
+ *            → CONFIRM_LANDING → (ветвление по типу клетки)
+ *
+ * В тестах мы «прощёлкиваем» все CONFIRM_* чтобы дойти до финала.
+ */
+import { Test } from "@nestjs/testing";
+import { GamesService } from "../games.service";
+import { GameRepository } from "../../db/repositories/game.repository";
+import { GameInitializerService } from "../game-initializer.service";
+import { RentCalculator } from "../handlers/rent-calculator";
+import { JailHandlerService } from "../handlers/jail-handler.service";
+import { CardHandlerService } from "../handlers/card-handler.service";
+import { BankruptcyService } from "../handlers/bankruptcy.service";
+import { BotService } from "../bots/bot.service";
+import { AuctionService } from "../handlers/auction.service";
+import { TradeService } from "../handlers/trade.service";
+import type { GameState, Player } from "@monopoly/shared";
+import { BOARD, DEFAULT_SETTINGS } from "@monopoly/shared";
+
+/**
+ * Создаёт «сырое» состояние партии без БД.
+ * Первая клетка BOARD (Go) → position=0.
+ */
+function makeFreshState(): GameState {
+  const players: Player[] = [
+    {
+      id: "p0",
+      displayName: "Alice",
+      kind: "human",
+      color: "#f00",
+      icon: "🔴",
+      money: 1500,
+      position: 0,
+      inJail: false,
+      jailTurns: 0,
+      jailCards: 0,
+      properties: [],
+      consecutiveDoubles: 0,
+      isBankrupt: false,
+    },
+    {
+      id: "p1",
+      displayName: "Bob",
+      kind: "bot",
+      color: "#00f",
+      icon: "🔵",
+      money: 1500,
+      position: 0,
+      inJail: false,
+      jailTurns: 0,
+      jailCards: 0,
+      properties: [],
+      consecutiveDoubles: 0,
+      isBankrupt: false,
+    },
+  ];
+  return {
+    id: "g-test",
+    version: 1,
+    status: "active",
+    currentPlayerIndex: 0,
+    phase: "ROLLING",
+    round: 1,
+    players,
+    board: BOARD.map((c) => ({ ...c, ownerId: undefined, houses: 0, isMortgaged: false })),
+    settings: { ...DEFAULT_SETTINGS },
+    seed: "test-seed",
+    createdAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString(),
+  };
+}
+
+describe("GamesService.applyAction (FSM)", () => {
+  let service: GamesService;
+  let activeState: GameState;
+
+  // Используем фейковые таймеры, чтобы бот-таймеры, которые ставит
+  // `scheduleBotIfNeeded`/прочие (setTimeout 800-1500мс), не висели
+  // в реальном времени и не блокировали выход из Jest.
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  // Очищаем все бот-таймеры после каждого теста, чтобы Node не висел.
+  // (applyAction внутри ставит setTimeout на 800-1500мс.)
+  afterEach(() => {
+    if (service) {
+      (service as any).removeFromCache("g-test");
+    }
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  beforeEach(async () => {
+    const repoMock = {
+      create: jest.fn(async (state: GameState) => ({
+        id: state.id,
+        rngSeed: state.seed,
+        stateSnapshot: state,
+      })),
+      updateSnapshot: jest.fn(async () => undefined),
+      findById: jest.fn(async () => null),
+    };
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        GamesService,
+        GameInitializerService,
+        RentCalculator,
+        JailHandlerService,
+        CardHandlerService,
+        BankruptcyService,
+        BotService,
+        AuctionService,
+        TradeService,
+        { provide: GameRepository, useValue: repoMock },
+      ],
+    }).compile();
+
+    service = moduleRef.get(GamesService);
+    activeState = makeFreshState();
+    (activeState as any).id = "g-test";
+  });
+
+  // ──────────── Вспомогательные ────────────
+  async function act(action: Parameters<GamesService["applyAction"]>[2]) {
+    const gameId = "g-test";
+    (service as any).activeGames.set(gameId, activeState);
+    return service.applyAction(
+      gameId,
+      activeState.players[activeState.currentPlayerIndex]!.id,
+      action,
+    );
+  }
+
+  // ──────────── Базовые проверки ────────────
+
+  it("состояние партии инициализировано: phase=ROLLING, currentPlayerIndex=0", () => {
+    expect(activeState.phase).toBe("ROLLING");
+    expect(activeState.currentPlayerIndex).toBe(0);
+  });
+
+  it("ROLL_DICE → переходит в DICE_ANIMATION (а не сразу в MOVING)", async () => {
+    const result = await act({ type: "ROLL_DICE" });
+    // После рефакторинга: сервер ждёт анимацию кубиков.
+    expect(activeState.phase).toBe("DICE_ANIMATION");
+    expect(result.dice).toBeDefined();
+    expect(result.dice).toHaveLength(2);
+    // state.lastDice должен сохранить результат броска.
+    expect(activeState.lastDice).toBeDefined();
+    expect(activeState.lastDice?.dice).toEqual(result.dice);
+  });
+
+  it("CONFIRM_DICE_ANIMATION → переходит в MOVE_ANIMATION", async () => {
+    await act({ type: "ROLL_DICE" });
+    expect(activeState.phase).toBe("DICE_ANIMATION");
+    await act({ type: "CONFIRM_DICE_ANIMATION" });
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+  });
+
+  it("CONFIRM_MOVE_ANIMATION → переходит в RESOLVING_LANDING", async () => {
+    await act({ type: "ROLL_DICE" });
+    await act({ type: "CONFIRM_DICE_ANIMATION" });
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+  });
+
+  it("Полный цикл ROLL_DICE → ... → BUY_DECISION на пустой клетке", async () => {
+    // По умолчанию все клетки без владельца. После броска (4..12 шагов)
+    // фишка может попасть на PROPERTY без владельца → BUY_DECISION.
+    await act({ type: "ROLL_DICE" });
+    await act({ type: "CONFIRM_DICE_ANIMATION" });
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+    await act({ type: "CONFIRM_LANDING" });
+    // Должны попасть в BUY_DECISION, BUILDING или PAY_RENT (если чужая).
+    // Поскольку у нас все клетки пустые — BUY_DECISION или BUILDING (если на GO/JAIL/...).
+    expect(["BUY_DECISION", "BUILDING", "PAY_RENT"]).toContain(activeState.phase);
+  });
+
+  // ──────────── Негативные проверки ────────────
+
+  it("BUY_PROPERTY недопустимо в фазе ROLLING", async () => {
+    await expect(act({ type: "BUY_PROPERTY" })).rejects.toThrow();
+  });
+
+  it("END_TURN недопустимо в фазе ROLLING (если бросок не сделан)", async () => {
+    await expect(act({ type: "END_TURN" })).rejects.toThrow();
+  });
+
+  it("UNMORTGAGE_PROPERTY в фазе ROLLING отклоняется", async () => {
+    await expect(act({ type: "UNMORTGAGE_PROPERTY", cellId: 0 })).rejects.toThrow();
+  });
+
+  it("TRADE_OFFER в фазе ROLLING отклоняется (торги только в BUILDING)", async () => {
+    await expect(
+      act({
+        type: "TRADE_OFFER",
+        recipientId: "p1",
+        offer: { fromProperties: [], fromCash: 0, toProperties: [], toCash: 0 },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("AUCTION_BID без активного state.auction отклоняется", async () => {
+    await expect(act({ type: "AUCTION_BID", amount: 100 })).rejects.toThrow();
+  });
+
+  it("CONFIRM_DICE_ANIMATION в фазе ROLLING отклоняется", async () => {
+    await expect(act({ type: "CONFIRM_DICE_ANIMATION" })).rejects.toThrow();
+  });
+
+  it("CONFIRM_MOVE_ANIMATION в фазе DICE_ANIMATION отклоняется", async () => {
+    await act({ type: "ROLL_DICE" });
+    expect(activeState.phase).toBe("DICE_ANIMATION");
+    await expect(act({ type: "CONFIRM_MOVE_ANIMATION" })).rejects.toThrow();
+  });
+
+  // ──────────── Авторизация ────────────
+
+  it("Действие от несуществующего playerId отклоняется", async () => {
+    const gameId = "g-test";
+    (service as any).activeGames.set(gameId, activeState);
+    await expect(service.applyAction(gameId, "ghost", { type: "ROLL_DICE" })).rejects.toThrow();
+  });
+
+  it("Банкрот не может действовать", async () => {
+    const gameId = "g-test";
+    (service as any).activeGames.set(gameId, activeState);
+    activeState.players[0]!.isBankrupt = true;
+    await expect(service.applyAction(gameId, "p0", { type: "ROLL_DICE" })).rejects.toThrow();
+  });
+
+  // ──────────── Broadcast ────────────
+
+  it("onStateChanged вызывается после applyAction", async () => {
+    const gameId = "g-test";
+    (service as any).activeGames.set(gameId, activeState);
+    const cb = jest.fn();
+    service.onStateChanged = cb;
+
+    await act({ type: "ROLL_DICE" });
+    expect(cb).toHaveBeenCalled();
+    const lastCall = cb.mock.calls[cb.mock.calls.length - 1]!;
+    expect(lastCall[0]).toBe(gameId);
+    expect(lastCall[1]).toBe(activeState);
+  });
+
+  // ──────────── Карты (фазы CARD_REVEAL → CARD_EFFECT) ────────────
+
+  it("CHANCE: вытягивает карту в CARD_REVEAL, эффект НЕ применён", async () => {
+    // Найдём клетку CHANCE.
+    const chanceCell = activeState.board.find((c) => c.type === "CHANCE");
+    expect(chanceCell).toBeDefined();
+    // Поставим игрока на 1 клетку перед CHANCE и сбросим lastDice.
+    if (!chanceCell) return;
+    const targetPos = chanceCell.id;
+    // Делаем позицию = targetPos и имитируем бросок 0 (для простоты).
+    activeState.players[0]!.position = targetPos;
+    activeState.lastDice = { dice: [0, 0], isDouble: false };
+    activeState.phase = "RESOLVING_LANDING";
+
+    await act({ type: "CONFIRM_LANDING" });
+    expect(activeState.phase).toBe("CARD_REVEAL");
+    expect(activeState.cardContext).toBeDefined();
+    expect(activeState.cardContext?.applied).toBe(false);
+  });
+
+  it("CONFIRM_CARD в CARD_REVEAL → переходит в CARD_EFFECT", async () => {
+    const chanceCell = activeState.board.find((c) => c.type === "CHANCE");
+    if (!chanceCell) {
+      // Если нет CHANCE — пропускаем.
+      return;
+    }
+    activeState.players[0]!.position = chanceCell.id;
+    activeState.lastDice = { dice: [0, 0], isDouble: false };
+    activeState.phase = "RESOLVING_LANDING";
+
+    await act({ type: "CONFIRM_LANDING" });
+    expect(activeState.phase).toBe("CARD_REVEAL");
+
+    await act({ type: "CONFIRM_CARD" });
+    expect(activeState.phase).toBe("CARD_EFFECT");
+  });
+});

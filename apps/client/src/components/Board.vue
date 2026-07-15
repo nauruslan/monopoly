@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed } from "vue";
 import CellComp from "./Cell.vue";
 import Dice from "./Dice.vue";
 import type { Cell as CellType } from "@monopoly/shared";
@@ -12,19 +12,41 @@ const props = defineProps<{
     color: string;
     icon: string;
   }[];
+  /**
+   * Анимированные позиции игроков (`playerId → клетка`).
+   * Если не переданы, используется `player.position` напрямую (без анимации).
+   */
+  displayPositions?: Record<string, number>;
+  /**
+   * Значения кубиков для центрального `<Dice>`. Приходят из `GameView`
+   * (реальные с сервера через `game:dice`).
+   */
+  diceValues?: [number, number];
+  diceRolling?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "cell-click", payload: { cell: CellType; event: MouseEvent }): void;
+  /**
+   * Прокидывается из `<Dice>` наверх, в GameView, чтобы тот
+   * погасил `diceRolling` ровно по окончании 2-секундной анимации.
+   */
+  (e: "dice-roll-done"): void;
 }>();
 
 function onCellClick(cell: CellType, event: MouseEvent) {
   emit("cell-click", { cell, event });
 }
 
-// Mock-значения кубиков (пока статичные)
-const diceValues = ref<[number, number]>([3, 5]);
-const diceRolling = ref(false);
+function onDiceRollDone() {
+  emit("dice-roll-done");
+}
+
+// Резолвим позицию для UI: предпочитаем анимированную `displayPositions[id]`,
+// иначе берём `player.position` из пропсов.
+function displayPos(p: { id: string; position: number }): number {
+  return props.displayPositions?.[p.id] ?? p.position;
+}
 
 /**
  * Определяет позицию клетки на сетке 11x11
@@ -43,12 +65,13 @@ function getGridPos(i: number) {
   return { row: i - 29, col: 11 };
 }
 
-// Группируем игроков по клеткам, на которых они стоят
+// Группируем игроков по клеткам, на которых они стоят (с учётом анимации).
 const playersOnCell = computed(() => {
   const map = new Map<number, typeof props.players>();
   for (const p of props.players) {
-    if (!map.has(p.position)) map.set(p.position, []);
-    map.get(p.position)!.push(p);
+    const pos = displayPos(p);
+    if (!map.has(pos)) map.set(pos, []);
+    map.get(pos)!.push(p);
   }
   return map;
 });
@@ -90,7 +113,11 @@ function ownerColor(cell: CellType): string | undefined {
           <div class="logo">Монополия</div>
           <div class="logo-sub">neon edition</div>
         </slot>
-        <Dice :values="diceValues" :rolling="diceRolling" />
+        <Dice
+          :values="diceValues ?? [1, 1]"
+          :rolling="diceRolling ?? false"
+          @roll-done="onDiceRollDone"
+        />
       </div>
     </div>
   </div>

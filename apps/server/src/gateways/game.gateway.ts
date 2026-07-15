@@ -9,10 +9,10 @@ import {
   MessageBody,
 } from "@nestjs/websockets";
 import { Server, Socket } from "socket.io";
-import { Logger } from "@nestjs/common";
+import { Logger, OnModuleInit } from "@nestjs/common";
 import { GamesService } from "../games/games.service";
 import { AuthService } from "../auth/auth.service";
-import type { GameAction } from "@monopoly/shared";
+import type { GameAction, GameState, GameEvent } from "@monopoly/shared";
 
 /**
  * GameGateway — WebSocket-шлюз для real-time игры
@@ -40,12 +40,13 @@ import type { GameAction } from "@monopoly/shared";
   // transport, иначе клиент получит long-polling handshake.
   transports: ["websocket"],
 })
-export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
   @WebSocketServer()
   server!: Server;
 
   private readonly logger = new Logger(GameGateway.name);
   private userSockets = new Map<string, Socket>();
+  private callbackRegistered = false;
 
   constructor(
     @Inject(forwardRef(() => GamesService)) private readonly games: GamesService,
@@ -56,6 +57,76 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     if (!this.games) {
       console.error("[GameGateway] GamesService не заинжектирован!");
+    }
+  }
+
+  /**
+   * OnModuleInit вызывается ПОСЛЕ того, как все провайдеры модуля
+   * инициализированы. Это безопасное место для регистрации callback'а
+   * в GamesService — он гарантированно уже сконструирован.
+   *
+   * ВАЖНО: если оставить регистрацию в конструкторе, при
+   * circular dependency между GameGateway и GamesService `this.games`
+   * может быть прокси, и присвоение `this.games.onStateChanged = ...`
+   * может «потеряться». OnModuleInit решает эту проблему.
+   */
+  onModuleInit() {
+    if (this.callbackRegistered) return;
+    this.games.onStateChanged = (gameId, state, event, dice, card) => {
+      this.logger.log(
+        `[onStateChanged-cb] called gameId=${gameId} phase=${state.phase} dice=${
+          dice ? `[${dice[0]},${dice[1]}]` : "—"
+        }`,
+      );
+      this.broadcastState(gameId, state, event, dice, card);
+    };
+    this.callbackRegistered = true;
+    this.logger.log(
+      `[GameGateway] onStateChanged callback registered (onModuleInit). isGamesDefined=${!!this.games}`,
+    );
+  }
+
+  /**
+   * Broadcast обновления state в комнату `game:<gameId>`.
+   * Вызывается из `GamesService.onStateChanged` для ЛЮБЫХ изменений
+   * (и от действий игрока, и от ходов ботов).
+   */
+  private broadcastState(
+    gameId: string,
+    state: GameState,
+    event?: GameEvent,
+    dice?: [number, number],
+    card?: unknown,
+  ) {
+    // Логируем сколько сокетов сейчас в комнате — поможет понять,
+    // доходит ли broadcast вообще.
+    const room = `game:${gameId}`;
+    const sockets = this.server.sockets.adapter.rooms.get(room);
+    this.logger.log(
+      `[broadcastState] gameId=${gameId} phase=${state.phase} dice=${
+        dice ? `[${dice[0]},${dice[1]}]` : "—"
+      } socketsInRoom=${sockets?.size ?? 0}`,
+    );
+
+    this.server.to(room).emit("game:state", state);
+    if (event) {
+      this.server.to(room).emit("game:event", event);
+    }
+    // Дополнительно шлём `game:dice` — для анимации кубиков на клиенте.
+    if (dice) {
+      const isDouble = dice[0] === dice[1];
+      this.broadcastDice(gameId, {
+        playerId: state.players[state.currentPlayerIndex]?.id ?? "",
+        dice,
+        isDouble,
+      });
+    }
+    // Рассылаем карточку (Шанс/Казна) если есть
+    if (card) {
+      this.broadcastCard(gameId, {
+        playerId: state.players[state.currentPlayerIndex]?.id ?? "",
+        card,
+      });
     }
   }
 
@@ -82,6 +153,17 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.userSockets.set(payload.sub, client);
 
       this.logger.log(`WS connected: ${payload.sub}`);
+
+      // Восстанавливаем `gameId` для комнаты: клиент мог прислать
+      // `lastGameId` в handshake.query (для автоматического реконнекта).
+      // Без этого broadcast через `server.to("game:<id>")` не дойдёт
+      // до только что пересоединившегося сокета.
+      const lastGameId = (client.handshake.query?.lastGameId as string) || "";
+      if (lastGameId) {
+        client.data.gameId = lastGameId;
+        client.join(`game:${lastGameId}`);
+        this.logger.log(`WS re-joined room game:${lastGameId} for user ${payload.sub}`);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Invalid token on WS connect: ${msg}`);
@@ -158,6 +240,30 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   /**
+   * Запрос свежего state при reconnect.
+   * Клиент шлёт это после восстановления соединения, чтобы подтянуть
+   * изменения, прошедшие за время разрыва.
+   */
+  @SubscribeMessage("reconnect:request_state")
+  async onReconnectRequest(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() p: { gameId: string },
+  ) {
+    const state = await this.games.getGameState(p.gameId);
+    if (!state) {
+      return { ok: false, error: "Партия не найдена" };
+    }
+
+    // Если этот сокет ещё не в комнате (новый после реконнекта) — добавляем.
+    if (!client.rooms.has(`game:${p.gameId}`)) {
+      client.join(`game:${p.gameId}`);
+      client.data.gameId = p.gameId;
+    }
+
+    return { ok: true, data: { state } };
+  }
+
+  /**
    * Действие игрока
    */
   @SubscribeMessage("game:action")
@@ -182,7 +288,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const result = await this.games.applyAction(req.gameId, playerId, req.action);
 
-      this.server.to(`game:${req.gameId}`).emit("game:state", result.state);
+      // broadcast `game:state` + `game:event` + `game:dice` уже сделан
+      // в `GamesService.onStateChanged` (зарегистрирован в конструкторе).
+      // Здесь только отдаём синхронный ответ на action callback.
+
+      // Дополнительная страховка: отправляем `game:state` напрямую
+      // инициатору, на случай если `onStateChanged` отработал, но по какой-то
+      // причине broadcast не дошёл (комната могла «отвалиться» из-за
+      // реконнекта сокета). Это даст UI минимум один шанс обновиться.
+      client.emit("game:state", result.state);
 
       return { ok: true, data: { state: result.state, dice: result.dice, card: result.card } };
     } catch (err: unknown) {

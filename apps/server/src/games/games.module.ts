@@ -5,6 +5,10 @@ import { JailHandlerService } from "./handlers/jail-handler.service";
 import { CardHandlerService } from "./handlers/card-handler.service";
 import { RentCalculator } from "./handlers/rent-calculator";
 import { BankruptcyService } from "./handlers/bankruptcy.service";
+import { AuctionService } from "./handlers/auction.service";
+import { TradeService } from "./handlers/trade.service";
+import { BotService } from "./bots/bot.service";
+import { GamesSaveController } from "./games-save.controller";
 import { GameGateway } from "../gateways/game.gateway";
 import { AuthModule } from "../auth/auth.module";
 
@@ -26,24 +30,31 @@ import { AuthModule } from "../auth/auth.module";
  */
 @Module({
   imports: [AuthModule],
+  controllers: [GamesSaveController],
   providers: [
     GamesService,
     GameInitializerService,
+    BotService,
     JailHandlerService,
     CardHandlerService,
     RentCalculator,
     BankruptcyService,
+    AuctionService,
+    TradeService,
     GameGateway,
   ],
   exports: [
     GamesService,
     GameGateway,
+    BotService,
     // handler-ы экспортируем на случай будущих WS-команд (например,
     // "списать ренту" вне хода игрока).
     RentCalculator,
     JailHandlerService,
     CardHandlerService,
     BankruptcyService,
+    AuctionService,
+    TradeService,
   ],
 })
 export class GamesModule {}

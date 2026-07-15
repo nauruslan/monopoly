@@ -112,4 +112,27 @@ export class GameRepository {
       .returning();
     return player;
   }
+
+  /**
+   * полностью перезаписать snapshot партии (для load).
+   * Возвращает `true`, если версия совпала и UPDATE прошёл.
+   * В отличие от `updateSnapshot`, не бросает исключений при конфликте —
+   * просто сигнализирует, что snapshot не был применён.
+   */
+  async replaceSnapshot(
+    id: string,
+    snapshot: GameState,
+    expectedVersion: number,
+  ): Promise<boolean> {
+    const [game] = await this.db
+      .update(games)
+      .set({
+        stateSnapshot: snapshot,
+        version: expectedVersion + 1,
+        lastActivityAt: new Date(),
+      })
+      .where(and(eq(games.id, id), eq(games.version, expectedVersion)))
+      .returning();
+    return !!game;
+  }
 }

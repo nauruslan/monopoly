@@ -17,6 +17,7 @@ import type {
   Phase,
   Card,
   CardDeckState,
+  Cell,
 } from "@monopoly/shared";
 import { GameRepository } from "../db/repositories/game.repository";
 import { GameInitializerService } from "./game-initializer.service";
@@ -56,6 +57,8 @@ export class GamesService {
   private botCardTimers = new Map<string, NodeJS.Timeout>();
   /** Таймеры авто-CONFIRM_TAX для ботов (фаза TAX_PAYMENT). */
   private botTaxTimers = new Map<string, NodeJS.Timeout>();
+  /** Таймеры авто-CONFIRM_RENT_PAYMENT для ботов (фаза PAY_RENT). */
+  private botRentTimers = new Map<string, NodeJS.Timeout>();
   /** Таймеры авто-CONFIRM_LANDING для ботов (фаза RESOLVING_LANDING). */
   private botLandingTimers = new Map<string, NodeJS.Timeout>();
   /** Таймеры авто-CONFIRM_END_TURN для ботов (фаза END_TURN). */
@@ -248,6 +251,11 @@ export class GamesService {
     // 4) Если сейчас TAX_PAYMENT и ход бота — таймер CONFIRM_TAX.
     if (player.kind === "bot" && state.phase === "TAX_PAYMENT") {
       this.scheduleBotTaxDone(state, gameId, player);
+    }
+
+    // 4.1) Если сейчас PAY_RENT и ход бота — таймер CONFIRM_RENT_PAYMENT.
+    if (player.kind === "bot" && state.phase === "PAY_RENT") {
+      this.scheduleBotRentDone(state, gameId, player);
     }
 
     // 5) Если сейчас RESOLVING_LANDING и ход бота — таймер CONFIRM_LANDING.
@@ -578,12 +586,18 @@ export class GamesService {
 
     // PROPERTY / RAILROAD / UTILITY.
     if (cell.type === "PROPERTY" || cell.type === "RAILROAD" || cell.type === "UTILITY") {
+      // На всякий случай чистим прошлый контекст.
       if (!cell.ownerId) {
+        state.rentContext = undefined;
         state.phase = "BUY_DECISION";
       } else if (cell.ownerId === player.id) {
+        state.rentContext = undefined;
         state.phase = "BUILDING";
       } else {
-        // Чужая — переходим в PAY_RENT (спишем ренту отдельной фазой).
+        // Чужая — рассчитываем ренту заранее и кладём в state.rentContext,
+        // затем переходим в PAY_RENT. Деньги НЕ списываем — клиент должен
+        // сначала показать модалку и отправить CONFIRM_RENT_PAYMENT.
+        state.rentContext = this.buildRentContext(state, cell);
         state.phase = "PAY_RENT";
       }
       return {};
@@ -627,8 +641,16 @@ export class GamesService {
   }
 
   /**
-   * PAY_RENT — списываем ренту (за пользование чужой собственностью).
-   * Допустимые actions: CONFIRM_RENT_PAYMENT, END_TURN.
+   * PAY_RENT — двухфазная оплата ренты (аренда чужой собственности):
+   *
+   *  1) При входе в фазу (в `handleResolvingLanding`) сервер рассчитывает
+   *     `rent` и кладёт его в `state.rentContext` (плюс ID владельца).
+   *     Деньги НЕ списываются.
+   *  2) Клиент показывает модалку с суммой и владельцем. По «OK» клиент
+   *     отправляет `CONFIRM_RENT_PAYMENT` — и только тогда сервер списывает
+   *     деньги и переходит в `BUILDING` (или `ROLLING` при `mustRollAgain`).
+   *
+   * Допустимые actions: CONFIRM_RENT_PAYMENT.
    *
    * НЕ используется для налогов — те идут через TAX_PAYMENT (income)
    * и CARD_EFFECT (luxury).
@@ -638,38 +660,40 @@ export class GamesService {
     player: Player,
     action: GameAction,
   ): Promise<{ card?: unknown; event?: GameEvent }> {
-    if (
-      action.type !== "CONFIRM_RENT_PAYMENT" &&
-      action.type !== "END_TURN" &&
-      action.type !== "AUCTION_AUTO_PASS" // для совместимости
-    ) {
+    if (action.type !== "CONFIRM_RENT_PAYMENT") {
       throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе PAY_RENT`);
     }
 
     const cell = state.board[player.position];
     if (!cell) {
       state.phase = "BUILDING";
+      state.rentContext = undefined;
       this.advanceToNextPlayer(state);
       return {};
     }
 
     if (cell.type === "PROPERTY" || cell.type === "RAILROAD" || cell.type === "UTILITY") {
+      // Заложенная, бесхозная или своя — ренты нет.
       if (cell.isMortgaged || !cell.ownerId || cell.ownerId === player.id) {
-        // Заложенная или своя — ренты нет.
+        state.rentContext = undefined;
         this.afterRentOrTax(state, player);
         return {};
       }
-      const rent = this.rentCalc.calculate(cell, state, state.lastDice?.dice);
-      if (rent > 0 && cell.ownerId) {
-        const owner = state.players.find((p) => p.id === cell.ownerId);
-        if (owner) {
-          player.money = Math.max(0, player.money - rent);
-          owner.money += rent;
-          if (player.money === 0) {
-            this.startBankruptcyProcedure(state, player, owner, rent);
-            return {};
-          }
+      // Берём сумму из rentContext, если он есть; иначе считаем на лету.
+      const ctx = state.rentContext;
+      const rent = ctx?.amount ?? this.rentCalc.calculate(cell, state, state.lastDice?.dice);
+      const ownerId = ctx?.ownerId ?? cell.ownerId;
+      const owner = state.players.find((p) => p.id === ownerId);
+      if (owner && rent > 0) {
+        player.money = Math.max(0, player.money - rent);
+        owner.money += rent;
+        state.rentContext = undefined;
+        if (player.money === 0) {
+          this.startBankruptcyProcedure(state, player, owner, rent);
+          return {};
         }
+      } else {
+        state.rentContext = undefined;
       }
       this.afterRentOrTax(state, player);
       return {};
@@ -678,6 +702,7 @@ export class GamesService {
     // Legacy-fallback: TAX без taxVariant (старые данные).
     if (cell.type === "TAX" && cell.taxAmount) {
       player.money = Math.max(0, player.money - cell.taxAmount);
+      state.rentContext = undefined;
       if (player.money === 0) {
         this.startBankruptcyProcedure(state, player, null, cell.taxAmount);
         return {};
@@ -687,6 +712,7 @@ export class GamesService {
     }
 
     // На всякий случай — fallback.
+    state.rentContext = undefined;
     this.afterRentOrTax(state, player);
     return {};
   }
@@ -729,6 +755,27 @@ export class GamesService {
     } else {
       state.phase = "BUILDING";
     }
+  }
+
+  /**
+   * Хелпер: рассчитать ренту для чужой клетки и вернуть контекст
+   * для `state.rentContext`. Не учитывает возможное банкротство — это
+   * уже решается в `handlePayRent` по факту `CONFIRM_RENT_PAYMENT`.
+   *
+   * Принимает `Cell` (мы всегда зовём с `state.board[player.position]`).
+   */
+  private buildRentContext(state: GameState, cell: Cell): GameState["rentContext"] {
+    if (!cell.ownerId) return undefined;
+    if (cell.isMortgaged) return undefined;
+    const owner = state.players.find((p) => p.id === cell.ownerId);
+    if (!owner) return undefined;
+    const rent = this.rentCalc.calculate(cell, state, state.lastDice?.dice);
+    if (rent <= 0) return undefined;
+    return {
+      ownerId: owner.id,
+      ownerName: owner.displayName,
+      amount: rent,
+    };
   }
 
   /**
@@ -792,16 +839,19 @@ export class GamesService {
     if (state.cardContext.playerId !== player.id) {
       throw new ForbiddenException("Эта карта не для вас");
     }
-    // Переход в фазу применения эффекта.
-    state.phase = "CARD_EFFECT";
-    return { card: state.cardContext.card };
+    // Применяем эффект сразу при CONFIRM_CARD и сразу выставляем финальную фазу.
+    // Раньше здесь был промежуточный переход в CARD_EFFECT, но клиент не
+    // отправлял второй CONFIRM_CARD → партия зависала.
+    return this.applyCardEffectAndAdvance(state, player);
   }
 
   /**
-   * CARD_EFFECT — фаза применения эффекта карты.
+   * CARD_EFFECT — фаза применения эффекта карты (вызывается, если
+   * `handleCardReveal` оставил партию в CARD_EFFECT без применения
+   * — например, для ботов или для восстановления после reconnect).
    *
    * На этом этапе мы ПРИМЕНЯЕМ эффект, и в зависимости от результата:
-   *  - `money` / `jail-free` / `luxury-tax-house` → END_TURN (или ROLLING при mustRollAgain)
+   *  - `money` / `jail-free` / `luxury-tax-house` → BUILDING (или ROLLING при mustRollAgain)
    *  - `move` (телепорт)    → MOVE_ANIMATION (фишка полетит на новую клетку)
    *  - `go-salary`          → MOVE_ANIMATION (с начислением goSalary)
    *  - `move-relative`      → MOVE_ANIMATION
@@ -819,8 +869,34 @@ export class GamesService {
       throw new ForbiddenException("Эта карта не для вас");
     }
     if (state.cardContext.applied) {
-      // Защита от двойного применения.
-      throw new BadRequestException("Эффект карты уже применён");
+      // Эффект уже применён в CARD_REVEAL. Просто продвигаем фазу.
+      this.advanceFromCardEffect(state, player);
+      return { card: state.cardContext.card };
+    }
+    return this.applyCardEffectAndAdvance(state, player);
+  }
+
+  /**
+   * Общая логика применения эффекта карточки (вызывается из CARD_REVEAL
+   * или CARD_EFFECT). Идемпотентно — если эффект уже применён, просто
+   * выставляет фазу.
+   *
+   * ВАЖНО (bugfix «двойной модалки»): после применения эффекта `cardContext`
+   * ОБЯЗАТЕЛЬНО очищается во всех ветках. Раньше для `move` и `move-relative`
+   * клиент продолжал видеть `state.cardContext.card` в фазе `MOVE_ANIMATION`,
+   * и при повторном получении `game:state` (reconnect, повторный mount, ...)
+   * watcher заново открывал модалку карточки.
+   */
+  private applyCardEffectAndAdvance(
+    state: GameState,
+    player: Player,
+  ): { card?: unknown; event?: GameEvent } {
+    if (!state.cardContext) {
+      throw new BadRequestException("Нет контекста карты");
+    }
+    if (state.cardContext.applied) {
+      this.advanceFromCardEffect(state, player);
+      return { card: state.cardContext.card };
     }
 
     const card = state.cardContext.card;
@@ -833,11 +909,25 @@ export class GamesService {
         player.money += state.settings.goSalary;
       }
       // Переставляем позицию игрока.
+      const from = player.position;
       player.position = outcome.target;
-      // Очищаем контекст броска, чтобы дальше была анимация перемещения.
-      state.lastDice = undefined;
+      // Шаги для анимации (всегда положительные, по модулю 40).
+      const steps = (outcome.target - from + 40) % 40;
+      // Заполняем moveAnimation — клиент использует его для анимации фишки.
+      state.moveAnimation = {
+        playerId: player.id,
+        from,
+        to: outcome.target,
+        steps,
+        isDouble: false,
+      };
+      // Очищаем cardContext — карта «съедена», эффект move применён.
+      // Без этого клиент видел ту же карту в MOVE_ANIMATION и мог
+      // повторно открыть модалку.
+      state.cardContext = undefined;
       state.phase = "MOVE_ANIMATION";
-      // Фиктивный dice с 0 шагами — клиент поймёт, что это телепорт.
+      // lastDice с 0 шагами — handleMoveAnimation не сдвинет игрока повторно,
+      // т.к. position уже корректная; moveAnimation уже инициализирован.
       state.lastDice = { dice: [0, 0], isDouble: false };
       // Передаём карту наверх (для логов и broadcast).
       return { card };
@@ -851,13 +941,22 @@ export class GamesService {
       if (passedGo) {
         player.money += state.settings.goSalary;
       }
+      const steps = Math.abs(outcome.steps);
       player.position = newPos;
-      state.lastDice = undefined;
+      // Заполняем moveAnimation — клиент анимирует фишку.
+      state.moveAnimation = {
+        playerId: player.id,
+        from: oldPos,
+        to: newPos,
+        steps,
+        isDouble: false,
+      };
+      // Очищаем cardContext (см. комментарий в ветке `move`).
+      state.cardContext = undefined;
       state.phase = "MOVE_ANIMATION";
-      // Для анимации используем dice с фактическим количеством шагов.
-      const steps = outcome.steps;
+      // lastDice для moveStepMs (хотя moveAnimation уже даёт steps).
       state.lastDice = {
-        dice: steps >= 0 ? [0, steps] : [Math.abs(steps), 0],
+        dice: outcome.steps >= 0 ? [0, steps] : [steps, 0],
         isDouble: false,
       };
       return { card };
@@ -874,6 +973,23 @@ export class GamesService {
     this.afterRentOrTax(state, player);
     state.cardContext = undefined;
     return { card };
+  }
+
+  /**
+   * Продвижение фазы для уже применённой карты.
+   * Используется в CARD_EFFECT, если эффект уже применён в CARD_REVEAL,
+   * и нужно просто выставить финальную фазу.
+   */
+  private advanceFromCardEffect(state: GameState, player: Player) {
+    // Если это move/move-relative/go-salary — фаза уже MOVE_ANIMATION.
+    if (state.phase === "MOVE_ANIMATION" && state.moveAnimation) {
+      return;
+    }
+    if (state.phase === "JAIL_DECISION") {
+      return;
+    }
+    this.afterRentOrTax(state, player);
+    state.cardContext = undefined;
   }
 
   /**
@@ -1400,6 +1516,7 @@ export class GamesService {
       this.botMoveAnimTimers,
       this.botCardTimers,
       this.botTaxTimers,
+      this.botRentTimers,
       this.botLandingTimers,
       this.botEndTurnTimers,
       this.auctionTimers,
@@ -1583,6 +1700,33 @@ export class GamesService {
       }
     }, ms);
     this.botTaxTimers.set(gameId, timer);
+  }
+
+  /**
+   * Бот автоматически подтверждает оплату ренты (фаза PAY_RENT) через 2 секунды.
+   */
+  private scheduleBotRentDone(state: GameState, gameId: string, current: Player) {
+    const prev = this.botRentTimers.get(gameId);
+    if (prev) {
+      clearTimeout(prev);
+      this.botRentTimers.delete(gameId);
+    }
+    const ms = 2000;
+    const timer = setTimeout(async () => {
+      this.botRentTimers.delete(gameId);
+      try {
+        const s = this.activeGames.get(gameId);
+        if (!s) return;
+        if (s.phase !== "PAY_RENT") return;
+        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
+        await this.applyAction(gameId, current.id, { type: "CONFIRM_RENT_PAYMENT" });
+      } catch (err) {
+        this.logger.error(
+          `Bot CONFIRM_RENT_PAYMENT failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, ms);
+    this.botRentTimers.set(gameId, timer);
   }
 
   /**

@@ -45,19 +45,19 @@ export const useGameStore = defineStore("game", () => {
     lastActivityAt: new Date().toISOString(),
   });
 
-  // ============ WS-STATE ============
+  // WS-STATE
   const gameId = ref<string>("");
   const isConnected = ref(false);
   const socketError = ref<string | null>(null);
 
-  // ============ DICE (значения приходят с сервера) ============
+  // DICE (значения приходят с сервера)
   const diceValues = ref<[number, number]>([1, 1]);
   const diceRolling = ref(false);
   const lastDiceRoll = ref<[number, number] | null>(null);
   const lastDicePlayerId = ref<string | null>(null);
   const lastDiceIsDouble = ref(false);
 
-  // ============ CARDS (последняя карточка с сервера) ============
+  // CARDS (последняя карточка с сервера)
   const lastDrawnCard = ref<Card | null>(null);
   /**
    * `true` пока фаза `CARD_REVEAL`. Используется для UI-индикации,
@@ -75,7 +75,7 @@ export const useGameStore = defineStore("game", () => {
     return state.value.board[p.position] || null;
   });
 
-  // ============ WS-CONNECTION ============
+  // WS-CONNECTION
 
   function connectAndJoin(gId: string) {
     gameId.value = gId;
@@ -98,6 +98,7 @@ export const useGameStore = defineStore("game", () => {
           newState.players[newState.currentPlayerIndex]?.id
         } pos=${newState.players[newState.currentPlayerIndex]?.position}`,
       );
+      const previousPhase = state.value.phase;
       state.value = newState;
       // Сбрасываем cardPendingConfirm при смене фазы с CARD_REVEAL.
       if (newState.phase !== "CARD_REVEAL" && newState.phase !== "CARD_EFFECT") {
@@ -105,6 +106,23 @@ export const useGameStore = defineStore("game", () => {
       }
       if (newState.phase === "CARD_REVEAL") {
         cardPendingConfirm.value = true;
+        // Анализ состояния: берём карту прямо из `state.cardContext`,
+        // чтобы UI мог отрисовать модалку даже если WS-событие `game:card`
+        // по какой-то причине не дошло (потеря пакета, реконнект и т.п.).
+        if (newState.cardContext?.card) {
+          lastDrawnCard.value = newState.cardContext.card;
+        }
+      }
+      // После CARD_REVEAL карта «съедена» — обнуляем локальный кеш
+      // НЕЗАВИСИМО от того, очистил ли сервер cardContext.
+      // (Раньше очистка зависела от `!newState.cardContext` — ненадёжно:
+      // для move/move-relative сервер оставлял cardContext заполненным
+      // до следующего CARD_REVEAL, и `lastDrawnCard` не сбрасывался, из-за
+      // чего модалка могла появиться второй раз при повторном получении
+      // game:state — reconnect, повторный mount и т.п.)
+      if (previousPhase === "CARD_REVEAL" && newState.phase !== "CARD_REVEAL") {
+        lastDrawnCard.value = null;
+        cardPendingConfirm.value = false;
       }
     });
     socket.on("lobby:update", () => {
@@ -133,8 +151,14 @@ export const useGameStore = defineStore("game", () => {
 
     socket.on("game:card", (payload: { playerId: string; card: Card }) => {
       console.log(`[game.ts] game:card received: playerId=${payload.playerId}`);
-      lastDrawnCard.value = payload.card;
-      cardPendingConfirm.value = true;
+      // Bugfix «двойной модалки»: раньше здесь обновлялся `lastDrawnCard`
+      // — но сервер также присылает карту в `state.cardContext` через
+      // `game:state`, и GameView берёт её оттуда напрямую.
+      // Чтобы не было двух источников истины и двойного открытия
+      // модалки, оставляем `lastDrawnCard` как вспомогательный кеш,
+      // но НЕ обновляем его при `game:card`. Это предотвращает ловлю
+      // «старой» карты из этого события после того, как state уже ушёл
+      // дальше.
     });
 
     socket.emit(
@@ -198,15 +222,17 @@ export const useGameStore = defineStore("game", () => {
           console.error("Action failed:", response.error);
           return;
         }
-        if (response.data?.card) {
-          lastDrawnCard.value = response.data.card;
-          cardPendingConfirm.value = true;
-        }
+        // Bugfix «двойной модалки»: раньше здесь обновлялся `lastDrawnCard`
+        // на ЛЮБОЙ успешный response с `card`. Из-за этого watcher на
+        // `lastDrawnCard` в GameView открывал модалку второй раз, потому
+        // что сервер присылает карту ещё и в WS-событии `game:card` и в
+        // `state.cardContext` через `game:state`. Сейчас UI читает карту
+        // напрямую из `state.cardContext`.
       },
     );
   }
 
-  // ============ DICE ANIMATION (UI-only) ============
+  // DICE ANIMATION (UI-only)
   function setDiceRolling(v: boolean) {
     diceRolling.value = v;
   }

@@ -283,20 +283,126 @@ describe("GamesService.applyAction (FSM)", () => {
     expect(activeState.cardContext?.applied).toBe(false);
   });
 
-  it("CONFIRM_CARD в CARD_REVEAL → переходит в CARD_EFFECT", async () => {
+  it("CONFIRM_CARD в CARD_REVEAL применяет эффект и сразу переходит в финальную фазу", async () => {
     const chanceCell = activeState.board.find((c) => c.type === "CHANCE");
     if (!chanceCell) {
-      // Если нет CHANCE — пропускаем.
       return;
     }
     activeState.players[0]!.position = chanceCell.id;
     activeState.lastDice = { dice: [0, 0], isDouble: false };
     activeState.phase = "RESOLVING_LANDING";
 
+    // Детерминированно поставим карту с эффектом money, чтобы избежать
+    // неоднозначности (move/goto-jail ведут в MOVE_ANIMATION/JAIL_DECISION).
+    const { CHANCE_CARDS } = await import("@monopoly/shared");
+    const moneyCard = CHANCE_CARDS.find((c) => c.effect.kind === "money");
+    if (!moneyCard) return;
+    activeState.cardDecks = {
+      chance: { cards: [moneyCard.id], cursor: 0 },
+      treasury: { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 },
+    };
+    // Перевытягиваем.
+    activeState.phase = "RESOLVING_LANDING";
+    await act({ type: "CONFIRM_LANDING" });
+    expect(activeState.phase).toBe("CARD_REVEAL");
+    const moneyBefore = activeState.players[0]!.money;
+    const delta = moneyCard.effect.kind === "money" ? moneyCard.effect.amount : 0;
+
+    await act({ type: "CONFIRM_CARD" });
+    // Эффект применён сразу: money-карты приводят в BUILDING (или ROLLING при mustRollAgain).
+    expect(["BUILDING", "ROLLING"]).toContain(activeState.phase);
+    expect(activeState.players[0]!.money).toBe(moneyBefore + delta);
+    expect(activeState.cardContext).toBeUndefined();
+  });
+
+  it("Карточка с эффектом move → state.moveAnimation заполнен", async () => {
+    // Поставим игрока на клетку CHANCE.
+    const chanceCell = activeState.board.find((c) => c.type === "CHANCE");
+    if (!chanceCell) return;
+    activeState.players[0]!.position = chanceCell.id;
+    activeState.lastDice = { dice: [0, 0], isDouble: false };
+    activeState.phase = "RESOLVING_LANDING";
+
+    // CONFIRM_LANDING → CARD_REVEAL (карта вытянута).
     await act({ type: "CONFIRM_LANDING" });
     expect(activeState.phase).toBe("CARD_REVEAL");
 
+    // Детерминированно подменим колоду так, чтобы вытянуть «move» карту.
+    const { CHANCE_CARDS } = await import("@monopoly/shared");
+    const moveCard = CHANCE_CARDS.find((c) => c.effect.kind === "move");
+    if (!moveCard) return;
+    activeState.cardDecks = {
+      chance: { cards: [moveCard.id], cursor: 0 },
+      treasury: { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 },
+    };
+    // Перевытягиваем карту.
+    activeState.phase = "RESOLVING_LANDING";
+    await act({ type: "CONFIRM_LANDING" });
+    expect(activeState.phase).toBe("CARD_REVEAL");
+    expect(activeState.cardContext?.card.id).toBe(moveCard.id);
+
+    // CONFIRM_CARD → CARD_EFFECT → MOVE_ANIMATION.
     await act({ type: "CONFIRM_CARD" });
-    expect(activeState.phase).toBe("CARD_EFFECT");
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+
+    // Главная проверка: state.moveAnimation заполнен и корректен.
+    expect(activeState.moveAnimation).toBeDefined();
+    expect(activeState.moveAnimation?.playerId).toBe("p0");
+    expect(activeState.moveAnimation?.from).toBe(chanceCell.id);
+    if (moveCard.effect.kind === "move") {
+      expect(activeState.moveAnimation?.to).toBe(moveCard.effect.target);
+    }
+    expect(activeState.moveAnimation?.steps).toBeGreaterThan(0);
+    expect(activeState.moveAnimation?.steps).toBeLessThanOrEqual(40);
+  });
+
+  it("RESOLVING_LANDING на чужой собственности → PAY_RENT, state.rentContext заполнен", async () => {
+    // Найдём первую PROPERTY-клетку и назначим её владельцем p1.
+    const prop = activeState.board.find((c) => c.type === "PROPERTY");
+    if (!prop) return;
+    prop.ownerId = "p1";
+    // Поставим p0 на эту клетку.
+    activeState.players[0]!.position = prop.id;
+    activeState.lastDice = { dice: [3, 4], isDouble: false };
+    activeState.phase = "RESOLVING_LANDING";
+
+    await act({ type: "CONFIRM_LANDING" });
+
+    expect(activeState.phase).toBe("PAY_RENT");
+    // Главная проверка: rentContext заполнен (amount > 0, ownerId = p1).
+    expect(activeState.rentContext).toBeDefined();
+    expect(activeState.rentContext?.ownerId).toBe("p1");
+    expect(activeState.rentContext?.ownerName).toBe("Bob");
+    expect(activeState.rentContext?.amount).toBeGreaterThan(0);
+    // Деньги ещё НЕ списаны до подтверждения.
+    expect(activeState.players[0]!.money).toBe(1500);
+    expect(activeState.players[1]!.money).toBe(1500);
+  });
+
+  it("CONFIRM_RENT_PAYMENT в PAY_RENT → списывает деньги и переходит в BUILDING", async () => {
+    const prop = activeState.board.find((c) => c.type === "PROPERTY");
+    if (!prop) return;
+    prop.ownerId = "p1";
+    activeState.players[0]!.position = prop.id;
+    activeState.lastDice = { dice: [3, 4], isDouble: false };
+    activeState.phase = "RESOLVING_LANDING";
+    await act({ type: "CONFIRM_LANDING" });
+    expect(activeState.phase).toBe("PAY_RENT");
+    const amount = activeState.rentContext?.amount ?? 0;
+    expect(amount).toBeGreaterThan(0);
+    const p0Before = activeState.players[0]!.money;
+    const p1Before = activeState.players[1]!.money;
+
+    await act({ type: "CONFIRM_RENT_PAYMENT" });
+
+    // Деньги списались у p0 и начислились p1.
+    expect(activeState.players[0]!.money).toBe(p0Before - amount);
+    expect(activeState.players[1]!.money).toBe(p1Before + amount);
+    // Контекст очищен.
+    expect(activeState.rentContext).toBeUndefined();
+    // Перешли в фазу анализа состояния.
+    expect(["BUILDING", "ROLLING"]).toContain(activeState.phase);
   });
 });

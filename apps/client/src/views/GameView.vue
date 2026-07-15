@@ -9,6 +9,7 @@ import CellTooltip from "../components/CellTooltip.vue";
 import BuyModal from "../components/modals/BuyModal.vue";
 import CardModal from "../components/modals/CardModal.vue";
 import TaxModal from "../components/modals/TaxModal.vue";
+import RentModal from "../components/modals/RentModal.vue";
 import JailModal from "../components/modals/JailModal.vue";
 import GameOverModal from "../components/modals/GameOverModal.vue";
 import AuctionModal from "../components/modals/AuctionModal.vue";
@@ -71,6 +72,11 @@ const showTaxModal = ref(false);
 const taxAmount = ref(0);
 const taxCellName = ref("");
 
+const showRentModal = ref(false);
+const rentAmount = ref(0);
+const rentOwnerName = ref("");
+const rentCellName = ref("");
+
 const showJailModal = ref(false);
 const showAuctionModal = ref(false);
 const showTradeModal = ref(false);
@@ -114,6 +120,9 @@ function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
 }
 
 function dispatchAction(action: GameAction) {
+  // Передаём прямо в стор — клиент и так подписан на game:state,
+  // никакого «in-flight» флага не нужно: сервер всё равно отклонит
+  // дубль (фаза уже не та), а UI синхронизируется по game:state.
   game.sendAction(action);
 }
 
@@ -168,7 +177,10 @@ watch(
     // Показываем модалку «Заплатите N₽». По ОК шлём CONFIRM_TAX —
     // сервер спишет деньги.
     if (newPhase === "TAX_PAYMENT" && isMyTurn.value) {
-      const cell = state.value.board[currentPlayer.value?.position ?? -1];
+      // В TAX_PAYMENT мы только что приземлились — currentPlayer.position
+      // уже финален, но в крайнем случае используем moveAnimation.to.
+      const pos = currentPlayer.value?.position ?? state.value.moveAnimation?.to ?? -1;
+      const cell = state.value.board[pos];
       if (cell && cell.taxAmount) {
         taxAmount.value = cell.taxAmount;
         taxCellName.value = cell.name;
@@ -179,11 +191,80 @@ watch(
       showTaxModal.value = false;
     }
 
+    // PAY_RENT — аренда чужой собственности.
+    // Сервер прислал state.phase = "PAY_RENT" + state.rentContext.
+    // Деньги ещё НЕ списаны — показываем модалку «Заплатите N₽ владельцу X».
+    // По «Оплатить» шлём CONFIRM_RENT_PAYMENT — сервер списывает деньги
+    // и переходит в BUILDING (или ROLLING при mustRollAgain).
+    if (newPhase === "PAY_RENT" && isMyTurn.value) {
+      const ctx = state.value.rentContext;
+      if (ctx && ctx.amount > 0) {
+        rentAmount.value = ctx.amount;
+        rentOwnerName.value = ctx.ownerName ?? "";
+        const pos = currentPlayer.value?.position ?? state.value.moveAnimation?.to ?? -1;
+        const cell = state.value.board[pos];
+        rentCellName.value = cell?.name ?? "";
+        showRentModal.value = true;
+      } else {
+        // Страховка: если сервер не положил rentContext (аномалия),
+        // не блокируем партию — подтверждаем сразу, деньги не спишутся
+        // (handlePayRent в этом случае тоже ничего не делает).
+        console.warn("[GameView] PAY_RENT без rentContext — авто-CONFIRM");
+        dispatchAction({ type: "CONFIRM_RENT_PAYMENT" });
+      }
+    }
+    if (newPhase !== "PAY_RENT") {
+      showRentModal.value = false;
+    }
+
+    // CARD_REVEAL — анализ состояния: гарантируем, что модалка карточки
+    // показана. Стор `game.ts` уже вытащил cardContext.card в lastDrawnCard.
+    // Если же по какой-то причине lastDrawnCard не пришёл (WS-событие
+    // потерялось), пробуем ещё раз взять из state.cardContext.
+    //
+    // Bugfix «двойной модалки»: открываем модалку ТОЛЬКО если сервер
+    // подтвердил наличие карты в `state.cardContext`. Без этой проверки
+    // `lastDrawnCard` мог прийти из предыдущего CARD_REVEAL (например, после
+    // reconnect'а или повторного mount), и модалка появлялась повторно.
+    if (newPhase === "CARD_REVEAL" && isMyTurn.value) {
+      if (state.value.cardContext?.card) {
+        // Свежая карта с сервера — синхронизируем UI и показываем модалку.
+        lastDrawnCard.value = state.value.cardContext.card;
+        cardText.value = state.value.cardContext.card.text;
+        cardDeck.value =
+          (state.value.cardContext.card.deck as "chance" | "treasury" | "luxury-tax") ?? "chance";
+        showCardModal.value = true;
+      } else if (lastDrawnCard.value) {
+        // Fallback: WS-событие `game:card` потерялось, но lastDrawnCard
+        // остался с момента предыдущего CARD_REVEAL. Не показываем модалку
+        // повторно — используем кешированную карту, но только если мы
+        // уверены, что это ТЕКУЩАЯ карта (а не из прошлого цикла).
+        // Чтобы исключить дубль, требуем совпадение с уже сохранённым
+        // cardContext. Если cardContext нет — лучше авто-confirm, чем
+        // показывать старую карту.
+        console.warn(
+          "[GameView] CARD_REVEAL без cardContext, но есть lastDrawnCard — авто-CONFIRM",
+        );
+        dispatchAction({ type: "CONFIRM_CARD" });
+      } else {
+        // Страховка: если модалку нечем заполнить, не блокируем партию —
+        // шлём CONFIRM_CARD сразу, чтобы сервер не «завис» в CARD_REVEAL.
+        console.warn("[GameView] CARD_REVEAL без cardContext — авто-CONFIRM");
+        dispatchAction({ type: "CONFIRM_CARD" });
+      }
+    }
+    if (newPhase !== "CARD_REVEAL") {
+      showCardModal.value = false;
+    }
+
     // MOVE_ANIMATION — запускаем визуальное перемещение фишки.
-    // Сервер прислал `state.moveAnimation = { from, to, ... }`, а позиция
-    // игрока (`p.position`) ещё не изменена. Запускаем animatePlayerTo
-    // от `from` к `to`; внутри неё же по завершении отправится
+    // Сервер прислал `state.moveAnimation = { from, to, ... }`. Запускаем
+    // animatePlayerTo от `from` к `to`; внутри по завершении отправится
     // CONFIRM_MOVE_ANIMATION.
+    //
+    // ВАЖНО: срабатывает и для обычного броска кубиков, и для телепорта
+    // карточки (move / move-relative) — оба пути теперь заполняют
+    // state.moveAnimation в GamesService.
     if (newPhase === "MOVE_ANIMATION" && state.value.moveAnimation) {
       const ma = state.value.moveAnimation;
       animatePlayerTo(ma.playerId, ma.from, ma.to);
@@ -341,20 +422,21 @@ onBeforeUnmount(() => {
 });
 
 //  Модалка карточки (фаза CARD_REVEAL)
-watch(
-  () => game.lastDrawnCard,
-  (card) => {
-    if (card) {
-      cardText.value = card.text;
-      cardDeck.value = (card.deck as "chance" | "treasury" | "luxury-tax") ?? "chance";
-      showCardModal.value = true;
-    }
-  },
-);
+// Bugfix «двойной модалки»: ранний `watch(() => game.lastDrawnCard)` открывал
+// модалку на КАЖДОЕ появление карты — из WS-события `game:card`, из
+// `state.cardContext` и из `response.data.card` callback'а `sendAction`.
+// Сейчас показом модалки управляет ЕДИНСТВЕННЫЙ phase-watcher
+// он использует
+// только что полученный с сервера `state.cardContext.card` и не
+// полагается на lastDrawnCard. Поэтому отдельный watcher на lastDrawnCard
+// был источником двойного открытия и теперь удалён.
 
 function onCloseCard() {
+  if (!showCardModal.value) return; // защита от двойного onCloseCard
   showCardModal.value = false;
-  // Очищаем lastDrawnCard в сторе, чтобы при следующей карточке watcher сработал.
+  // Очищаем lastDrawnCard в сторе, чтобы при следующей карточке watcher
+  // в сторе (если он там нужен) сработал корректно. UI-источник истины
+  // для модалки — это `state.phase === "CARD_REVEAL"` + `state.cardContext`.
   game.clearLastDrawnCard();
   // Если мы в CARD_REVEAL и наш ход — подтверждаем.
   if (state.value.phase === "CARD_REVEAL" && isMyTurn.value) {
@@ -367,6 +449,14 @@ function onCloseTax() {
   showTaxModal.value = false;
   if (state.value.phase === "TAX_PAYMENT" && isMyTurn.value) {
     dispatchAction({ type: "CONFIRM_TAX" });
+  }
+}
+
+// Модалка аренды (фаза PAY_RENT)
+function onCloseRent() {
+  showRentModal.value = false;
+  if (state.value.phase === "PAY_RENT" && isMyTurn.value) {
+    dispatchAction({ type: "CONFIRM_RENT_PAYMENT" });
   }
 }
 
@@ -452,6 +542,15 @@ function logout() {
         :cell-name="taxCellName"
         :money="currentPlayer?.money ?? 0"
         @close="onCloseTax"
+      />
+
+      <RentModal
+        :show="showRentModal"
+        :amount="rentAmount"
+        :owner-name="rentOwnerName"
+        :cell-name="rentCellName"
+        :money="currentPlayer?.money ?? 0"
+        @close="onCloseRent"
       />
 
       <JailModal

@@ -291,13 +291,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       // broadcast `game:state` + `game:event` + `game:dice` уже сделан
       // в `GamesService.onStateChanged` (зарегистрирован в конструкторе).
       // Здесь только отдаём синхронный ответ на action callback.
-
-      // Дополнительная страховка: отправляем `game:state` напрямую
-      // инициатору, на случай если `onStateChanged` отработал, но по какой-то
-      // причине broadcast не дошёл (комната могла «отвалиться» из-за
-      // реконнекта сокета). Это даст UI минимум один шанс обновиться.
-      client.emit("game:state", result.state);
-
+      //
+      // Раньше тут был `client.emit("game:state", result.state)` — «страховка»
+      // на случай потери broadcast. Но это приводило к ДВОЙНОМУ получению
+      // `game:state` на клиенте: один из broadcast, другой из client.emit.
+      // Phase-watcher в GameView срабатывал дважды, и в редких случаях
+      // (двойной клик, race) модалка карточки/налога показывалась
+      // повторно. Удалено: надёжность broadcast обеспечивается комнатой
+      // `game:<id>` + `client.join` в `handleConnection` и при reconnect.
       return { ok: true, data: { state: result.state, dice: result.dice, card: result.card } };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

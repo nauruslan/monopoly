@@ -158,11 +158,12 @@ export class CardHandlerService {
 
       case "goto-jail": {
         // Прямой переход в тюрьму (минуя клетку GOTO_JAIL на доске).
-        // Сбрасываем флаги и помечаем как inJail.
-        player.position = 10;
-        player.inJail = true;
-        player.jailTurns = 0;
-        player.consecutiveDoubles = 0;
+        //
+        // ВАЖНО: сам `JailHandlerService.sendToJail` будет вызван
+        // в `GamesService.applyCardEffectAndAdvance` (ветка
+        // `outcome.kind === "goto-jail"`) — там же, где решается
+        // следующая фаза. Здесь же мы НЕ мутируем игрока, чтобы
+        // избежать двойной работы / циркулярной зависимости.
         return { kind: "goto-jail" };
       }
 

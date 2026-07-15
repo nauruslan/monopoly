@@ -49,17 +49,47 @@ const isMyTurn = computed(
   () => currentPlayer.value?.kind === "human" && currentPlayer.value?.id === myPlayerId.value,
 );
 
-// Допустимые кнопки панели действий (ОСНОВНОЙ ЦИКЛ)
-const canRoll = computed(
-  () => isMyTurn.value && state.value.phase === "ROLLING" && !currentPlayer.value?.inJail,
+// Допустимые кнопки панели действий (ОСНОВНОЙ ЦИКЛ).
+//
+// ВАЖНО: правила активности кнопок «Бросить кубики» и «Завершить»
+// дублируют логику из `apps/server/src/games/turn-permissions.ts`.
+// Это сделано намеренно (server-driven архитектура): UI и FSM
+// синхронизируются по одним и тем же бизнес-правилам, без зависимости
+// клиентского бандла от server-only кода.
+//
+// После выпадения дубля фаза возвращается в `ROLLING` с
+// `mustRollAgain=true`. Раньше UI показывал активные ОБЕ кнопки
+// (Бросить и Завершить) — игрок мог нажать «Завершить» и ход
+// перескакивал к другому игроку, хотя правила требуют повторного
+// броска. Теперь:
+//   - `canRoll`     активна, если это ход игрока, фаза ROLLING
+//                    и он не в тюрьме (бросок ОБЯЗАТЕЛЕН после дубля);
+//   - `canEndTurn`  активна, если фаза BUILDING и `mustRollAgain=false`
+//                    (завершение хода разрешено).
+// В фазе ROLLING кнопка «Завершить» ВСЕГДА неактивна — бросок обязателен.
+const canRoll = computed(() => {
+  if (!isMyTurn.value) return false;
+  if (state.value.phase !== "ROLLING") return false;
+  if (currentPlayer.value?.inJail) return false;
+  return true;
+});
+const canBuy = computed(
+  () => isMyTurn.value && state.value.phase === "BUY_DECISION" && !currentPlayer.value?.inJail,
 );
-const canBuy = computed(() => isMyTurn.value && state.value.phase === "BUY_DECISION");
-const canEndTurn = computed(
-  () =>
-    isMyTurn.value &&
-    (state.value.phase === "ROLLING" || state.value.phase === "BUILDING") &&
-    !diceRolling.value,
-);
+const canEndTurn = computed(() => {
+  if (!isMyTurn.value) return false;
+  // В тюрьме (JAIL_DECISION) единственный способ продолжить — END_TURN.
+  if (state.value.phase === "JAIL_DECISION") return true;
+  // Завершить ход можно ТОЛЬКО в фазе BUILDING (после покупки/события).
+  // В фазе ROLLING бросок обязателен — кнопка «Завершить» неактивна
+  // даже в начале хода без `mustRollAgain` (бросок всё равно обязателен).
+  if (state.value.phase !== "BUILDING") return false;
+  if (diceRolling.value) return false;
+  // Если после события игрок ОБЯЗАН бросить ещё раз (правило дубля) —
+  // `END_TURN` недопустим, сервер сам переключит фазу в ROLLING.
+  if (currentPlayer.value?.mustRollAgain) return false;
+  return true;
+});
 const mustRollAgain = computed(() => currentPlayer.value?.mustRollAgain === true);
 
 // Модалки
@@ -161,7 +191,11 @@ watch(
 watch(
   () => state.value.phase,
   (newPhase: Phase) => {
-    showJailModal.value = newPhase === "JAIL_DECISION";
+    // Только что попал в тюрьму (в этом ходу) — модалку с тремя способами
+    // выхода НЕ показываем: игроку остаётся только END_TURN. Модалка
+    // появится в начале СЛЕДУЮЩЕГО хода, когда `state.justEnteredJail`
+    // будет сброшен в `handleStartTurn`.
+    showJailModal.value = newPhase === "JAIL_DECISION" && !state.value.justEnteredJail;
     showBuyModal.value = newPhase === "BUY_DECISION" && isMyTurn.value;
     showAuctionModal.value =
       (newPhase === "AUCTION_BIDDING" || newPhase === "AUCTION_RESOLVE") &&
@@ -221,8 +255,7 @@ watch(
     // показана. Стор `game.ts` уже вытащил cardContext.card в lastDrawnCard.
     // Если же по какой-то причине lastDrawnCard не пришёл (WS-событие
     // потерялось), пробуем ещё раз взять из state.cardContext.
-    //
-    // Bugfix «двойной модалки»: открываем модалку ТОЛЬКО если сервер
+    // открываем модалку ТОЛЬКО если сервер
     // подтвердил наличие карты в `state.cardContext`. Без этой проверки
     // `lastDrawnCard` мог прийти из предыдущего CARD_REVEAL (например, после
     // reconnect'а или повторного mount), и модалка появлялась повторно.
@@ -344,7 +377,59 @@ function onTradeCancel() {
 // По завершении — отправляем CONFIRM_MOVE_ANIMATION → сервер
 // финально перемещает игрока в handleMoveAnimation, и мы получаем
 // обновлённый state с новой позицией.
+// Мгновенный телепорт в тюрьму: когда сервер только что отправил игрока
+// в тюрьму (картой/3 дублями/клеткой), state.justEnteredJail=true,
+// фаза JAIL_DECISION, но MOVE_ANIMATION не запускается. Синхронизируем
+// displayPositions с реальной player.position (тюрьма = 10), чтобы
+// фишка «прыгнула» без анимации.
+//
+// ВАЖНО: watcher регистрируется ВНУТРИ setup как самостоятельный
+// top-level watch — иначе он не будет реактивным (раньше был вложен
+// внутрь phase watcher'а, что приводило к пересозданию и потере
+// срабатывания, а также к TDZ-ошибке из-за `let animTimers` ниже).
 const displayPositions = ref<Record<string, number>>({});
+let animTimers: Record<string, number> = {};
+
+watch(
+  () => state.value.justEnteredJail,
+  (justEntered) => {
+    if (!justEntered) return;
+    const p = currentPlayer.value;
+    if (!p) return;
+    // Очистим активный таймер анимации, если он был.
+    if (animTimers[p.id]) {
+      clearInterval(animTimers[p.id]);
+      delete animTimers[p.id];
+    }
+    displayPositions.value = {
+      ...displayPositions.value,
+      [p.id]: p.position,
+    };
+  },
+);
+
+// Подстраховка: если сервер прислал state с уже justEnteredJail=true
+// (например, при reconnect/mount), watcher на phase мог не сработать.
+// Следим за изменением currentPlayer.position пока justEnteredJail=true
+// — если позиция поменялась (телепорт на 10), мгновенно синхронизируем.
+watch(
+  () => [currentPlayer.value?.id, currentPlayer.value?.position] as const,
+  ([, pos], [, oldPos]) => {
+    if (pos === undefined || oldPos === undefined) return;
+    if (pos === oldPos) return;
+    if (!state.value.justEnteredJail) return;
+    const p = currentPlayer.value;
+    if (!p) return;
+    if (animTimers[p.id]) {
+      clearInterval(animTimers[p.id]);
+      delete animTimers[p.id];
+    }
+    displayPositions.value = {
+      ...displayPositions.value,
+      [p.id]: pos,
+    };
+  },
+);
 
 /**
  * Следим за появлением/исчезновением игроков: новых — инициализируем
@@ -380,7 +465,6 @@ watch(
  * Используется только в фазе MOVE_ANIMATION. По завершении
  * шлёт CONFIRM_MOVE_ANIMATION.
  */
-let animTimers: Record<string, number> = {};
 function animatePlayerTo(playerId: string, from: number, to: number) {
   if (animTimers[playerId]) {
     clearInterval(animTimers[playerId]);
@@ -422,7 +506,7 @@ onBeforeUnmount(() => {
 });
 
 //  Модалка карточки (фаза CARD_REVEAL)
-// Bugfix «двойной модалки»: ранний `watch(() => game.lastDrawnCard)` открывал
+// ранний `watch(() => game.lastDrawnCard)` открывал
 // модалку на КАЖДОЕ появление карты — из WS-события `game:card`, из
 // `state.cardContext` и из `response.data.card` callback'а `sendAction`.
 // Сейчас показом модалки управляет ЕДИНСТВЕННЫЙ phase-watcher

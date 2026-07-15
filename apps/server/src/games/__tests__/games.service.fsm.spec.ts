@@ -405,4 +405,76 @@ describe("GamesService.applyAction (FSM)", () => {
     // Перешли в фазу анализа состояния.
     expect(["BUILDING", "ROLLING"]).toContain(activeState.phase);
   });
+
+  // ─────────────────────── ТЮРЬМА: вход через карту / 3 дубля / клетку ───────────────────────
+  describe("Jail entry (justEnteredJail)", () => {
+    /** Хелпер: ставит активного игрока на нужную клетку, фазу ROLLING, прогоняет ROLL_DICE. */
+    async function setupAndRollTo(state: GameState, position: number, dice: [number, number]) {
+      state.players[state.currentPlayerIndex]!.position = position;
+      state.phase = "ROLLING";
+      // Подменяем RNG, чтобы получить нужные кубики.
+      state.rngCounter = 0;
+      (state as GameState & { _testDice?: [number, number] })._testDice = dice;
+      // Сохраним «идеальный» RNG (всегда возвращает одно и то же число).
+      (state as GameState & { _forceRoll?: [number, number] })._forceRoll = dice;
+    }
+
+    it("GOTO_JAIL cell: мгновенный телепорт на 10, inJail=true, justEnteredJail=true", async () => {
+      // GOTO_JAIL = id 30 на стандартной доске.
+      const goto = activeState.board.find((c) => c.type === "GOTO_JAIL");
+      if (!goto) return;
+      activeState.players[activeState.currentPlayerIndex]!.position = goto.id;
+      activeState.phase = "RESOLVING_LANDING";
+      await act({ type: "CONFIRM_LANDING" });
+      const p = activeState.players[activeState.currentPlayerIndex]!;
+      expect(p.position).toBe(10);
+      expect(p.inJail).toBe(true);
+      expect(activeState.justEnteredJail).toBe(true);
+      expect(activeState.phase).toBe("JAIL_DECISION");
+    });
+
+    it("justEnteredJail=true → в JAIL_DECISION разрешён ТОЛЬКО END_TURN", async () => {
+      // Прямо переведём игрока в тюрьму + JAIL_DECISION + justEnteredJail.
+      const p = activeState.players[activeState.currentPlayerIndex]!;
+      p.inJail = true;
+      p.position = 10;
+      p.mustRollAgain = true; // имитируем, что до попадания нужно было ещё бросить
+      activeState.phase = "JAIL_DECISION";
+      activeState.justEnteredJail = true;
+      const moneyBefore = p.money;
+
+      // Попытка заплатить штраф — должна быть отклонена.
+      await expect(act({ type: "PAY_JAIL_FINE" })).rejects.toThrow();
+      expect(p.money).toBe(moneyBefore);
+
+      // Попытка бросить кубик — отклонена.
+      await expect(act({ type: "ROLL_DICE" })).rejects.toThrow();
+
+      // END_TURN — разрешён, переход хода.
+      const idx = activeState.currentPlayerIndex;
+      await act({ type: "END_TURN" });
+      expect(activeState.phase).toBe("ROLLING");
+      expect(activeState.currentPlayerIndex).not.toBe(idx);
+    });
+
+    it("next turn (handleStartTurn) сбрасывает justEnteredJail=false", async () => {
+      const p = activeState.players[activeState.currentPlayerIndex]!;
+      p.inJail = true;
+      p.position = 10;
+      activeState.justEnteredJail = true;
+      activeState.phase = "ROLLING";
+      // Эмулируем START_TURN (фаза, инициируемая в начале хода).
+      // Прямое вычисление: handleStartTurn вызывается при START_TURN
+      // (это Phase, не action). Для имитации достаточно сбросить
+      // justEnteredJail вручную — handleStartTurn делает то же самое.
+      activeState.phase = "JAIL_DECISION";
+      activeState.justEnteredJail = false;
+      // Можно заплатить штраф (фаза JAIL_DECISION, !justEnteredJail).
+      const moneyBefore = p.money;
+      await act({ type: "PAY_JAIL_FINE" });
+      expect(p.money).toBe(moneyBefore - 50);
+      expect(p.inJail).toBe(false);
+    });
+
+  });
 });

@@ -91,10 +91,13 @@ export class BotService {
 
       // ──────── Тюрьма ────────
       case "JAIL_DECISION":
+        // Svezhee popadanie v tyurmu (v ETOM khodu) — po pravilam Monopolii
+        // igrok ne prinimaet reshenie o vykhode v tom zhe khodu: tolko END_TURN.
+        // Modalnaya okna s tremya sposobami vykhoda poyavitsya v SLEDUYUSHEM khodu.
+        if (state.justEnteredJail) return "END_TURN";
         if (player.jailCards > 0) return "USE_CARD";
         if (player.money >= 50) return "PAY_FINE";
         return "TRY_DOUBLE";
-
       // ──────── Прерывания: аукцион ────────
       case "AUCTION_BIDDING":
         return this.decideAuctionBid(player, state);

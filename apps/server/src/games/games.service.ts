@@ -8,7 +8,7 @@ import {
   forwardRef,
 } from "@nestjs/common";
 import seedrandom from "seedrandom";
-import type {
+import {
   GameState,
   GameAction,
   Player,
@@ -18,6 +18,7 @@ import type {
   Card,
   CardDeckState,
   Cell,
+  CHANCE_CARDS,
 } from "@monopoly/shared";
 import { GameRepository } from "../db/repositories/game.repository";
 import { GameInitializerService } from "./game-initializer.service";
@@ -28,6 +29,7 @@ import { BankruptcyService } from "./handlers/bankruptcy.service";
 import { BotService, type BotDecision } from "./bots/bot.service";
 import { AuctionService } from "./handlers/auction.service";
 import { TradeService } from "./handlers/trade.service";
+import { canRollDice, canEndTurn } from "./turn-permissions";
 
 export type GameStateChangedCallback = (
   gameId: string,
@@ -69,6 +71,17 @@ export class GamesService {
   private tradeTimers = new Map<string, NodeJS.Timeout>();
   /** Таймеры авто-END_TURN для человека. */
   private turnTimers = new Map<string, NodeJS.Timeout>();
+
+  /**
+   * Сериализованные очереди записи snapshot в БД (per gameId).
+   * Каждое следующее сохранение ждёт завершения предыдущего для той же
+   * игры — иначе при бурных фазах (dice → move → resolve → buy → end)
+   * `updateSnapshot` стартует параллельно, `state.version` уже
+   * инкрементнут следующим action'ом, и в БД возникает конфликт
+   * optimistic-lock: «текущая версия 87, ожидалась 123».
+   * Цепочка Promise'ов гарантирует порядок и отсутствие потерь.
+   */
+  private snapshotQueues = new Map<string, Promise<void>>();
 
   constructor(
     @Inject(forwardRef(() => GameRepository)) private readonly repo: GameRepository,
@@ -201,6 +214,43 @@ export class GamesService {
     if (!player) throw new NotFoundException("Игрок не найден в партии");
     this.assertCanAct(state, player);
 
+    // 2.1) Ранняя защита «от пропуска обязательного действия».
+    //
+    // В фазе ROLLING нельзя послать END_TURN (бросок обязателен) — раньше
+    // UI мог отправить его случайно после дубля (`mustRollAgain=true`),
+    // и ход перескакивал к другому игроку. Теперь для ROLL_DICE и END_TURN
+    // проверяем `canRollDice`/`canEndTurn` из `turn-permissions.ts`.
+    // Это даёт централизованное правило для UI и FSM-валидации.
+    if (action.type === "END_TURN" && state.phase === "ROLLING" && !canEndTurn(state, player)) {
+      // В ROLLING нет смысла передавать ход — нужен бросок. Если же при
+      // этом `mustRollAgain=true` (правило дубля), `canRollDice` тоже
+      // вернёт true. В обоих случаях сообщаем клиенту, что бросок
+      // обязателен.
+      if (canRollDice(state, player)) {
+        throw new ForbiddenException("Сейчас нужно бросить кубики (бросок обязателен)");
+      }
+      throw new ForbiddenException(`Недопустимое действие END_TURN в фазе ${state.phase}`);
+    }
+
+    // 2.2) Ранняя защита «покупки в тюрьме».
+    //
+    // По правилам Монополии: пока игрок в тюрьме — он НЕ может покупать
+    // недвижимость в текущем ходу. `canBuyProperty` (turn-permissions.ts)
+    // инкапсулирует эту проверку и уже отклоняет попытку на уровне фазы
+    // BUY_DECISION. Здесь — дублирующая защита для случаев, когда фаза
+    // ещё не `BUY_DECISION` (UI-баг: кнопка «Купить» была активна и
+    // игрок кликнул в JAIL_DECISION после `inJail=true`).
+    if (action.type === "BUY_PROPERTY" && player.inJail) {
+      throw new ForbiddenException("Нельзя покупать, находясь в тюрьме");
+    }
+
+    // 2.3) Ранняя защита «торговли в тюрьме».
+    // Правила Монополии запрещают торговлю в тюрьме. В текущем ходу
+    // игрок может только завершить ход.
+    if (action.type === "TRADE_OFFER" && player.inJail) {
+      throw new ForbiddenException("Нельзя торговать, находясь в тюрьме");
+    }
+
     // 3) Проверить, что ход именно этого игрока (для не-interrupt фаз).
     if (!this.isInterruptPhase(state.phase)) {
       const currentPlayer = state.players[state.currentPlayerIndex];
@@ -300,14 +350,11 @@ export class GamesService {
     }
     this.scheduleTurnTimeout(state, gameId);
 
-    // Сохранение в БД (в фоне)
-    void this.repo.updateSnapshot(gameId, state, state.version - 1).catch((err) => {
-      this.logger.error(
-        `updateSnapshot failed for game ${gameId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    });
+    // Сохранение в БД (в фоне, через сериализованную очередь per gameId).
+    // Без очереди несколько идущих подряд applyAction стартуют
+    // updateSnapshot параллельно, и в БД возникает конфликт версий
+    // (optimistic-lock в game.repository.updateSnapshot).
+    this.enqueueSnapshot(gameId, state);
 
     return { state, dice, card: drawnCard, event };
   }
@@ -404,6 +451,7 @@ export class GamesService {
     player.mustRollAgain = false;
     player.consecutiveDoubles = 0;
     if (player.inJail) {
+      state.justEnteredJail = false;
       state.phase = "JAIL_DECISION";
     } else {
       state.phase = "ROLLING";
@@ -459,9 +507,19 @@ export class GamesService {
     if (isDouble) {
       player.consecutiveDoubles += 1;
       if (player.consecutiveDoubles >= 3) {
+        // Три дубля подряд → мгновенный телепорт в тюрьму.
+        // `JailHandlerService.sendToJail` сам сбрасывает:
+        //  - position=10 (JAIL);
+        //  - inJail=true, jailTurns=0;
+        //  - consecutiveDoubles=0;
+        //  - mustRollAgain=false (правило дубля не действует —
+        //    в текущем ходу игрок уже не бросает).
+        // В этом ходу игрок может только «Завершить ход», поэтому
+        // выставляем `justEnteredJail=true` — модалка тюрьмы с тремя
+        // способами выхода появится в начале СЛЕДУЮЩЕГО хода, когда
+        // `handleStartTurn` сбросит флаг.
         this.jail.sendToJail(player);
-        player.consecutiveDoubles = 0;
-        player.mustRollAgain = false;
+        state.justEnteredJail = true;
         state.phase = "JAIL_DECISION";
         return {};
       }
@@ -560,9 +618,36 @@ export class GamesService {
     }
 
     // GOTO_JAIL — мгновенное действие, шлём в тюрьму.
+    // `JailHandlerService.sendToJail` сам сбрасывает все нужные флаги
+    // (position=10, inJail=true, jailTurns=0, consecutiveDoubles=0,
+    // mustRollAgain=false). `justEnteredJail=true` означает, что
+    // в ЭТОМ ходу игроку разрешено только «Завершить ход» — модалка
+    // тюрьмы с тремя способами выхода появится в начале следующего
+    // хода.
     if (cell.type === "GOTO_JAIL") {
+      // Попадание на клетку «В тюрьму» (id=30) — по правилам Монополии
+      // фишка ДОЛЖНА мгновенно (без анимации) переместиться на 10.
+      // UX-flow: показываем карточку-объявление через стандартный
+      // `CARD_REVEAL` -> `CardModal` (как для Chance). При подтверждении
+      // CONFIRM_CARD идёт `handleCardEffect` -> `applyCardEffectAndAdvance`
+      // (outcome.kind === "goto-jail") -> `sendToJail()` + JAIL_DECISION.
+      // Сама фишка НЕ двигается по клеткам (нет MOVE_ANIMATION) —
+      // клиент при `justEnteredJail=true` ставит её на `player.position`
+      // мгновенно через watcher в GameView.vue.
+      const jailCard = CHANCE_CARDS.find((c) => c.effect.kind === "goto-jail");
+      if (jailCard) {
+        state.cardContext = {
+          playerId: player.id,
+          deck: "chance",
+          card: jailCard,
+          applied: false,
+        };
+        state.phase = "CARD_REVEAL";
+        return { card: jailCard };
+      }
+      // fallback (если карточка не найдена в деке — теоретически невозможно)
       this.jail.sendToJail(player);
-      player.mustRollAgain = false;
+      state.justEnteredJail = true;
       state.phase = "JAIL_DECISION";
       return {};
     }
@@ -963,7 +1048,16 @@ export class GamesService {
     }
 
     if (outcome.kind === "goto-jail") {
-      // applyEffect уже отправил в тюрьму.
+      // Карта «Идёшь в тюрьму». `CardHandlerService.applyEffect`
+      // вернул `goto-jail` без мутаций — мы сами вызываем
+      // `JailHandlerService.sendToJail`, чтобы централизованно
+      // перенести фишку на 10, поставить inJail и сбросить флаги
+      // ВАЖНО: `justEnteredJail=true` означает, что в ЭТОМ ходу
+      // игрок может только «Завершить ход». Модалка тюрьмы с
+      // тремя способами выхода появится в начале СЛЕДУЮЩЕГО хода
+      // (тогда `handleStartTurn` сбросит `justEnteredJail`).
+      this.jail.sendToJail(player);
+      state.justEnteredJail = true;
       state.phase = "JAIL_DECISION";
       state.cardContext = undefined;
       return { card };
@@ -1110,10 +1204,20 @@ export class GamesService {
     if (player.mustRollAgain) {
       player.mustRollAgain = false;
       player.consecutiveDoubles = 0;
+      // После дубля в этом ходу продолжаем тот же ход — START_TURN не нужен.
       state.phase = "ROLLING";
     } else {
       this.advanceToNextPlayer(state);
-      state.phase = "ROLLING";
+      // Мгновенная фаза START_TURN: сбрасывает флаги следующего игрока
+      // и решает, ROLLING или JAIL_DECISION ему дать. Вызываем сразу
+      // здесь, чтобы не зависнуть в фазе, ожидающей клиентского confirm'а.
+      const next = state.players[state.currentPlayerIndex];
+      if (next) {
+        state.phase = "ROLLING"; // сразу, чтобы dispatch не ругался
+        await this.handleStartTurn(state, next, action);
+      } else {
+        state.phase = "ROLLING";
+      }
     }
     // Очищаем контекст броска.
     state.lastDice = undefined;
@@ -1132,10 +1236,39 @@ export class GamesService {
     action: GameAction,
   ): Promise<{ dice?: [number, number]; card?: unknown; event?: GameEvent }> {
     if (!player.inJail) {
-      // Уже вышли — передаём ход.
+      // Уже вышли — передаём ход через мгновенный START_TURN.
       this.advanceToNextPlayer(state);
-      state.phase = "ROLLING";
+      const next = state.players[state.currentPlayerIndex];
+      if (next) {
+        state.phase = "ROLLING";
+        await this.handleStartTurn(state, next, action);
+      } else {
+        state.phase = "ROLLING";
+      }
       return {};
+    }
+
+    // Только что попал в тюрьму (в ЭТОМ ходу): по правилам Монополии
+    // игрок НЕ принимает решение о выходе в том же ходу — только END_TURN.
+    // Модальное окно с тремя способами выхода появится в начале
+    // СЛЕДУЮЩЕГО хода, когда handleStartTurn сбросит justEnteredJail.
+    if (state.justEnteredJail) {
+      if (action.type === "END_TURN" || action.type === "CONFIRM_END_TURN") {
+        this.advanceToNextPlayer(state);
+        // Следующий ход: мгновенный START_TURN (handleStartTurn сбросит
+        // justEnteredJail и переведёт нового игрока в ROLLING/JAIL_DECISION).
+        const next = state.players[state.currentPlayerIndex];
+        if (next) {
+          state.phase = "ROLLING";
+          await this.handleStartTurn(state, next, action);
+        } else {
+          state.phase = "ROLLING";
+        }
+        return {};
+      }
+      throw new ForbiddenException(
+        `Только что попал в тюрьму — в этом ходу можно только завершить ход, а не ${action.type}`,
+      );
     }
 
     if (action.type === "PAY_JAIL_FINE") {
@@ -1167,9 +1300,15 @@ export class GamesService {
         state.phase = "DICE_ANIMATION";
         return { dice: diceResult };
       }
-      // "stay" — остаёмся, передаём ход.
+      // "stay" — остаёмся в тюрьме, передаём ход через мгновенный START_TURN.
       this.advanceToNextPlayer(state);
-      state.phase = "ROLLING";
+      const next = state.players[state.currentPlayerIndex];
+      if (next) {
+        state.phase = "ROLLING";
+        await this.handleStartTurn(state, next, action);
+      } else {
+        state.phase = "ROLLING";
+      }
       return { dice: diceResult };
     }
 
@@ -1509,6 +1648,7 @@ export class GamesService {
   removeFromCache(gameId: string) {
     this.activeGames.delete(gameId);
     this.userToPlayer.delete(gameId);
+    this.snapshotQueues.delete(gameId);
     for (const map of [
       this.botTimers,
       this.botThinkingTimers,
@@ -1527,6 +1667,45 @@ export class GamesService {
       if (t) clearTimeout(t);
       map.delete(gameId);
     }
+  }
+
+  /**
+   * Поставить запись snapshot в очередь для данной игры. Все записи
+   * для одного gameId идут строго последовательно — после завершения
+   * предыдущей. Использует `tryUpdateSnapshot` (без throw'ов): если
+   * по какой-то причине версия не совпала (например, между запросами
+   * кто-то поменял state напрямую) — просто логируем warning.
+   */
+  private enqueueSnapshot(gameId: string, state: GameState): void {
+    const previous = this.snapshotQueues.get(gameId) ?? Promise.resolve();
+    const next = previous
+      .then(async () => {
+        try {
+          // expectedVersion = state.version - 1: см. applyAction
+          // (state.version++ уже инкрементнут на этом шаге).
+          // Используем replaceSnapshot вместо updateSnapshot: он не
+          // бросает исключение при конфликте версий, а просто возвращает
+          // false. Это безопасно для фоновой записи: мы только логируем
+          // расхождение, а игровой процесс в RAM продолжает работать.
+          const ok = await this.repo.replaceSnapshot(gameId, state, state.version - 1);
+          if (!ok) {
+            this.logger.warn(
+              `[snapshot] replaceSnapshot не применил version=${state.version} для game=${gameId}`,
+            );
+          }
+        } catch (err) {
+          this.logger.error(
+            `updateSnapshot failed for game ${gameId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      })
+      .catch(() => {
+        // Ошибки обработаны выше, не даём цепочке «упасть» —
+        // иначе последующие записи встанут навсегда.
+      });
+    this.snapshotQueues.set(gameId, next);
   }
 
   // Боты

@@ -314,6 +314,19 @@ export interface GameState {
     treasury: CardDeckState;
     "luxury-tax": CardDeckState;
   };
+  /**
+   * Свежее попадание в тюрьму (true) — игрок в ЭТОМ ходу только что
+   * попал в тюрьму (через GOTO_JAIL / карту / 3 дубля). По правилам
+   * Монополии в текущем ходу ему разрешено ТОЛЬКО завершить ход —
+   * модалка тюрьмы с тремя способами выхода появится в СЛЕДУЮЩЕМ ходу.
+   *
+   * - `true`  — игрок только что попал в тюрьму, фаза = JAIL_DECISION,
+   *             допустимо только END_TURN / CONFIRM_END_TURN.
+   * - `false` (или undefined) — обычная ситуация: JAIL_DECISION
+   *             наступила в начале хода, игрок может использовать
+   *             USE_JAIL_CARD / PAY_JAIL_FINE / TRY_DOUBLE.
+   */
+  justEnteredJail?: boolean;
 }
 
 /**

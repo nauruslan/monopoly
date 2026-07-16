@@ -561,6 +561,16 @@ export class GamesService {
    * ВАЖНО: на промежуточных клетках (через которые фишка «пролетает»)
    * НИКАКИХ эффектов не применяется. Все эффекты (CHANCE, TREASURY, TAX, ...)
    * срабатывают ТОЛЬКО на финальной клетке в `handleResolvingLanding`.
+   *
+   * Два режима:
+   *  1) **Обычный бросок кубиков**: `state.moveAnimation` НЕ заполнен,
+   *     позиция вычисляется здесь через `state.lastDice` (сумма кубиков).
+   *  2) **Движение по карточке (move / move-relative / go-salary)**:
+   *     `state.moveAnimation` уже заполнен картой, и `player.position`
+   *     УЖЕ равен целевой клетке (был изменён в `applyCardEffectAndAdvance`).
+   *     В этом случае мы НЕ сдвигаем позицию ещё раз, а только
+   *     начисляем goSalary, если было прохождение через 0 (для forward)
+   *     или нет (для backward — goSalary НЕ начисляется).
    */
   private async handleMoveAnimation(
     state: GameState,
@@ -573,18 +583,45 @@ export class GamesService {
     if (!state.lastDice) {
       throw new BadRequestException("Нет контекста последнего броска");
     }
+
+    // Отличаем карточное движение (move / move-relative / go-salary)
+    // от обычного броска кубиков. Для карточного движения:
+    //   - player.position УЖЕ изменён в applyCardEffectAndAdvance;
+    //   - state.moveAnimation.direction задан явно ("forward" | "backward");
+    //   - goSalary уже начислен (если был wrap через 0 для forward);
+    //   - здесь мы только переходим в RESOLVING_LANDING.
+    // Для обычного броска state.moveAnimation заполняется в
+    // handleDiceAnimation БЕЗ поля direction - это маркер "позицию ещё
+    // нужно сдвинуть здесь".
+    const isCardMove =
+      !!state.moveAnimation &&
+      state.moveAnimation.playerId === player.id &&
+      state.moveAnimation.direction !== undefined;
+
+    if (isCardMove) {
+      // Очищаем moveAnimation - он нужен был только для клиентской
+      // анимации фишки, на сервере больше не требуется.
+      state.moveAnimation = undefined;
+      state.phase = "RESOLVING_LANDING";
+      return {};
+    }
+
+    // Обычный бросок кубиков (или дабл после тюрьмы): сдвигаем позицию.
     const dice = state.lastDice.dice;
     const steps = dice[0] + dice[1];
     const oldPos = player.position;
     const newPos = (oldPos + steps) % 40;
     player.position = newPos;
 
-    // Прохождение GO через wrap → зарплата.
+    // Прохождение GO через wrap - зарплата.
     if (newPos < oldPos || oldPos + steps >= 40) {
       player.money += state.settings.goSalary;
     }
 
-    // Переходим в RESOLVING_LANDING — мгновенная фаза-диспетчер по типу клетки.
+    // Очищаем moveAnimation - он использовался для анимации на клиенте.
+    state.moveAnimation = undefined;
+
+    // Переходим в RESOLVING_LANDING - мгновенная фаза-диспетчер по типу клетки.
     state.phase = "RESOLVING_LANDING";
     return {};
   }
@@ -999,12 +1036,16 @@ export class GamesService {
       // Шаги для анимации (всегда положительные, по модулю 40).
       const steps = (outcome.target - from + 40) % 40;
       // Заполняем moveAnimation — клиент использует его для анимации фишки.
+      // Направление для `move` (телепорт на конкретную клетку) — всегда
+      // "forward": по правилам Монополии любой телепорт идёт по кратчайшему
+      // пути через GO (если нужно) — это всегда по часовой стрелке.
       state.moveAnimation = {
         playerId: player.id,
         from,
         to: outcome.target,
         steps,
         isDouble: false,
+        direction: outcome.direction ?? "forward",
       };
       // Очищаем cardContext — карта «съедена», эффект move применён.
       // Без этого клиент видел ту же карту в MOVE_ANIMATION и мог
@@ -1019,29 +1060,67 @@ export class GamesService {
     }
 
     if (outcome.kind === "move-relative") {
-      // Вычислим целевую позицию с учётом прохождения GO.
+      // Движение на N клеток вперёд/назад.
+      //
+      // ВАЖНО (bugfix «обратного хода»): раньше здесь для `steps < 0`
+      // фишка вычислялась как `(oldPos + steps + 40) % 40` — это давало
+      // правильную ЦЕЛЕВУЮ позицию, но клиент в GameView.animatePlayerTo
+      // использовал `(to - from + 40) % 40` для определения шагов и
+      // `(from + i) % 40` для промежуточных клеток, что всегда давало
+      // движение ВПЕРЁД по часовой стрелке. В результате игрок на
+      // клетке 38, получив «вернитесь на 3 клетки назад», «пролетал»
+      // через всю доску 38 → 39 → 0 → 1 → 2 → ... → 35.
+      //
+      // Теперь мы явно передаём `direction: outcome.direction` в
+      // `state.moveAnimation`, и клиент анимирует фишку в правильном
+      // направлении (вперёд/назад).
       const oldPos = player.position;
-      const newPos = (oldPos + outcome.steps + 40) % 40;
-      const passedGo = outcome.steps > 0 && oldPos + outcome.steps >= 40;
-      if (passedGo) {
-        player.money += state.settings.goSalary;
-      }
       const steps = Math.abs(outcome.steps);
+      const direction: "forward" | "backward" = outcome.direction;
+
+      // Новая позиция: для "forward" — oldPos + steps (с wrap через 0),
+      // для "backward" — oldPos - steps (с wrap через 39).
+      let newPos: number;
+
+      if (direction === "forward") {
+        newPos = (oldPos + steps) % 40;
+        // Прохождение GO начисляет зарплату (только при движении вперёд).
+        // ВНИМАНИЕ: начисляем ТОЛЬКО если игрок РЕАЛЬНО прошёл через 0
+        // (т.е. его позиция обернулась), а не оказался на 0 в результате
+        // точного броска — этот случай уже обработан в ветке `go-salary`
+        // или в handleResolvingLanding (клетка GO).
+        if (oldPos + steps >= 40) {
+          player.money += state.settings.goSalary;
+        }
+      } else {
+        // Назад: (oldPos - steps + 40) % 40.
+        // Прохождение GO в обратном направлении НЕ начисляет зарплату
+        // (правила Монополии: goSalary начисляется только при движении
+        // вперёд через клетку 0, и при приземлении ровно на неё).
+        newPos = (oldPos - steps + 40) % 40;
+      }
+
       player.position = newPos;
-      // Заполняем moveAnimation — клиент анимирует фишку.
+
+      // Заполняем moveAnimation — клиент анимирует фишку в указанном
+      // направлении.
       state.moveAnimation = {
         playerId: player.id,
         from: oldPos,
         to: newPos,
         steps,
         isDouble: false,
+        direction,
       };
       // Очищаем cardContext (см. комментарий в ветке `move`).
       state.cardContext = undefined;
       state.phase = "MOVE_ANIMATION";
-      // lastDice для moveStepMs (хотя moveAnimation уже даёт steps).
+      // lastDice для moveStepMs (используется ботом для таймера
+      // CONFIRM_MOVE_ANIMATION). Кладём steps как сумму кубиков —
+      // это влияет только на длительность анимации (moveStepMs × N),
+      // а реальное направление берётся из moveAnimation.direction.
       state.lastDice = {
-        dice: outcome.steps >= 0 ? [0, steps] : [steps, 0],
+        dice: direction === "forward" ? [0, steps] : [steps, 0],
         isDouble: false,
       };
       return { card };

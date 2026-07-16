@@ -124,8 +124,13 @@ export class CardHandlerService {
     state: GameState,
   ):
     | { kind: "stay" }
-    | { kind: "move"; target: number; passedGo?: boolean }
-    | { kind: "move-relative"; steps: number; passedGo?: boolean }
+    | { kind: "move"; target: number; passedGo?: boolean; direction?: "forward" | "backward" }
+    | {
+        kind: "move-relative";
+        steps: number;
+        direction: "forward" | "backward";
+        passedGo?: boolean;
+      }
     | { kind: "goto-jail" } {
     switch (card.effect.kind) {
       case "money": {
@@ -140,20 +145,38 @@ export class CardHandlerService {
         if (card.effect.money !== undefined) {
           player.money += card.effect.money;
         }
-        return { kind: "move", target: card.effect.target };
+        // Направление определяется соотношением target/position.
+        // Здесь position ЕЩЁ НЕ изменён (мутация будет в GamesService),
+        // поэтому направление для move по правилам всегда «forward»:
+        // игрок перемещается в указанную клетку напрямую (телепорт),
+        // а анимация строится по кратчайшему пути через игровое поле.
+        // Для классической Монополии любой телепорт всегда ВПЕРЁД по
+        // правилам (если target < from — это всё равно forward через 0).
+        return { kind: "move", target: card.effect.target, direction: "forward" };
       }
 
       case "go-salary": {
         // Карточка «Отправляйтесь на Вперёд. Получите goSalary».
         // Начисляем goSalary всегда, перемещаем на клетку 0.
         player.money += state.settings.goSalary;
-        return { kind: "move", target: 0, passedGo: true };
+        return { kind: "move", target: 0, passedGo: true, direction: "forward" };
       }
 
       case "move-relative": {
         // Сдвиг на N клеток (вперёд/назад) с оборачиванием по 40.
         // Серверная сторона сама посчитает passedGo.
-        return { kind: "move-relative", steps: card.effect.steps };
+        //
+        // Направление определяется по знаку `steps`:
+        //  - steps > 0  → "forward"  (по часовой, классический ход фишки);
+        //  - steps < 0  → "backward" (против часовой, фишка идёт назад).
+        //
+        // Если в `effect.direction` явно указано значение — используем
+        // его (это «каноничный» источник истины, полезно для тестов и
+        // для случаев, когда нужно форсировать направление).
+        const inferredDirection: "forward" | "backward" =
+          card.effect.steps >= 0 ? "forward" : "backward";
+        const direction = card.effect.direction ?? inferredDirection;
+        return { kind: "move-relative", steps: card.effect.steps, direction };
       }
 
       case "goto-jail": {

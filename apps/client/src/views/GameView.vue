@@ -294,7 +294,6 @@ watch(
     // Сервер прислал `state.moveAnimation = { from, to, ... }`. Запускаем
     // animatePlayerTo от `from` к `to`; внутри по завершении отправится
     // CONFIRM_MOVE_ANIMATION.
-    //
     // ВАЖНО: срабатывает и для обычного броска кубиков, и для телепорта
     // карточки (move / move-relative) — оба пути теперь заполняют
     // state.moveAnimation в GamesService.
@@ -464,6 +463,20 @@ watch(
  * Анимировать фишку `playerId` от `from` к `to` по клеткам.
  * Используется только в фазе MOVE_ANIMATION. По завершении
  * шлёт CONFIRM_MOVE_ANIMATION.
+ *
+ * Направление движения берётся из `state.moveAnimation.direction`:
+ *  - `"forward"`  (по умолчанию) — фишка идёт по часовой стрелке
+ *                   (номер клетки увеличивается с 0 до 39 с оборачиванием);
+ *                   это путь обычного броска кубиков и большинства карточек
+ *                   Шанс/Казна.
+ *  - `"backward"` — фишка идёт ПРОТИВ часовой стрелки (номер клетки
+ *                   уменьшается с 39 до 0 с оборачиванием). Это путь
+ *                   карточек, предписывающих «вернуться назад» (например,
+ *                   «Вернитесь на 3 клетки назад»). Без этой логики фишка
+ *                   «пролетала» через всю доску, что было главным багом
+ *                   движения по карточкам.
+ *
+ * Если `direction` не указан (старые снапшоты) — считаем, что `"forward"`.
  */
 function animatePlayerTo(playerId: string, from: number, to: number) {
   if (animTimers[playerId]) {
@@ -471,8 +484,32 @@ function animatePlayerTo(playerId: string, from: number, to: number) {
     delete animTimers[playerId];
   }
 
-  const steps = (to - from + 40) % 40;
+  // Направление берём из moveAnimation.direction (источник истины — сервер).
+  // Если state.moveAnimation ещё не пришёл (теоретически) — форвардим
+  // (обратная совместимость со старыми снапшотами).
+  const direction: "forward" | "backward" = state.value.moveAnimation?.direction ?? "forward";
+
+  // Шаги анимации ВСЕГДА положительные — это просто количество клеток,
+  // через которые пройдёт фишка. Направление определяет знак при
+  // вычислении следующей клетки.
+  const steps = Math.abs(to - from);
   if (steps === 0) {
+    displayPositions.value = { ...displayPositions.value, [playerId]: to };
+    return;
+  }
+
+  // Защита: для forward ожидаем steps = (to - from + 40) % 40,
+  // для backward — steps = (from - to + 40) % 40.
+  // Если клиент прислал from/to несовместимые (например, target явно
+  // указывает движение через 0 в обратную сторону для forward) —
+  // корректируем шаги соответственно направлению.
+  let actualSteps: number;
+  if (direction === "forward") {
+    actualSteps = (to - from + 40) % 40;
+  } else {
+    actualSteps = (from - to + 40) % 40;
+  }
+  if (actualSteps === 0) {
     displayPositions.value = { ...displayPositions.value, [playerId]: to };
     return;
   }
@@ -482,9 +519,10 @@ function animatePlayerTo(playerId: string, from: number, to: number) {
   let i = 0;
   const id = window.setInterval(() => {
     i += 1;
-    const next = (from + i) % 40;
+    // Следующая клетка: +1 для forward, -1 для backward (с wrap по 40).
+    const next = direction === "forward" ? (from + i + 40) % 40 : (from - i + 40 * 2) % 40; // +40*2 для гарантии неотрицательного mod
     displayPositions.value = { ...displayPositions.value, [playerId]: next };
-    if (i >= steps) {
+    if (i >= actualSteps) {
       clearInterval(id);
       delete animTimers[playerId];
       try {

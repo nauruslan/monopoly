@@ -9,6 +9,20 @@ export interface Card {
   deck: "chance" | "treasury" | "luxury-tax";
   /** Текст карточки для UI. */
   text: string;
+  /**
+   * Направление движения для карточек с эффектом `move` / `move-relative`
+   * / `go-salary` (необязательное поле).
+   *
+   * Используется UI для:
+   *  - корректной подсветки/иконки стрелки на карточке;
+   *  - подсказки пользователю о направлении (вперёд/назад) ДО того, как
+   *    сервер пришлёт `state.moveAnimation.direction` в фазе MOVE_ANIMATION.
+   *
+   * Сервер определяет реальное направление по знаку `steps` (`move-relative`)
+   * или по соотношению `target`/`from` (`move`). Это поле — подсказка
+   * для UI и логирования.
+   */
+  direction?: "forward" | "backward";
   /** Эффект, применяемый ПОСЛЕ закрытия модалки игроком. */
   effect: CardEffect;
 }
@@ -34,19 +48,44 @@ export type CardEffect =
   | { kind: "move"; target: number; money?: number }
   | { kind: "goto-jail" }
   | { kind: "jail-free" }
-  | { kind: "move-relative"; steps: number }
+  /**
+   * `move-relative` — сдвиг на `steps` клеток.
+   *  - `steps > 0`  — движение ВПЕРЁД по часовой стрелке (увеличение номера клетки);
+   *  - `steps < 0`  — движение НАЗАД против часовой стрелки (уменьшение номера клетки).
+   *
+   * Поле `direction` — необязательный «каноничный» указатель направления
+   * для UI/логирования. Сервер определяет реальное направление по знаку `steps`:
+   *  - steps < 0  → `direction = "backward"` (анимация против часовой);
+   *  - steps > 0  → `direction = "forward"`  (анимация по часовой);
+   *  - steps === 0 → не движение (без анимации).
+   *
+   * Начисление goSalary (прохождение через клетку 0) происходит ТОЛЬКО при
+   * движении ВПЕРЁД и только если игрок реально «обернулся» через 0.
+   * Движение назад НИКОГДА не начисляет goSalary.
+   */
+  | { kind: "move-relative"; steps: number; direction?: "forward" | "backward" }
   | { kind: "go-salary" }
   | { kind: "luxury-tax-house"; perHouse: number; perHotel: number; perProperty: number };
 
 /**
- * Колода Шанс — 8 карточек.
+ * Колода Шанс — 11 карточек.
  * Колода перемешивается один раз в начале партии, и карты идут по кругу.
+ *
+ * Для карточек, предписывающих движение НАЗАД (steps < 0), на верхнем
+ * уровне `Card` проставлен флаг `direction: "backward"`. Это позволяет
+ * UI сразу показать корректную иконку/стрелку на карточке ДО её
+ * подтверждения (когда `state.moveAnimation.direction` ещё не известен).
+ *
+ * `effect.direction` для `move-relative` — дублирующий «каноничный»
+ * указатель направления; сервер всё равно выводит направление из знака
+ * `steps`, но это поле полезно для логирования и тестов.
  */
 export const CHANCE_CARDS: Card[] = [
   {
     id: "ch1",
     deck: "chance",
     text: "Отправляйтесь на Вперёд. Получите 200₽",
+    direction: "forward",
     effect: { kind: "go-salary" },
   },
   {
@@ -77,6 +116,7 @@ export const CHANCE_CARDS: Card[] = [
     id: "ch6",
     deck: "chance",
     text: "Переместитесь на ул. Арбат",
+    direction: "forward",
     effect: { kind: "move", target: 37 },
   },
   {
@@ -85,11 +125,60 @@ export const CHANCE_CARDS: Card[] = [
     text: "Выйдите из тюрьмы бесплатно",
     effect: { kind: "jail-free" },
   },
+  /**
+   * Классическая карточка Шанс: «Вернитесь на 3 клетки назад».
+   *
+   * ВАЖНО: `direction: "backward"` и `steps: -3`. Сервер по знаку `steps`
+   * определяет реальное направление, ставит `state.moveAnimation.direction`
+   * в `"backward"`, и клиент анимирует фишку ПРОТИВ часовой стрелки
+   * (10 → 9 → 8 → 7, а НЕ 10 → 11 → 12 → ... → 7 как было раньше).
+   */
   {
     id: "ch8",
     deck: "chance",
     text: "Вернитесь на 3 клетки назад",
-    effect: { kind: "move-relative", steps: -3 },
+    direction: "backward",
+    effect: { kind: "move-relative", steps: -3, direction: "backward" },
+  },
+  /**
+   * Классическая карточка Шанс (американская версия): «Go Back 3 Spaces».
+   * Дубликат `ch8` под другим id — у нас в колоде больше слотов для
+   * классических шанс-карт (обычно 16), и Шанс-карты дублируются чаще Казны.
+   */
+  {
+    id: "ch9",
+    deck: "chance",
+    text: "Вернитесь на 3 клетки назад",
+    direction: "backward",
+    effect: { kind: "move-relative", steps: -3, direction: "backward" },
+  },
+  /**
+   * Классическая карточка Шанс: «Go to Jail» (уже есть как `ch4`) — а вот
+   * «Advance to the nearest Utility» / «Advance to the nearest Railroad»
+   * в нашей колоде закрыты телепортом на ближайшую по правилам клетку.
+   * Добавим одну полезную «назад» карточку «Вернитесь на старт» нельзя
+   * (это всегда вперёд через GO) — но «Назад на 5 клеток» имеет смысл,
+   * особенно если игрок близко к налоговой/тюрьме.
+   */
+  {
+    id: "ch10",
+    deck: "chance",
+    text: "Вернитесь на 5 клеток назад",
+    direction: "backward",
+    effect: { kind: "move-relative", steps: -5, direction: "backward" },
+  },
+  /**
+   * Классическая карточка Шанс: «Take a walk on the Boardwalk» — это
+   * телепорт (target = 39) — но мы оставим ещё один кейс НАЗАД:
+   * «Вернитесь на старт» (target = 0) — это `move` вперёд, не назад.
+   * Поэтому «-2 клетки» как дополнительный шаг.
+   */
+  {
+    id: "ch11",
+    deck: "chance",
+    text: "Вернитесь на 2 клетки назад",
+    direction: "backward",
+    effect: { kind: "move-relative", steps: -2, direction: "backward" },
   },
 ];
 

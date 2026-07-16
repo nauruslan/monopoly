@@ -51,20 +51,25 @@ export class GamesService {
   private botTimers = new Map<string, NodeJS.Timeout>();
   /** Таймеры фазы размышления бота. */
   private botThinkingTimers = new Map<string, NodeJS.Timeout>();
-  /** Таймеры авто-CONFIRM_DICE_ANIMATION для ботов (фаза DICE_ANIMATION). */
-  private botDiceAnimTimers = new Map<string, NodeJS.Timeout>();
-  /** Таймеры авто-CONFIRM_MOVE_ANIMATION для ботов (фаза MOVE_ANIMATION). */
-  private botMoveAnimTimers = new Map<string, NodeJS.Timeout>();
-  /** Таймеры авто-CONFIRM_CARD для ботов (фаза CARD_REVEAL). */
-  private botCardTimers = new Map<string, NodeJS.Timeout>();
-  /** Таймеры авто-CONFIRM_TAX для ботов (фаза TAX_PAYMENT). */
-  private botTaxTimers = new Map<string, NodeJS.Timeout>();
-  /** Таймеры авто-CONFIRM_RENT_PAYMENT для ботов (фаза PAY_RENT). */
-  private botRentTimers = new Map<string, NodeJS.Timeout>();
-  /** Таймеры авто-CONFIRM_LANDING для ботов (фаза RESOLVING_LANDING). */
-  private botLandingTimers = new Map<string, NodeJS.Timeout>();
-  /** Таймеры авто-CONFIRM_END_TURN для ботов (фаза END_TURN). */
-  private botEndTurnTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * Таймеры FALLBACK-подтверждения визуальных фаз для ботов.
+   *
+   * сервер НЕ шлёт `CONFIRM_*` автоматически по таймеру для бота — он ЖДЁТ
+   * клиентского подтверждения (от любого подключённого клиента).
+   * Этот таймер — СТРАХОВКА: сработает, только если в комнате нет ни
+   * одного клиента, способного отправить confirm (например, партия
+   * ботов без людей, или все клиенты отключились). При нормальной
+   * игре таймер сбрасывается сразу после получения `CONFIRM_*` и
+   * никогда не срабатывает.
+   * Хранится контекст (фаза, ожидаемое действие, playerId), чтобы
+   * при срабатывании fallback'а корректно отправить нужный `CONFIRM_*`
+   * от имени бота.
+   */
+  private botConfirmFallbackTimers = new Map<string, NodeJS.Timeout>();
+  private botConfirmFallbackContexts = new Map<
+    string,
+    { phase: Phase; playerId: string; setAt: number }
+  >();
   /** Таймеры аукционных ставок. */
   private auctionTimers = new Map<string, NodeJS.Timeout>();
   /** Таймеры ответа в торговле. */
@@ -210,7 +215,7 @@ export class GamesService {
     }
 
     // 2) Найти игрока.
-    const player = state.players.find((p) => p.id === playerId);
+    let player = state.players.find((p) => p.id === playerId);
     if (!player) throw new NotFoundException("Игрок не найден в партии");
     this.assertCanAct(state, player);
 
@@ -252,11 +257,48 @@ export class GamesService {
     }
 
     // 3) Проверить, что ход именно этого игрока (для не-interrupt фаз).
-    if (!this.isInterruptPhase(state.phase)) {
+    // ВАЖНО: для визуальных CONFIRM_* actions (CONFIRM_DICE_ANIMATION,
+    // CONFIRM_MOVE_ANIMATION, CONFIRM_LANDING, CONFIRM_RENT_PAYMENT,
+    // CONFIRM_TAX, CONFIRM_CARD, CONFIRM_END_TURN) проверка «чей сейчас
+    // ход» НЕ применяется. Это не игровые решения, а сигналы
+    // «анимация на клиенте завершилась, можно переходить к следующей
+    // фазе». Если этого не сделать, то при ходе БОТА никто из
+    // подключённых клиентов-людей не сможет послать confirm, и сервер
+    // будет ждать 60-секундный fallback-таймер, что приводит к
+    // «зависанию» хода бота (например, фишка не двигается по клеткам,
+    // потому что MOVE_ANIMATION никем не подтверждается).
+    const isVisualConfirm =
+      action.type === "CONFIRM_DICE_ANIMATION" ||
+      action.type === "CONFIRM_MOVE_ANIMATION" ||
+      action.type === "CONFIRM_LANDING" ||
+      action.type === "CONFIRM_RENT_PAYMENT" ||
+      action.type === "CONFIRM_TAX" ||
+      action.type === "CONFIRM_CARD" ||
+      action.type === "CONFIRM_END_TURN";
+
+    if (!isVisualConfirm && !this.isInterruptPhase(state.phase)) {
       const currentPlayer = state.players[state.currentPlayerIndex];
       if (currentPlayer.id !== player.id) {
         throw new ForbiddenException("Сейчас не ваш ход");
       }
+    }
+
+    // ВАЖНО: для визуальных
+    // CONFIRM_* actions подменяем `player` на ТЕКУЩЕГО игрока
+    // (state.players[state.currentPlayerIndex]), потому что эти actions
+    // обрабатывают визуальное состояние текущего хода, а не действия
+    // отправителя. Без этой подмены `handleMoveAnimation`,
+    // `handleResolvingLanding` и другие визуальные обработчики мутируют
+    // позицию/деньги ОТПРАВИТЕЛЯ (например, человека-«зрителя»), а не
+    // текущего игрока (например, бота). Это и приводило к тому, что
+    // фишка бота не двигалась, а фишка человека двигалась во время хода
+    // бота.
+    if (isVisualConfirm) {
+      const currentPlayer = state.players[state.currentPlayerIndex];
+      if (!currentPlayer) {
+        throw new NotFoundException("Не найден текущий игрок");
+      }
+      player = currentPlayer;
     }
 
     this.logger.debug(`Action: ${action.type} by ${playerId} in phase ${state.phase}`);
@@ -282,40 +324,50 @@ export class GamesService {
 
     this.logger.log(`[applyAction] after-dispatch gameId=${gameId} phase=${state.phase}`);
 
-    // Планирование ботских таймеров ПОСЛЕ завершения диспатча
-    // 1) Если сейчас DICE_ANIMATION и ход бота — ставим таймер CONFIRM_DICE_ANIMATION.
-    if (player.kind === "bot" && state.phase === "DICE_ANIMATION") {
-      this.scheduleBotDiceAnimDone(state, gameId, player);
-    }
-
-    // 2) Если сейчас MOVE_ANIMATION и ход бота — таймер CONFIRM_MOVE_ANIMATION.
-    if (player.kind === "bot" && state.phase === "MOVE_ANIMATION" && state.lastDice) {
-      this.scheduleBotMoveAnimDone(state, gameId, player, state.lastDice.dice);
-    }
-
-    // 3) Если сейчас CARD_REVEAL и ход бота — таймер CONFIRM_CARD.
-    if (player.kind === "bot" && state.phase === "CARD_REVEAL") {
-      this.scheduleBotCardDone(state, gameId, player);
-    }
-
-    // 4) Если сейчас TAX_PAYMENT и ход бота — таймер CONFIRM_TAX.
-    if (player.kind === "bot" && state.phase === "TAX_PAYMENT") {
-      this.scheduleBotTaxDone(state, gameId, player);
-    }
-
-    // 4.1) Если сейчас PAY_RENT и ход бота — таймер CONFIRM_RENT_PAYMENT.
-    if (player.kind === "bot" && state.phase === "PAY_RENT") {
-      this.scheduleBotRentDone(state, gameId, player);
-    }
-
-    // 5) Если сейчас RESOLVING_LANDING и ход бота — таймер CONFIRM_LANDING.
-    if (player.kind === "bot" && state.phase === "RESOLVING_LANDING") {
-      this.scheduleBotLandingDone(state, gameId, player);
-    }
-
-    // 6) Если сейчас END_TURN и ход бота — таймер CONFIRM_END_TURN.
-    if (player.kind === "bot" && state.phase === "END_TURN") {
-      this.scheduleBotEndTurnDone(state, gameId, player);
+    // Планирование ботских таймеров ПОСЛЕ завершения диспатча.
+    //
+    // ВАЖНО: раньше здесь стояли
+    // автоматические таймеры (`scheduleBotDiceAnimDone`,
+    // `scheduleBotMoveAnimDone`, `scheduleBotCardDone` и т.д.) на
+    // фиксированные интервалы (2000мс для кубиков, N×450+200 для
+    // движения, 2500мс для карточки, 400мс для приземления, 2000мс
+    // для ренты/налога, 500мс для END_TURN). Эти таймеры НЕ
+    // синхронизировались с реальной анимацией на клиенте:
+    //   - на клиенте скорость анимации зависит от `settings.animationSpeed`
+    //     (0.5×, 1×, 2×), а на сервере жёстко `state.settings.moveStepMs`;
+    //   - клиент НЕ отправлял `CONFIRM_*` для ботов (`isMyTurn === false`),
+    //     поэтому анимация на клиенте «догоняла» уже идущую следующую
+    //     фазу на сервере;
+    //   - в итоге один бот начинал ход, ещё не закончив анимацию, а
+    //     второй бот уже бросал кубики → визуальный «рассинхрон»
+    //     нескольких фишек одновременно.
+    //
+    // Теперь:
+    //   1) Сервер НЕ шлёт `CONFIRM_*` автоматически по таймеру для
+    //      визуальных фаз бота — он ЖДЁТ клиентского подтверждения.
+    //      Клиент (даже если сейчас ходит бот) при завершении
+    //      анимации шлёт `CONFIRM_DICE_ANIMATION` / `CONFIRM_MOVE_ANIMATION`
+    //      / `CONFIRM_LANDING` / `CONFIRM_CARD` / `CONFIRM_RENT_PAYMENT`
+    //      / `CONFIRM_TAX` / `CONFIRM_END_TURN` от любого подключённого
+    //      игрока (см. GameView.vue).
+    //   2) В качестве СТРАХОВКИ от ситуации, когда в комнате нет ни
+    //      одного активного клиента (например, партия ботов без людей
+    //      или все клиенты отключились), ставится ОДИН fallback-таймер
+    //      `scheduleBotConfirmFallback` через 60 секунд — он сработает,
+    //      только если за это время никто не прислал CONFIRM_*.
+    //   3) При нормальной игре fallback-таймер сбрасывается в
+    //      `applyAction` (сразу после успешного dispatch'а) и никогда
+    //      не срабатывает.
+    if (player.kind === "bot" && this.isWaitingForClientConfirm(state.phase)) {
+      // Ждущая фаза для бота — обновляем fallback-таймер.
+      // (Внутри метода старый таймер уже сбрасывается.)
+      this.scheduleBotConfirmFallback(state, gameId, player);
+    } else {
+      // Фаза больше не требует клиентского подтверждения
+      // (например, после CONFIRM_LANDING приземлились на свою клетку
+      // и фаза стала BUILDING, или после CONFIRM_END_TURN ход
+      // перешёл к следующему игроку) — снимаем fallback.
+      this.clearBotConfirmFallback(gameId);
     }
 
     // Broadcast клиентам
@@ -1003,7 +1055,7 @@ export class GamesService {
    * или CARD_EFFECT). Идемпотентно — если эффект уже применён, просто
    * выставляет фазу.
    *
-   * ВАЖНО (bugfix «двойной модалки»): после применения эффекта `cardContext`
+   * ВАЖНО: после применения эффекта `cardContext`
    * ОБЯЗАТЕЛЬНО очищается во всех ветках. Раньше для `move` и `move-relative`
    * клиент продолжал видеть `state.cardContext.card` в фазе `MOVE_ANIMATION`,
    * и при повторном получении `game:state` (reconnect, повторный mount, ...)
@@ -1062,7 +1114,7 @@ export class GamesService {
     if (outcome.kind === "move-relative") {
       // Движение на N клеток вперёд/назад.
       //
-      // ВАЖНО (bugfix «обратного хода»): раньше здесь для `steps < 0`
+      // ВАЖНО: раньше здесь для `steps < 0`
       // фишка вычислялась как `(oldPos + steps + 40) % 40` — это давало
       // правильную ЦЕЛЕВУЮ позицию, но клиент в GameView.animatePlayerTo
       // использовал `(to - from + 40) % 40` для определения шагов и
@@ -1298,9 +1350,13 @@ export class GamesService {
         state.phase = "ROLLING";
       }
     }
-    // Очищаем контекст броска.
+    // Очищаем контекст броска и анимации, чтобы в следующем ходу
+    // `handleMoveAnimation` корректно интерпретировал `state.moveAnimation`
+    // (если он заполнен с прошлого хода картой — может ошибочно
+    // сработать ветка `isCardMove` и не сдвинуть позицию).
     state.lastDice = undefined;
     state.cardContext = undefined;
+    state.moveAnimation = undefined;
     return {};
   }
 
@@ -1731,13 +1787,7 @@ export class GamesService {
     for (const map of [
       this.botTimers,
       this.botThinkingTimers,
-      this.botDiceAnimTimers,
-      this.botMoveAnimTimers,
-      this.botCardTimers,
-      this.botTaxTimers,
-      this.botRentTimers,
-      this.botLandingTimers,
-      this.botEndTurnTimers,
+      this.botConfirmFallbackTimers,
       this.auctionTimers,
       this.tradeTimers,
       this.turnTimers,
@@ -1746,6 +1796,7 @@ export class GamesService {
       if (t) clearTimeout(t);
       map.delete(gameId);
     }
+    this.botConfirmFallbackContexts.delete(gameId);
   }
 
   /**
@@ -1844,201 +1895,135 @@ export class GamesService {
   // Ботские таймеры для визуальных фаз
 
   /**
-   * Бот автоматически подтверждает анимацию кубиков через diceAnimationMs.
+   * Возвращает true, если фаза требует клиентского `CONFIRM_*` (или
+   * авто-confirm по таймеру как fallback).
+   *
+   * Источник истины для понятия «визуальная фаза, ждущая подтверждения».
+   * Используется в `applyAction` для принятия решения о планировании
+   * fallback-таймера.
    */
-  private scheduleBotDiceAnimDone(state: GameState, gameId: string, current: Player) {
-    const prev = this.botDiceAnimTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.botDiceAnimTimers.delete(gameId);
-    }
-    const ms = state.settings.diceAnimationMs ?? 2000;
-    const timer = setTimeout(async () => {
-      this.botDiceAnimTimers.delete(gameId);
-      try {
-        const s = this.activeGames.get(gameId);
-        if (!s) return;
-        if (s.phase !== "DICE_ANIMATION") return;
-        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
-        await this.applyAction(gameId, current.id, { type: "CONFIRM_DICE_ANIMATION" });
-      } catch (err) {
-        this.logger.error(
-          `Bot CONFIRM_DICE_ANIMATION failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }, ms);
-    this.botDiceAnimTimers.set(gameId, timer);
+  private isWaitingForClientConfirm(phase: Phase): boolean {
+    return (
+      phase === "DICE_ANIMATION" ||
+      phase === "MOVE_ANIMATION" ||
+      phase === "CARD_REVEAL" ||
+      phase === "CARD_EFFECT" ||
+      phase === "TAX_PAYMENT" ||
+      phase === "PAY_RENT" ||
+      phase === "RESOLVING_LANDING" ||
+      phase === "END_TURN" ||
+      phase === "BOT_THINKING"
+    );
   }
 
   /**
-   * Бот автоматически подтверждает анимацию движения фишки через
-   * moveStepMs × N + buffer.
+   * Маппинг «фаза → ожидаемое CONFIRM_* действие» для fallback-таймера.
+   * Если клиент не прислал нужный confirm, сервер через большой таймаут
+   * (60с) сам отправит этот action от имени бота, чтобы партия не
+   * «зависла» в визуальной фазе.
    */
-  private scheduleBotMoveAnimDone(
-    state: GameState,
-    gameId: string,
-    current: Player,
-    dice: [number, number],
-  ) {
-    const prev = this.botMoveAnimTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.botMoveAnimTimers.delete(gameId);
+  private confirmActionForPhase(phase: Phase): GameAction | null {
+    switch (phase) {
+      case "DICE_ANIMATION":
+        return { type: "CONFIRM_DICE_ANIMATION" };
+      case "MOVE_ANIMATION":
+        return { type: "CONFIRM_MOVE_ANIMATION" };
+      case "CARD_REVEAL":
+      case "CARD_EFFECT":
+        return { type: "CONFIRM_CARD" };
+      case "TAX_PAYMENT":
+        return { type: "CONFIRM_TAX" };
+      case "PAY_RENT":
+        return { type: "CONFIRM_RENT_PAYMENT" };
+      case "RESOLVING_LANDING":
+        return { type: "CONFIRM_LANDING" };
+      case "END_TURN":
+        return { type: "CONFIRM_END_TURN" };
+      default:
+        return null;
     }
-    const stepMs = state.settings.moveStepMs ?? 450;
-    const total = dice[0] + dice[1];
-    const ms = total * stepMs + 200;
-    const timer = setTimeout(async () => {
-      this.botMoveAnimTimers.delete(gameId);
-      try {
-        const s = this.activeGames.get(gameId);
-        if (!s) return;
-        if (s.phase !== "MOVE_ANIMATION") return;
-        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
-        await this.applyAction(gameId, current.id, { type: "CONFIRM_MOVE_ANIMATION" });
-      } catch (err) {
-        this.logger.error(
-          `Bot CONFIRM_MOVE_ANIMATION failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }, ms);
-    this.botMoveAnimTimers.set(gameId, timer);
   }
 
   /**
-   * Бот автоматически подтверждает показ карточки через 2.5с.
+   * Единый fallback-таймер подтверждения визуальной фазы для бота.
+   *
+   * Раньше здесь стояли 7 разных таймеров (`scheduleBotDiceAnimDone`,
+   * `scheduleBotMoveAnimDone` и т.д.) на фиксированные интервалы
+   * (2000мс, N×450+200мс, 2500мс, 400мс, 2000мс, 500мс). Эти таймеры
+   * НЕ были синхронизированы с реальной скоростью анимации на клиенте
+   * (которая зависит от `settings.animationSpeed`), и клиент НЕ слал
+   * `CONFIRM_*` для бота (`isMyTurn === false`). В итоге:
+   *   - на клиенте анимация «догоняла» уже идущую следующую фазу
+   *     на сервере;
+   *   - бот начинал ход, не дождавшись завершения предыдущего;
+   *   - визуально несколько ботов двигались одновременно → рассинхрон.
+   *
+   * Теперь сервер НЕ шлёт `CONFIRM_*` автоматически — он ЖДЁТ клиентского
+   * подтверждения. Клиент (даже если ходит бот) при завершении анимации
+   * шлёт нужный confirm от любого подключённого игрока.
+   *
+   * Этот метод ставит ОДИН fallback-таймер на 60 секунд, который
+   * сработает ТОЛЬКО в аварийной ситуации:
+   *   - в комнате нет ни одного активного клиента (например, партия
+   *     ботов без людей, или все клиенты отключились);
+   *   - клиентский confirm потерялся.
+   *
+   * При нормальной игре таймер сбрасывается сразу после получения
+   * `CONFIRM_*` в `applyAction` и никогда не срабатывает.
    */
-  private scheduleBotCardDone(state: GameState, gameId: string, current: Player) {
-    const prev = this.botCardTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.botCardTimers.delete(gameId);
+  private scheduleBotConfirmFallback(state: GameState, gameId: string, current: Player) {
+    const prevTimer = this.botConfirmFallbackTimers.get(gameId);
+    if (prevTimer) {
+      clearTimeout(prevTimer);
+      this.botConfirmFallbackTimers.delete(gameId);
     }
-    const ms = 2500; // время «прочитать» карточку
+    const action = this.confirmActionForPhase(state.phase);
+    if (!action) {
+      // Не визуальная фаза — никакого fallback не нужно.
+      this.botConfirmFallbackContexts.delete(gameId);
+      return;
+    }
+    this.botConfirmFallbackContexts.set(gameId, {
+      phase: state.phase,
+      playerId: current.id,
+      setAt: Date.now(),
+    });
+    const FALLBACK_MS = 60_000; // 60с — щедро, чтобы не сработать при нормальной игре
     const timer = setTimeout(async () => {
-      this.botCardTimers.delete(gameId);
+      this.botConfirmFallbackTimers.delete(gameId);
       try {
         const s = this.activeGames.get(gameId);
         if (!s) return;
-        if (s.phase !== "CARD_REVEAL") return;
+        // Проверяем: всё ещё та же фаза и тот же игрок?
+        if (s.phase !== state.phase) return;
         if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
-        await this.applyAction(gameId, current.id, { type: "CONFIRM_CARD" });
+        if (s.status !== "active") return;
+        this.logger.warn(
+          `[GamesService] Bot confirm FALLBACK fired for phase=${state.phase} game=${gameId} player=${current.id} (no client responded in ${FALLBACK_MS}ms)`,
+        );
+        await this.applyAction(gameId, current.id, action);
       } catch (err) {
         this.logger.error(
-          `Bot CONFIRM_CARD failed: ${err instanceof Error ? err.message : String(err)}`,
+          `Bot confirm fallback failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-    }, ms);
-    this.botCardTimers.set(gameId, timer);
+    }, FALLBACK_MS);
+    this.botConfirmFallbackTimers.set(gameId, timer);
   }
 
   /**
-   * Бот автоматически подтверждает оплату фиксированного налога (TAX_PAYMENT)
-   * через 2 секунды.
+   * Сбрасывает fallback-таймер подтверждения.
+   * Вызывается из `applyAction` сразу после успешного dispatch'а
+   * (когда клиент прислал нужный `CONFIRM_*` и фаза сменилась) — при
+   * нормальной игре таймер снимается ДО срабатывания.
    */
-  private scheduleBotTaxDone(state: GameState, gameId: string, current: Player) {
-    const prev = this.botTaxTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.botTaxTimers.delete(gameId);
+  private clearBotConfirmFallback(gameId: string) {
+    const t = this.botConfirmFallbackTimers.get(gameId);
+    if (t) {
+      clearTimeout(t);
+      this.botConfirmFallbackTimers.delete(gameId);
     }
-    const ms = 2000;
-    const timer = setTimeout(async () => {
-      this.botTaxTimers.delete(gameId);
-      try {
-        const s = this.activeGames.get(gameId);
-        if (!s) return;
-        if (s.phase !== "TAX_PAYMENT") return;
-        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
-        await this.applyAction(gameId, current.id, { type: "CONFIRM_TAX" });
-      } catch (err) {
-        this.logger.error(
-          `Bot CONFIRM_TAX failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }, ms);
-    this.botTaxTimers.set(gameId, timer);
-  }
-
-  /**
-   * Бот автоматически подтверждает оплату ренты (фаза PAY_RENT) через 2 секунды.
-   */
-  private scheduleBotRentDone(state: GameState, gameId: string, current: Player) {
-    const prev = this.botRentTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.botRentTimers.delete(gameId);
-    }
-    const ms = 2000;
-    const timer = setTimeout(async () => {
-      this.botRentTimers.delete(gameId);
-      try {
-        const s = this.activeGames.get(gameId);
-        if (!s) return;
-        if (s.phase !== "PAY_RENT") return;
-        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
-        await this.applyAction(gameId, current.id, { type: "CONFIRM_RENT_PAYMENT" });
-      } catch (err) {
-        this.logger.error(
-          `Bot CONFIRM_RENT_PAYMENT failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }, ms);
-    this.botRentTimers.set(gameId, timer);
-  }
-
-  /**
-   * Бот автоматически подтверждает приземление через 400мс.
-   */
-  private scheduleBotLandingDone(state: GameState, gameId: string, current: Player) {
-    const prev = this.botLandingTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.botLandingTimers.delete(gameId);
-    }
-    const ms = 400;
-    const timer = setTimeout(async () => {
-      this.botLandingTimers.delete(gameId);
-      try {
-        const s = this.activeGames.get(gameId);
-        if (!s) return;
-        if (s.phase !== "RESOLVING_LANDING") return;
-        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
-        await this.applyAction(gameId, current.id, { type: "CONFIRM_LANDING" });
-      } catch (err) {
-        this.logger.error(
-          `Bot CONFIRM_LANDING failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }, ms);
-    this.botLandingTimers.set(gameId, timer);
-  }
-
-  /**
-   * Бот автоматически подтверждает передачу хода через 500мс.
-   */
-  private scheduleBotEndTurnDone(state: GameState, gameId: string, current: Player) {
-    const prev = this.botEndTurnTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.botEndTurnTimers.delete(gameId);
-    }
-    const ms = 500;
-    const timer = setTimeout(async () => {
-      this.botEndTurnTimers.delete(gameId);
-      try {
-        const s = this.activeGames.get(gameId);
-        if (!s) return;
-        if (s.phase !== "END_TURN") return;
-        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
-        await this.applyAction(gameId, current.id, { type: "CONFIRM_END_TURN" });
-      } catch (err) {
-        this.logger.error(
-          `Bot CONFIRM_END_TURN failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }, ms);
-    this.botEndTurnTimers.set(gameId, timer);
+    this.botConfirmFallbackContexts.delete(gameId);
   }
 
   private botDecisionToAction(d: BotDecision, state: GameState): GameAction | null {

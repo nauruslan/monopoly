@@ -49,6 +49,35 @@ const isMyTurn = computed(
   () => currentPlayer.value?.kind === "human" && currentPlayer.value?.id === myPlayerId.value,
 );
 
+/**
+ * `true`, если сейчас «активный» ход — то есть есть текущий игрок
+ * (неважно, человек или бот) и партия активна. Используется для
+ * отправки ВИЗУАЛЬНЫХ подтверждений (`CONFIRM_DICE_ANIMATION`,
+ * `CONFIRM_MOVE_ANIMATION`, `CONFIRM_CARD`, `CONFIRM_LANDING`,
+ * `CONFIRM_END_TURN`, `CONFIRM_TAX`, `CONFIRM_RENT_PAYMENT`) от
+ * любого подключённого клиента — это и есть главная фишка
+ * синхронизации анимаций ботов.
+ * ЛЮБОЙ подключённый клиент шлёт `CONFIRM_*` за текущего
+ * игрока (хоть бота, хоть человека) сразу, как только анимация
+ * или модалка завершилась.
+ */
+const isCurrentPlayerActive = computed(
+  () => state.value.status === "active" && !!currentPlayer.value && !currentPlayer.value.isBankrupt,
+);
+
+/**
+ * Хелпер: отправить `CONFIRM_*` действие для текущей визуальной фазы.
+ * Вызывается из watcher'ов и обработчиков модалок, когда
+ * `isCurrentPlayerActive === true`. Если фаза уже сменилась
+ * (гонка между broadcast'ами) — действие будет отклонено сервером
+ * (try/catch) и ничего не произойдёт.
+ */
+function sendConfirmForCurrentPhase(phase: Phase, action: GameAction) {
+  if (!isCurrentPlayerActive.value) return;
+  if (state.value.phase !== phase) return;
+  game.sendAction(action);
+}
+
 // Допустимые кнопки панели действий (ОСНОВНОЙ ЦИКЛ).
 //
 // ВАЖНО: правила активности кнопок «Бросить кубики» и «Завершить»
@@ -171,11 +200,14 @@ function onRoll() {
 // Dice.vue эмитит 'roll-done' ровно через 2 секунды.
 // По этому событию шлём CONFIRM_DICE_ANIMATION — сервер переходит
 // в MOVE_ANIMATION.
+// ВАЖНО: шлём от ЛЮБОГО активного клиента (не только от текущего
+// игрока-человека). Если ходит бот, любой подключённый клиент
+// (например, наблюдатель-человек) подтвердит, что анимация кубиков
+// завершилась. Это и есть синхронизация ботов: сервер не двигает
+// фишку, пока не придёт confirm от клиента.
 function onDiceRollDone() {
   game.setDiceRolling(false);
-  if (state.value.phase === "DICE_ANIMATION" && isMyTurn.value) {
-    dispatchAction({ type: "CONFIRM_DICE_ANIMATION" });
-  }
+  sendConfirmForCurrentPhase("DICE_ANIMATION", { type: "CONFIRM_DICE_ANIMATION" });
 }
 
 watch(
@@ -230,7 +262,9 @@ watch(
     // Деньги ещё НЕ списаны — показываем модалку «Заплатите N₽ владельцу X».
     // По «Оплатить» шлём CONFIRM_RENT_PAYMENT — сервер списывает деньги
     // и переходит в BUILDING (или ROLLING при mustRollAgain).
-    if (newPhase === "PAY_RENT" && isMyTurn.value) {
+    // ВАЖНО: показываем для ЛЮБОГО текущего игрока. Если ходит бот —
+    // через 2 секунды автоматически подтверждаем.
+    if (newPhase === "PAY_RENT" && isCurrentPlayerActive.value) {
       const ctx = state.value.rentContext;
       if (ctx && ctx.amount > 0) {
         rentAmount.value = ctx.amount;
@@ -239,12 +273,20 @@ watch(
         const cell = state.value.board[pos];
         rentCellName.value = cell?.name ?? "";
         showRentModal.value = true;
+        // Если ходит бот — авто-CONFIRM_RENT_PAYMENT через 2с.
+        if (currentPlayer.value?.kind === "bot") {
+          setTimeout(() => {
+            if (state.value.phase === "PAY_RENT") {
+              sendConfirmForCurrentPhase("PAY_RENT", { type: "CONFIRM_RENT_PAYMENT" });
+            }
+          }, 2000);
+        }
       } else {
         // Страховка: если сервер не положил rentContext (аномалия),
         // не блокируем партию — подтверждаем сразу, деньги не спишутся
         // (handlePayRent в этом случае тоже ничего не делает).
         console.warn("[GameView] PAY_RENT без rentContext — авто-CONFIRM");
-        dispatchAction({ type: "CONFIRM_RENT_PAYMENT" });
+        sendConfirmForCurrentPhase("PAY_RENT", { type: "CONFIRM_RENT_PAYMENT" });
       }
     }
     if (newPhase !== "PAY_RENT") {
@@ -259,7 +301,7 @@ watch(
     // подтвердил наличие карты в `state.cardContext`. Без этой проверки
     // `lastDrawnCard` мог прийти из предыдущего CARD_REVEAL (например, после
     // reconnect'а или повторного mount), и модалка появлялась повторно.
-    if (newPhase === "CARD_REVEAL" && isMyTurn.value) {
+    if (newPhase === "CARD_REVEAL" && isCurrentPlayerActive.value) {
       if (state.value.cardContext?.card) {
         // Свежая карта с сервера — синхронизируем UI и показываем модалку.
         lastDrawnCard.value = state.value.cardContext.card;
@@ -267,23 +309,24 @@ watch(
         cardDeck.value =
           (state.value.cardContext.card.deck as "chance" | "treasury" | "luxury-tax") ?? "chance";
         showCardModal.value = true;
-      } else if (lastDrawnCard.value) {
-        // Fallback: WS-событие `game:card` потерялось, но lastDrawnCard
-        // остался с момента предыдущего CARD_REVEAL. Не показываем модалку
-        // повторно — используем кешированную карту, но только если мы
-        // уверены, что это ТЕКУЩАЯ карта (а не из прошлого цикла).
-        // Чтобы исключить дубль, требуем совпадение с уже сохранённым
-        // cardContext. Если cardContext нет — лучше авто-confirm, чем
-        // показывать старую карту.
-        console.warn(
-          "[GameView] CARD_REVEAL без cardContext, но есть lastDrawnCard — авто-CONFIRM",
-        );
-        dispatchAction({ type: "CONFIRM_CARD" });
+        // Если ходит бот — авто-CONFIRM_CARD через 2.5с. Этого времени
+        // хватит, чтобы зрители увидели, какая карта выпала, до того как
+        // сервер применит её эффект. Раньше confirm слал сервер сам, что
+        // вызывало рассинхрон с анимацией у других игроков.
+        if (currentPlayer.value?.kind === "bot") {
+          setTimeout(() => {
+            if (state.value.phase === "CARD_REVEAL") {
+              sendConfirmForCurrentPhase("CARD_REVEAL", { type: "CONFIRM_CARD" });
+            }
+          }, 2500);
+        }
       } else {
-        // Страховка: если модалку нечем заполнить, не блокируем партию —
-        // шлём CONFIRM_CARD сразу, чтобы сервер не «завис» в CARD_REVEAL.
+        // Страховка: если модалку нечем заполнить (или WS-событие
+        // `game:card` потерялось и lastDrawnCard остался от прошлого
+        // цикла), не блокируем партию — подтверждаем сразу, чтобы
+        // сервер не «завис» в CARD_REVEAL.
         console.warn("[GameView] CARD_REVEAL без cardContext — авто-CONFIRM");
-        dispatchAction({ type: "CONFIRM_CARD" });
+        sendConfirmForCurrentPhase("CARD_REVEAL", { type: "CONFIRM_CARD" });
       }
     }
     if (newPhase !== "CARD_REVEAL") {
@@ -302,21 +345,25 @@ watch(
       animatePlayerTo(ma.playerId, ma.from, ma.to);
     }
 
-    // RESOLVING_LANDING — пауза 400мс, потом авто-CONFIRM_LANDING
-    // Только если это мой ход. Для бота — сервер сам пошлёт.
-    if (newPhase === "RESOLVING_LANDING" && isMyTurn.value) {
+    // RESOLVING_LANDING — пауза 400мс, потом авто-CONFIRM_LANDING.
+    // ВАЖНО: от ЛЮБОГО текущего игрока (и от бота, и от человека).
+    // Раньше здесь стояла проверка `isMyTurn.value` — для бота confirm
+    // не отправлялся клиентом, и сервер был вынужден слать его сам по
+    // своему таймеру (что приводило к рассинхрону).
+    if (newPhase === "RESOLVING_LANDING" && isCurrentPlayerActive.value) {
       setTimeout(() => {
         if (state.value.phase === "RESOLVING_LANDING") {
-          dispatchAction({ type: "CONFIRM_LANDING" });
+          sendConfirmForCurrentPhase("RESOLVING_LANDING", { type: "CONFIRM_LANDING" });
         }
       }, 400);
     }
 
-    // END_TURN — пауза 500мс, потом авто-CONFIRM_END_TURN
-    if (newPhase === "END_TURN" && isMyTurn.value) {
+    // END_TURN — пауза 500мс, потом авто-CONFIRM_END_TURN.
+    // ВАЖНО: от ЛЮБОГО текущего игрока.
+    if (newPhase === "END_TURN" && isCurrentPlayerActive.value) {
       setTimeout(() => {
         if (state.value.phase === "END_TURN") {
-          dispatchAction({ type: "CONFIRM_END_TURN" });
+          sendConfirmForCurrentPhase("END_TURN", { type: "CONFIRM_END_TURN" });
         }
       }, 500);
     }
@@ -381,7 +428,6 @@ function onTradeCancel() {
 // фаза JAIL_DECISION, но MOVE_ANIMATION не запускается. Синхронизируем
 // displayPositions с реальной player.position (тюрьма = 10), чтобы
 // фишка «прыгнула» без анимации.
-//
 // ВАЖНО: watcher регистрируется ВНУТРИ setup как самостоятельный
 // top-level watch — иначе он не будет реактивным (раньше был вложен
 // внутрь phase watcher'а, что приводило к пересозданию и потере
@@ -433,7 +479,6 @@ watch(
 /**
  * Следим за появлением/исчезновением игроков: новых — инициализируем
  * их позицией из `state`, удалённых — выбрасываем.
- *
  * ВАЖНО: `displayPositions` НЕ обновляется автоматически по `p.position` —
  * только через `animatePlayerTo(...)`, который вызывается из watcher'а
  * `state.value.phase === "MOVE_ANIMATION"`. Это нужно, чтобы
@@ -463,7 +508,6 @@ watch(
  * Анимировать фишку `playerId` от `from` к `to` по клеткам.
  * Используется только в фазе MOVE_ANIMATION. По завершении
  * шлёт CONFIRM_MOVE_ANIMATION.
- *
  * Направление движения берётся из `state.moveAnimation.direction`:
  *  - `"forward"`  (по умолчанию) — фишка идёт по часовой стрелке
  *                   (номер клетки увеличивается с 0 до 39 с оборачиванием);
@@ -475,7 +519,6 @@ watch(
  *                   «Вернитесь на 3 клетки назад»). Без этой логики фишка
  *                   «пролетала» через всю доску, что было главным багом
  *                   движения по карточкам.
- *
  * Если `direction` не указан (старые снапшоты) — считаем, что `"forward"`.
  */
 function animatePlayerTo(playerId: string, from: number, to: number) {
@@ -527,9 +570,11 @@ function animatePlayerTo(playerId: string, from: number, to: number) {
       delete animTimers[playerId];
       try {
         // По завершении анимации — отправляем подтверждение.
-        if (state.value.phase === "MOVE_ANIMATION" && isMyTurn.value) {
-          dispatchAction({ type: "CONFIRM_MOVE_ANIMATION" });
-        }
+        // ВАЖНО (bugfix «рассинхрон ходов ботов»): раньше здесь стояла
+        // проверка `isMyTurn.value`, из-за которой для бота confirm
+        // не отправлялся. Теперь шлём от ЛЮБОГО текущего игрока (хоть
+        // человек, хоть бот) — это и есть синхронизация.
+        sendConfirmForCurrentPhase("MOVE_ANIMATION", { type: "CONFIRM_MOVE_ANIMATION" });
       } catch (e) {
         console.warn("CONFIRM_MOVE_ANIMATION dispatch failed", e);
       }
@@ -560,26 +605,21 @@ function onCloseCard() {
   // в сторе (если он там нужен) сработал корректно. UI-источник истины
   // для модалки — это `state.phase === "CARD_REVEAL"` + `state.cardContext`.
   game.clearLastDrawnCard();
-  // Если мы в CARD_REVEAL и наш ход — подтверждаем.
-  if (state.value.phase === "CARD_REVEAL" && isMyTurn.value) {
-    dispatchAction({ type: "CONFIRM_CARD" });
-  }
+  // Подтверждаем фазу для текущего игрока (включая ботов), чтобы
+  // рассинхрона анимации между ботом и человеком не было.
+  sendConfirmForCurrentPhase("CARD_REVEAL", { type: "CONFIRM_CARD" });
 }
 
 // Модалка фиксированного налога (фаза TAX_PAYMENT)
 function onCloseTax() {
   showTaxModal.value = false;
-  if (state.value.phase === "TAX_PAYMENT" && isMyTurn.value) {
-    dispatchAction({ type: "CONFIRM_TAX" });
-  }
+  sendConfirmForCurrentPhase("TAX_PAYMENT", { type: "CONFIRM_TAX" });
 }
 
 // Модалка аренды (фаза PAY_RENT)
 function onCloseRent() {
   showRentModal.value = false;
-  if (state.value.phase === "PAY_RENT" && isMyTurn.value) {
-    dispatchAction({ type: "CONFIRM_RENT_PAYMENT" });
-  }
+  sendConfirmForCurrentPhase("PAY_RENT", { type: "CONFIRM_RENT_PAYMENT" });
 }
 
 function onBuy() {

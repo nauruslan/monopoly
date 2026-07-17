@@ -31,6 +31,22 @@ import type { GameState, Player } from "@monopoly/shared";
  *      * `mustRollAgain=true` НЕ блокирует бросок — наоборот,
  *        делает его обязательным.
  *
+ *      ## Правило «дубль + карточка Шанс/Казна»
+ *
+ *      Если игрок выбросил дубль (mustRollAgain=true) и затем попал на
+ *      клетку Шанс/Казна, `applyCardEffectAndAdvance` в GamesService
+ *      сбрасывает `mustRollAgain=false` и `consecutiveDoubles=0` ПРИ
+ *      эффектах `move` / `move-relative` / `go-salary` (т.е. для
+ *      карточек, перемещающих фишку на конкретную/другую клетку).
+ *      Логика: «выводящая» из обычного цикла карточка обрывает серию
+ *      дублей — игрок должен либо заплатить/попасть в тюрьму/попасть
+ *      на парковку и т.п. и завершить ход, а не бросать ещё раз.
+ *
+ *      Для карточек-«stay» (`money` / `jail-free` / `luxury-tax-house`)
+ *      `mustRollAgain` НЕ сбрасывается — игрок остаётся на той же
+ *      клетке, и после `afterRentOrTax` фаза становится `ROLLING`
+ *      (повторный бросок обязателен).
+ *
  *  - `END_TURN` (завершение хода):
  *      * В фазе `BUILDING` (обычный случай: после покупки/события).
  *      * В фазе `ROLLING` — НЕЛЬЗЯ. Бросок в начале хода обязателен;
@@ -98,12 +114,20 @@ function baseChecksOk(state: GameState, player: Player): boolean {
  *
  * Флаг `mustRollAgain` не влияет на результат: если он `true`,
  * бросок ОБЯЗАТЕЛЕН (а не запрещён).
+ *
+ * `justArrivedAtParking` блокирует бросок: если игрок только что
+ * отправлен на парковку по карточке «Отправляйтесь на парковку»,
+ * право на ещё один бросок (после дубля) ТЕРЯЕТСЯ — игрок может
+ * только завершить ход. Сбрасывается в `handleStartTurn`.
  */
 export function canRollDice(state: GameState, player: Player): boolean {
   if (!baseChecksOk(state, player)) return false;
   if (!isCurrentPlayer(state, player)) return false;
   if (state.phase !== "ROLLING") return false;
   if (player.inJail) return false;
+  // Арест через парковку: цепочка «бросок → движение → эффект» уже
+  // отыграна, новый бросок в ЭТОМ ходу запрещён.
+  if (state.justArrivedAtParking) return false;
   return true;
 }
 
@@ -124,9 +148,21 @@ export function canRollDice(state: GameState, player: Player): boolean {
 export function canEndTurn(state: GameState, player: Player): boolean {
   if (!baseChecksOk(state, player)) return false;
   if (!isCurrentPlayer(state, player)) return false;
-  if (state.phase !== "BUILDING") return false;
-  if (player.mustRollAgain) return false;
-  return true;
+  // В фазе BUILDING — обычное завершение хода (после покупки/события).
+  if (state.phase === "BUILDING") {
+    if (player.mustRollAgain) return false;
+    return true;
+  }
+  // В фазе JAIL_DECISION — завершить ход разрешено только если
+  // игрок ТОЛЬКО ЧТО попал в тюрьму (justEnteredJail=true).
+  // В этом ходу по правилам Монополии игрок НЕ принимает решения
+  // о выходе — только «Завершить ход». Модалка с тремя способами
+  // выхода появится в начале СЛЕДУЮЩЕГО хода, когда handleStartTurn
+  // сбросит justEnteredJail.
+  if (state.phase === "JAIL_DECISION" && state.justEnteredJail) {
+    return true;
+  }
+  return false;
 }
 
 /**

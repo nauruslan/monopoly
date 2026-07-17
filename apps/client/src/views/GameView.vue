@@ -79,13 +79,11 @@ function sendConfirmForCurrentPhase(phase: Phase, action: GameAction) {
 }
 
 // Допустимые кнопки панели действий (ОСНОВНОЙ ЦИКЛ).
-//
 // ВАЖНО: правила активности кнопок «Бросить кубики» и «Завершить»
 // дублируют логику из `apps/server/src/games/turn-permissions.ts`.
 // Это сделано намеренно (server-driven архитектура): UI и FSM
 // синхронизируются по одним и тем же бизнес-правилам, без зависимости
 // клиентского бандла от server-only кода.
-//
 // После выпадения дубля фаза возвращается в `ROLLING` с
 // `mustRollAgain=true`. Раньше UI показывал активные ОБЕ кнопки
 // (Бросить и Завершить) — игрок мог нажать «Завершить» и ход
@@ -108,6 +106,11 @@ const canBuy = computed(
 const canEndTurn = computed(() => {
   if (!isMyTurn.value) return false;
   // В тюрьме (JAIL_DECISION) единственный способ продолжить — END_TURN.
+  // НО! Если игрок ТОЛЬКО ЧТО попал в тюрьму (в ЭТОМ ходу, по карточке
+  // или по клетке 30) — `justEnteredJail=true`, и в этом ходу ему
+  // разрешено ТОЛЬКО завершить ход. Модалка тюрьмы с тремя способами
+  // выхода появится в начале СЛЕДУЮЩЕГО хода. Поэтому и здесь,
+  // и в JAIL_DECISION без justEnteredJail кнопка END_TURN активна.
   if (state.value.phase === "JAIL_DECISION") return true;
   // Завершить ход можно ТОЛЬКО в фазе BUILDING (после покупки/события).
   // В фазе ROLLING бросок обязателен — кнопка «Завершить» неактивна
@@ -237,7 +240,6 @@ watch(
       !!state.value.trade &&
       (state.value.trade.initiatorId === myPlayerId.value ||
         state.value.trade.recipientId === myPlayerId.value);
-
     // TAX_PAYMENT — Подоходный налог
     // Сервер прислал state.phase = "TAX_PAYMENT" и не менял player.money.
     // Показываем модалку «Заплатите N₽». По ОК шлём CONFIRM_TAX —
@@ -256,7 +258,6 @@ watch(
     if (newPhase !== "TAX_PAYMENT") {
       showTaxModal.value = false;
     }
-
     // PAY_RENT — аренда чужой собственности.
     // Сервер прислал state.phase = "PAY_RENT" + state.rentContext.
     // Деньги ещё НЕ списаны — показываем модалку «Заплатите N₽ владельцу X».
@@ -292,7 +293,6 @@ watch(
     if (newPhase !== "PAY_RENT") {
       showRentModal.value = false;
     }
-
     // CARD_REVEAL — анализ состояния: гарантируем, что модалка карточки
     // показана. Стор `game.ts` уже вытащил cardContext.card в lastDrawnCard.
     // Если же по какой-то причине lastDrawnCard не пришёл (WS-событие
@@ -463,6 +463,55 @@ watch(
     if (pos === undefined || oldPos === undefined) return;
     if (pos === oldPos) return;
     if (!state.value.justEnteredJail) return;
+    const p = currentPlayer.value;
+    if (!p) return;
+    if (animTimers[p.id]) {
+      clearInterval(animTimers[p.id]);
+      delete animTimers[p.id];
+    }
+    displayPositions.value = {
+      ...displayPositions.value,
+      [p.id]: pos,
+    };
+  },
+);
+
+// Мгновенный телепорт на парковку: когда сервер ТОЛЬКО ЧТО отправил
+// игрока на парковку (id=20) карточкой «Отправляйтесь на парковку»,
+// state.justArrivedAtParking=true, фаза BUILDING, а MOVE_ANIMATION
+// не запускается (см. applyCardEffectAndAdvance на сервере).
+// Синхронизируем displayPositions с реальной player.position (20),
+// чтобы фишка «прыгнула» на парковку без анимации (по правилам —
+// «отдых», а не «путешествие»).
+watch(
+  () => state.value.justArrivedAtParking,
+  (justArrived) => {
+    if (!justArrived) return;
+    const p = currentPlayer.value;
+    if (!p) return;
+    // Очистим активный таймер анимации, если он был.
+    if (animTimers[p.id]) {
+      clearInterval(animTimers[p.id]);
+      delete animTimers[p.id];
+    }
+    displayPositions.value = {
+      ...displayPositions.value,
+      [p.id]: p.position,
+    };
+  },
+);
+
+// Подстраховка: если сервер прислал state с уже justArrivedAtParking=true
+// (например, при reconnect/mount), watcher выше мог не сработать.
+// Следим за изменением currentPlayer.position пока
+// justArrivedAtParking=true — если позиция поменялась (телепорт на 20),
+// мгновенно синхронизируем displayPositions.
+watch(
+  () => [currentPlayer.value?.id, currentPlayer.value?.position] as const,
+  ([, pos], [, oldPos]) => {
+    if (pos === undefined || oldPos === undefined) return;
+    if (pos === oldPos) return;
+    if (!state.value.justArrivedAtParking) return;
     const p = currentPlayer.value;
     if (!p) return;
     if (animTimers[p.id]) {

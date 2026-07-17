@@ -236,4 +236,125 @@ describe("turn-permissions", () => {
       expect(canTrade(s, s.players[0]!)).toBe(false);
     });
   });
+
+  // ─────────────────── Регресс: «дубль + карточка Шанс на парковку» ───────────────────
+  //
+  // Сценарий бага:
+  //  1) Игрок бросает дубль 2/2 → mustRollAgain=true, consecutiveDoubles=1.
+  //  2) Попадает на ШАНС → вытягивает карту «Бесплатная парковка (move target=20)».
+  //  3) После CONFIRM_CARD сервер перемещает фишку на 20, фаза идёт
+  //     MOVE_ANIMATION → RESOLVING_LANDING (парковка) → BUILDING.
+  //  4) mustRollAgain должен быть сброшен в false сервером (в
+  //     applyCardEffectAndAdvance для move-исхода), иначе:
+  //     - canEndTurn=false (т.к. mustRollAgain=true в BUILDING);
+  //     - canRoll=false (т.к. фаза не ROLLING);
+  //     - никаких активных кнопок → игра застопорена.
+  //
+  // Этот тест фиксирует, что turn-permissions ОЖИДАЕТ, что сервер уже
+  // сбросил mustRollAgain к моменту прихода фазы BUILDING. Реальный
+  // сброс тестируется в games.service.fsm.spec.ts.
+  describe("regression: дубль + карточка Шанс на парковку", () => {
+    it("после карточки move: BUILDING + mustRollAgain=false → canEndTurn=true", () => {
+      // Имитируем состояние, которое должен вернуть сервер после
+      // CONFIRM_CARD для карточки «Отправляйтесь на парковку»:
+      //   - фаза BUILDING (парковка не требует действий);
+      //   - mustRollAgain сброшен сервером (applyCardEffectAndAdvance).
+      const s = makeState({
+        phase: "BUILDING",
+        players: [
+          makePlayer({ id: "p0", mustRollAgain: false, consecutiveDoubles: 0 }),
+          makePlayer({ id: "p1" }),
+        ],
+      });
+      // Игрок стоит на парковке (id=20), деньги не изменились.
+      s.players[0]!.position = 20;
+      expect(canEndTurn(s, s.players[0]!)).toBe(true);
+      expect(canRollDice(s, s.players[0]!)).toBe(false);
+    });
+
+    it("«Голый» BUILDING + mustRollAgain=true (анти-паттерн) → canEndTurn=false (страховка)", () => {
+      // Если бы сервер НЕ сбросил mustRollAgain — обе кнопки заблокированы.
+      // Этот тест документирует, что БЕЗ правки applyCardEffectAndAdvance
+      // игра бы застряла. С правкой сервера — mustRollAgain=false, и этот
+      // сценарий не возникает.
+      const s = makeState({
+        phase: "BUILDING",
+        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })],
+      });
+      expect(canEndTurn(s, s.players[0]!)).toBe(false);
+      expect(canRollDice(s, s.players[0]!)).toBe(false);
+    });
+  });
+
+  // ─────────────────── Регресс: «дубль + stay-карточка (money)» ───────────────────
+  //
+  // Контрастный сценарий: игрок бросил дубль и попал на money-карту
+  // (например «Банк выплачивает вам дивиденды 50₽»). Это «stay»-эффект
+  // (applyEffect возвращает kind: "stay"). По правилам Монополии здесь
+  // НЕ должно быть сброса mustRollAgain — игрок остаётся на той же
+  // клетке, и право на ещё один бросок сохраняется. afterRentOrTax в
+  // GamesService выберет фазу ROLLING (а не BUILDING).
+  //
+  // Этот тест фиксирует, что если сервер по какой-то причине оставил
+  // игрока в BUILDING с mustRollAgain=true (аномалия), UI заблокирует
+  // обе кнопки — то есть корректное правило остаётся:
+  //   «после дубля в BUILDING → игрок должен бросить ещё раз».
+  describe("regression: дубль + money-карта (stay)", () => {
+    it("ROLLING + mustRollAgain=true после money-карты → canRoll=true, canEndTurn=false", () => {
+      // Нормальное состояние после money-карты с дублем: фаза ROLLING,
+      // mustRollAgain сохранён, игрок бросает ещё раз.
+      const s = makeState({
+        phase: "ROLLING",
+        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })],
+      });
+      expect(canRollDice(s, s.players[0]!)).toBe(true);
+      expect(mustRollDiceNow(s, s.players[0]!)).toBe(true);
+      expect(canEndTurn(s, s.players[0]!)).toBe(false);
+    });
+  });
+
+  describe("regression: justArrivedAtParking (карточка move target=20)", () => {
+    it("justArrivedAtParking=true + phase=ROLLING → canRoll=false (бросок заблокирован)", () => {
+      // После «Отправляйтесь на парковку» в текущем ходу право на
+      // ещё один бросок (после дубля) ТЕРЯЕТСЯ. UI не должен показывать
+      // активную кнопку «Бросить кубики» — даже если фаза=ROLLING
+      // (защита от гонок с анимацией/реконнектом).
+      const s = makeState({
+        phase: "ROLLING",
+        justArrivedAtParking: true,
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+      });
+      expect(canRollDice(s, s.players[0]!)).toBe(false);
+      expect(mustRollDiceNow(s, s.players[0]!)).toBe(false);
+    });
+
+    it("justArrivedAtParking=true + phase=BUILDING → canEndTurn=true (завершить можно)", () => {
+      // Нормальный случай сразу после карточки: фаза BUILDING, флаг
+      // установлен. Игрок может только завершить ход.
+      const s = makeState({
+        phase: "BUILDING",
+        justArrivedAtParking: true,
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+      });
+      expect(canEndTurn(s, s.players[0]!)).toBe(true);
+    });
+
+    it("justArrivedAtParking=false (или undefined) → canRoll=true в ROLLING", () => {
+      // Защита от ложных срабатываний: если флаг не выставлен
+      // (например, в начале хода handleStartTurn сбросил его),
+      // бросок разрешён в обычном режиме.
+      const s1 = makeState({
+        phase: "ROLLING",
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+      });
+      expect(canRollDice(s1, s1.players[0]!)).toBe(true);
+
+      const s2 = makeState({
+        phase: "ROLLING",
+        justArrivedAtParking: false,
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+      });
+      expect(canRollDice(s2, s2.players[0]!)).toBe(true);
+    });
+  });
 });

@@ -419,16 +419,36 @@ describe("GamesService.applyAction (FSM)", () => {
       (state as GameState & { _forceRoll?: [number, number] })._forceRoll = dice;
     }
 
-    it("GOTO_JAIL cell: мгновенный телепорт на 10, inJail=true, justEnteredJail=true", async () => {
+    it("GOTO_JAIL cell: попадание на клетку «В тюрьму» идёт через CARD_REVEAL, затем CONFIRM_CARD → телепорт на 10, inJail=true, justEnteredJail=true", async () => {
       // GOTO_JAIL = id 30 на стандартной доске.
       const goto = activeState.board.find((c) => c.type === "GOTO_JAIL");
       if (!goto) return;
-      activeState.players[activeState.currentPlayerIndex]!.position = goto.id;
-      activeState.phase = "RESOLVING_LANDING";
-      await act({ type: "CONFIRM_LANDING" });
       const p = activeState.players[activeState.currentPlayerIndex]!;
+      p.position = goto.id;
+      p.mustRollAgain = false;
+      p.consecutiveDoubles = 0;
+      activeState.phase = "RESOLVING_LANDING";
+
+      // 1) CONFIRM_LANDING: сервер кладёт «тюремную» Chance-карточку в
+      // cardContext и переводит фазу в CARD_REVEAL (модалка-объявление).
+      await act({ type: "CONFIRM_LANDING" });
+      expect(activeState.phase).toBe("CARD_REVEAL");
+      expect(activeState.cardContext?.card?.effect?.kind).toBe("goto-jail");
+      // На этом этапе игрок ещё на клетке 30, флаги тюрьмы не выставлены.
+      expect(p.position).toBe(30);
+      expect(p.inJail).toBe(false);
+      expect(activeState.justEnteredJail).toBeFalsy();
+
+      // 2) CONFIRM_CARD: сервер применяет эффект «goto-jail» — sendToJail
+      // сбрасывает position→10, inJail=true, mustRollAgain=false,
+      // consecutiveDoubles=0, jailTurns=0; фаза → JAIL_DECISION,
+      // justEnteredJail=true (визуально фишка мгновенно встаёт на 10).
+      await act({ type: "CONFIRM_CARD" });
       expect(p.position).toBe(10);
       expect(p.inJail).toBe(true);
+      expect(p.jailTurns).toBe(0);
+      expect(p.mustRollAgain).toBe(false);
+      expect(p.consecutiveDoubles).toBe(0);
       expect(activeState.justEnteredJail).toBe(true);
       expect(activeState.phase).toBe("JAIL_DECISION");
     });

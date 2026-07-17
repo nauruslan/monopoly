@@ -502,8 +502,12 @@ export class GamesService {
   ): Promise<{ dice?: [number, number]; card?: unknown; event?: GameEvent }> {
     player.mustRollAgain = false;
     player.consecutiveDoubles = 0;
+    // Сбрасываем флаги свежего попадания в специальные зоны
+    // (в текущем ходу их действие уже учтено; в следующем ходу
+    // игрок снова может бросать/действовать в обычном режиме).
+    state.justEnteredJail = false;
+    state.justArrivedAtParking = false;
     if (player.inJail) {
-      state.justEnteredJail = false;
       state.phase = "JAIL_DECISION";
     } else {
       state.phase = "ROLLING";
@@ -666,7 +670,15 @@ export class GamesService {
     player.position = newPos;
 
     // Прохождение GO через wrap - зарплата.
-    if (newPos < oldPos || oldPos + steps >= 40) {
+    //
+    // ВАЖНО: если игрок приземлился РОВНО на клетку 0
+    // (например, position=38 + бросок 2 = 40 → 0), зарплату
+    // начислит `handleResolvingLanding` (ветка `cell.type === "GO"`)
+    // с учётом дубля (двойная/обычная). Здесь мы начисляем goSalary
+    // ТОЛЬКО за реальный wrap мимо 0 (newPos > 0 И newPos < oldPos).
+    // Условие `newPos !== 0` исключает случай точного приземления
+    // на 0, чтобы избежать двойной зарплаты.
+    if (newPos < oldPos && newPos !== 0) {
       player.money += state.settings.goSalary;
     }
 
@@ -700,31 +712,64 @@ export class GamesService {
 
     // GO — если игрок ОСТАНОВИЛСЯ ровно на клетке 0 (например, после тюрьмы
     // или из-за точной длины броска), начисляем goSalary.
+    //
+    // Правила Монополии:
+    //  - Без дубля: обычная зарплата 200₽, фаза BUILDING.
+    //  - После дубля: ДВОЙНАЯ зарплата (2× goSalary), и `mustRollAgain`
+    //    СОХРАНЯЕТСЯ — игрок бросает ещё раз (фаза ROLLING).
     if (cell.type === "GO") {
-      player.money += state.settings.goSalary;
-      state.phase = "BUILDING";
+      const isDouble = state.lastDice?.isDouble === true;
+      if (isDouble) {
+        // Остановка на GO после дубля: двойная зарплата, и
+        // право на повторный бросок сохраняется (правило дублей).
+        player.money += state.settings.goSalary * 2;
+        state.phase = "ROLLING";
+      } else {
+        player.money += state.settings.goSalary;
+        state.phase = "BUILDING";
+      }
       return {};
     }
 
-    // GOTO_JAIL — мгновенное действие, шлём в тюрьму.
-    // `JailHandlerService.sendToJail` сам сбрасывает все нужные флаги
-    // (position=10, inJail=true, jailTurns=0, consecutiveDoubles=0,
-    // mustRollAgain=false). `justEnteredJail=true` означает, что
-    // в ЭТОМ ходу игроку разрешено только «Завершить ход» — модалка
-    // тюрьмы с тремя способами выхода появится в начале следующего
-    // хода.
+    // GOTO_JAIL (id=30) — «попадание в тюрьму» по правилам Монополии.
+    //
+    // Это СПЕЦИАЛЬНОЕ событие, объединяющее в себе «бросок + вытягивание
+    // карточки "Отправляйтесь в тюрьму"»:
+    //  1) фишка МГНОВЕННО (без анимации) переносится на клетку 10
+    //     (телепорт, не шаг);
+    //  2) `inJail=true`, `jailTurns=0`;
+    //  3) `consecutiveDoubles=0` (правило трёх дублей сбрасывается);
+    //  4) `mustRollAgain=false` (право на ещё один бросок — даже если
+    //     попали через дубль — ТЕРЯЕТСЯ; цепочка «бросок → движение →
+    //     эффект» обрывается);
+    //  5) `state.justEnteredJail=true` — в ЭТОМ ходу игрок может
+    //     только «Завершить ход» (модалка тюрьмы с тремя способами
+    //     выхода появится в начале СЛЕДУЮЩЕГО хода, когда
+    //     `handleStartTurn` сбросит флаг);
+    //  6) фаза = JAIL_DECISION (только END_TURN/CONFIRM_END_TURN
+    //     допустимы, см. handleJailDecision).
+    //
+    // UX-flow: показываем модалку-объявление через стандартный
+    // `CARD_REVEAL` -> `CardModal` (как для Chance). При подтверждении
+    // CONFIRM_CARD идёт `handleCardEffect` -> `applyCardEffectAndAdvance`
+    // (outcome.kind === "goto-jail") -> `sendToJail()` + JAIL_DECISION.
+    // Сама фишка НЕ двигается по клеткам (нет MOVE_ANIMATION) —
+    // клиент при `justEnteredJail=true` ставит её на `player.position`
+    // мгновенно через watcher в GameView.vue.
+    //
+    // ВАЖНО: логика «попадание в тюрьму» идентична и для клетки 30,
+    // и для карточки «Отправляйтесь в тюрьму» (Ch ch4, Tr tr4). Это
+    // единая точка истины: sendToJail() в JailHandlerService.
     if (cell.type === "GOTO_JAIL") {
-      // Попадание на клетку «В тюрьму» (id=30) — по правилам Монополии
-      // фишка ДОЛЖНА мгновенно (без анимации) переместиться на 10.
-      // UX-flow: показываем карточку-объявление через стандартный
-      // `CARD_REVEAL` -> `CardModal` (как для Chance). При подтверждении
-      // CONFIRM_CARD идёт `handleCardEffect` -> `applyCardEffectAndAdvance`
-      // (outcome.kind === "goto-jail") -> `sendToJail()` + JAIL_DECISION.
-      // Сама фишка НЕ двигается по клеткам (нет MOVE_ANIMATION) —
-      // клиент при `justEnteredJail=true` ставит её на `player.position`
-      // мгновенно через watcher в GameView.vue.
       const jailCard = CHANCE_CARDS.find((c) => c.effect.kind === "goto-jail");
       if (jailCard) {
+        // Сбрасываем mustRollAgain/consecutiveDoubles СРАЗУ при попадании
+        // на 30 — иначе на фазе CARD_REVEAL флаг «обязан бросить ещё раз»
+        // висит, и при подтверждении CONFIRM_CARD поведение было бы
+        // неконсистентным. Здесь же, до показа модалки, мы выравниваем
+        // флаги по правилам «попадание в тюрьму» (сбросить всё).
+        player.mustRollAgain = false;
+        player.consecutiveDoubles = 0;
         state.cardContext = {
           playerId: player.id,
           deck: "chance",
@@ -809,8 +854,46 @@ export class GamesService {
       return {};
     }
 
-    // JAIL (visit), PARKING — ничего не делаем, переходим в BUILDING.
-    state.phase = "BUILDING";
+    // PARKING (id=20) — «отдых» по правилам Монополии: цепочка
+    // «бросок → движение → эффект» обрывается.
+    //
+    // ВАЖНО: правило дублей действует и здесь, как для Тюрьмы-визита:
+    //  - Без дубля: фаза BUILDING, `mustRollAgain` сбрасывается.
+    //  - С дублём: `mustRollAgain` СОХРАНЯЕТСЯ, фаза ROLLING — игрок
+    //    бросает ещё раз (правило дублей действует на любой
+    //    «нейтральной» клетке, в т.ч. Бесплатная парковка).
+    //
+    // Флаг `state.justArrivedAtParking` НЕ ставится при обычном
+    // попадании (через кубики) — он предназначен только для
+    // «телепорта» по карточке «Отправляйтесь на парковку»
+    // (см. applyCardEffectAndAdvance), где право на ещё один
+    // бросок ТЕРЯЕТСЯ по правилам Монополии.
+    if (cell.type === "PARKING") {
+      if (player.mustRollAgain) {
+        // Дубль: сохраняем право на повторный бросок.
+        state.phase = "ROLLING";
+      } else {
+        // Без дубля: обычный отдых, можно завершить ход.
+        state.phase = "BUILDING";
+      }
+      return {};
+    }
+
+    // JAIL (visit, id=10) — «просто посещение», ничего не делаем.
+    //
+    // Правило дублей действует и здесь, как для Парковки/Тюрьмы:
+    //  - Без дубля: `mustRollAgain=false`, фаза BUILDING.
+    //  - С дублём: `mustRollAgain` СОХРАНЯЕТСЯ, фаза ROLLING — игрок
+    //    бросает ещё раз (правило дублей на любой «нейтральной»
+    //    клетке, в т.ч. Тюрьма-визит).
+    //
+    // В обоих случаях `inJail` НЕ меняется — это НЕ арест, а просто
+    // посещение (правила Монополии).
+    if (player.mustRollAgain) {
+      state.phase = "ROLLING";
+    } else {
+      state.phase = "BUILDING";
+    }
     return {};
   }
 
@@ -1077,6 +1160,32 @@ export class GamesService {
     const outcome = this.cards.applyEffect(card, player, state);
     state.cardContext.applied = true;
 
+    // ─── Правило «дубль + карточка» ─────────────────────────────────────
+    // Если игрок выбросил дубль (mustRollAgain=true) и затем попал на клетку
+    // Шанс/Казна, по правилам Монополии право на ещё один бросок
+    // действует только если карточка оставляет игрока «в основном цикле»:
+    //  - money / jail-free / luxury-tax-house (stay) — игрок остаётся на той же
+    //    клетке и бросает ещё раз;
+    //  - move-relative (шаг вперёд/назад, не меняющий «логическую» позицию
+    //    на парковку/тюрьму) — аналогично сохраняем право на бросок.
+    //
+    // Для «выводящих» из обычного цикла карточек (`move` на конкретную
+    // клетку: парковку, тюрьму, GO и т.п.) право на ещё один бросок
+    // ТЕРЯЕТСЯ: цепочка «бросок → движение → эффект» обрывается, игрок
+    // перемещается в новую локацию и должен завершить ход.
+    //
+    // `goto-jail` уже сбрасывает флаги внутри `JailHandlerService.sendToJail`.
+    // Для `move` / `go-salary` (тоже `move` с target=0) и `move-relative`
+    // сбрасываем здесь, на сервере — это единая точка истины.
+    // Сброс применяем ДО проверок target/steps, чтобы он работал
+    // для любого варианта карты движения.
+    if (outcome.kind === "move" || outcome.kind === "move-relative") {
+      if (player.mustRollAgain || player.consecutiveDoubles > 0) {
+        player.mustRollAgain = false;
+        player.consecutiveDoubles = 0;
+      }
+    }
+
     if (outcome.kind === "move") {
       // Если телепорт через клетку 0 (GO) — начисляем goSalary.
       if (outcome.target === 0 && !outcome.passedGo) {
@@ -1085,6 +1194,33 @@ export class GamesService {
       // Переставляем позицию игрока.
       const from = player.position;
       player.position = outcome.target;
+
+      // ─── Особый случай: «Отправляйтесь на парковку» (id=20) ─────────
+      // По правилам Монополии парковка — это «отдых»: цепочка
+      // «бросок → движение → эффект» обрывается, право на ещё один
+      // бросок (после дубля) ТЕРЯЕТСЯ, а карточка «Отправляйтесь на
+      // парковку» действует КАК арест: в этом ходу игрок может только
+      // завершить ход, бросать кубики ещё раз НЕЛЬЗЯ.
+      //
+      // Чтобы UI не предлагал лишних действий, ставим:
+      //  - `justArrivedAtParking = true` — блокирует canRollDice
+      //    (см. turn-permissions.ts);
+      //  - фаза = BUILDING (а не MOVE_ANIMATION) — canEndTurn=true,
+      //    кнопка «Завершить ход» активна;
+      //  - moveAnimation НЕ заполняем — фишка телепортируется
+      //    мгновенно (как для justEnteredJail в GOTO_JAIL cell).
+      //
+      // Флаг сбрасывается в `handleStartTurn` при начале СЛЕДУЮЩЕГО хода.
+      const PARKING_ID = 20;
+      if (outcome.target === PARKING_ID) {
+        state.justArrivedAtParking = true;
+        state.moveAnimation = undefined;
+        state.cardContext = undefined;
+        state.phase = "BUILDING";
+        state.lastDice = { dice: [0, 0], isDouble: false };
+        return { card };
+      }
+
       // Шаги для анимации (всегда положительные, по модулю 40).
       const steps = (outcome.target - from + 40) % 40;
       // Заполняем moveAnimation — клиент использует его для анимации фишки.

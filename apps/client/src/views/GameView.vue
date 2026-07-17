@@ -244,7 +244,11 @@ watch(
     // Сервер прислал state.phase = "TAX_PAYMENT" и не менял player.money.
     // Показываем модалку «Заплатите N₽». По ОК шлём CONFIRM_TAX —
     // сервер спишет деньги.
-    if (newPhase === "TAX_PAYMENT" && isMyTurn.value) {
+    // ВАЖНО: показываем для ЛЮБОГО текущего игрока (как PAY_RENT).
+    // Если ходит бот — через 2 секунды автоматически подтверждаем,
+    // иначе сервер будет ждать 60-секундный fallback-таймер
+    // (scheduleBotConfirmFallback) и партия «зависнет» на ходу бота.
+    if (newPhase === "TAX_PAYMENT" && isCurrentPlayerActive.value) {
       // В TAX_PAYMENT мы только что приземлились — currentPlayer.position
       // уже финален, но в крайнем случае используем moveAnimation.to.
       const pos = currentPlayer.value?.position ?? state.value.moveAnimation?.to ?? -1;
@@ -253,6 +257,14 @@ watch(
         taxAmount.value = cell.taxAmount;
         taxCellName.value = cell.name;
         showTaxModal.value = true;
+        // Если ходит бот — авто-CONFIRM_TAX через 2с (как PAY_RENT).
+        if (currentPlayer.value?.kind === "bot") {
+          setTimeout(() => {
+            if (state.value.phase === "TAX_PAYMENT") {
+              sendConfirmForCurrentPhase("TAX_PAYMENT", { type: "CONFIRM_TAX" });
+            }
+          }, 2000);
+        }
       }
     }
     if (newPhase !== "TAX_PAYMENT") {

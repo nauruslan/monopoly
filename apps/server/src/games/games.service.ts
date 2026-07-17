@@ -53,7 +53,6 @@ export class GamesService {
   private botThinkingTimers = new Map<string, NodeJS.Timeout>();
   /**
    * Таймеры FALLBACK-подтверждения визуальных фаз для ботов.
-   *
    * сервер НЕ шлёт `CONFIRM_*` автоматически по таймеру для бота — он ЖДЁТ
    * клиентского подтверждения (от любого подключённого клиента).
    * Этот таймер — СТРАХОВКА: сработает, только если в комнате нет ни
@@ -238,7 +237,6 @@ export class GamesService {
     }
 
     // 2.2) Ранняя защита «покупки в тюрьме».
-    //
     // По правилам Монополии: пока игрок в тюрьме — он НЕ может покупать
     // недвижимость в текущем ходу. `canBuyProperty` (turn-permissions.ts)
     // инкапсулирует эту проверку и уже отклоняет попытку на уровне фазы
@@ -325,7 +323,6 @@ export class GamesService {
     this.logger.log(`[applyAction] after-dispatch gameId=${gameId} phase=${state.phase}`);
 
     // Планирование ботских таймеров ПОСЛЕ завершения диспатча.
-    //
     // ВАЖНО: раньше здесь стояли
     // автоматические таймеры (`scheduleBotDiceAnimDone`,
     // `scheduleBotMoveAnimDone`, `scheduleBotCardDone` и т.д.) на
@@ -382,7 +379,6 @@ export class GamesService {
     } else {
       this.logger.error(`[applyAction] onStateChanged is NULL — broadcast невозможен!`);
     }
-
     // Планирование следующих ходов ботов (когда фаза не «ждущая»)
     // Не планируем, если сейчас фаза, где игрок должен что-то подтвердить визуально
     // (DICE_ANIMATION, MOVE_ANIMATION, CARD_REVEAL, CARD_EFFECT, TAX_PAYMENT,
@@ -401,7 +397,6 @@ export class GamesService {
       this.scheduleBotIfNeeded(state, gameId);
     }
     this.scheduleTurnTimeout(state, gameId);
-
     // Сохранение в БД (в фоне, через сериализованную очередь per gameId).
     // Без очереди несколько идущих подряд applyAction стартуют
     // updateSnapshot параллельно, и в БД возникает конфликт версий
@@ -507,6 +502,11 @@ export class GamesService {
     // игрок снова может бросать/действовать в обычном режиме).
     state.justEnteredJail = false;
     state.justArrivedAtParking = false;
+    // Сбрасываем outcome последнего TRY_DOUBLE — если он каким-то
+    // образом остался заполненным (например, на реконнекте), это
+    // гарантирует, что в новом ходу мы не «провалимся» в ветку
+    // DICE_ANIMATION как будто бы это была попытка выхода из тюрьмы.
+    state.jailRollOutcome = undefined;
     if (player.inJail) {
       state.phase = "JAIL_DECISION";
     } else {
@@ -544,6 +544,23 @@ export class GamesService {
    * DICE_ANIMATION — клиентская фаза анимации кубиков.
    * Допустимое action: CONFIRM_DICE_ANIMATION.
    * После подтверждения: MOVE_ANIMATION (если не в тюрьме) или ROLLING для следующего.
+   *
+   * Особый случай — попытка выхода из тюрьмы (TRY_DOUBLE):
+   *   Если `state.jailRollOutcome` задан, значит этот бросок был сделан
+   *   через `TRY_DOUBLE` (а не обычный ROLL_DICE). В этом случае
+   *   финальный результат определяется этим outcome'ом, а не текущими
+   *   `consecutiveDoubles`/`mustRollAgain`:
+   *     - "escape" (дубль)         — игрок вышел, движется как обычно,
+   *                                   но `mustRollAgain` НЕ ставится
+   *                                   (правило «выход дублем — без
+   *                                   повторного броска»).
+   *     - "pay"    (3 попытки)     — игрок вышел после принудительной
+   *                                   оплаты, движется как обычно,
+   *                                   `mustRollAgain` не ставится.
+   *     - "stay"   (промах)        — игрок остаётся в тюрьме,
+   *                                   фишка НЕ двигается, фаза BUILDING
+   *                                   (игрок завершает ход).
+   *   Поле `state.jailRollOutcome` сбрасывается после обработки.
    */
   private async handleDiceAnimation(
     state: GameState,
@@ -559,6 +576,76 @@ export class GamesService {
     const dice = state.lastDice.dice;
     const isDouble = state.lastDice.isDouble;
 
+    // Ветка: бросок из TRY_DOUBLE (попытка выхода из тюрьмы) 
+    if (state.jailRollOutcome) {
+      const outcome = state.jailRollOutcome;
+      // Сразу сбрасываем поле, чтобы при повторном заходе (теоретически)
+      // не сработала повторная обработка.
+      state.jailRollOutcome = undefined;
+
+      // "stay" — игрок остаётся в тюрьме (1-я или 2-я неудачная попытка),
+      // фишка не двигается, нужно завершить ход. Никаких mustRollAgain/
+      // consecutiveDoubles — это не обычный ход, это попытка выхода.
+      // Согласно правилам Монополии, попыток всего три; если не выпал
+      // дубль на 1-м или 2-м ходу — игрок остаётся в тюрьме и его ход
+      // завершается (фаза BUILDING → END_TURN).
+      if (outcome === "stay") {
+        player.consecutiveDoubles = 0;
+        player.mustRollAgain = false;
+        state.phase = "BUILDING";
+        return {};
+      }
+
+      // "escape" или "pay" — игрок вышел из тюрьмы на 3-й попытке.
+      // По правилам Монополии:
+      //   - "pay"   (3-й промах) — принудительно списывается 50₽;
+      //   - "escape" (дубль)     — деньги НЕ списываются (бесплатно).
+      // В ОБОИХ случаях после показа анимации кубиков игрок должен
+      // САМОСТОЯТЕЛЬНО нажать кнопку «Бросить кубики» — фишка
+      // телепортируется на клетку 10 (JAIL) и движется от неё как
+      // обычно. Поэтому:
+      //   1) Сбрасываем серию дублей и `mustRollAgain` (после выхода
+      //      дублем из тюрьмы НЕЛЬЗЯ бросать кубики ещё раз, даже
+      //      если снова выпадет дубль).
+      //   2) Устанавливаем `inJail=false`, `jailTurns=0`.
+      //   3) При "pay" списываем 50₽.
+      //   4) Переводим фазу в `ROLLING` (а не `MOVE_ANIMATION`) — это
+      //      даст игроку увидеть активную кнопку «Бросить кубики» и
+      //      бросить кости для выхода из тюрьмы. Классический
+      //      алгоритм 3-й попытки: анимация → кнопка «Бросить» →
+      //      анимация → движение фишки.
+      player.consecutiveDoubles = 0;
+      player.mustRollAgain = false;
+
+      if (outcome === "pay") {
+        // 3-й промах: принудительная оплата 50₽. `Math.max(0, ...)` —
+        // защита от отрицательного баланса; в реальной логике после
+        // этого должен сработать `BankruptcyService`. Здесь НЕ бросаем
+        // ForbiddenException при нехватке денег — по правилам Монополии
+        // штраф всё равно применяется (долг может привести к банкротству
+        // в handleResolvingLanding).
+        player.money = Math.max(0, player.money - 50);
+      }
+      // Для "escape" (дубль) деньги НЕ списываются — игрок выходит
+      // бесплатно, даже на 3-й попытке. Это правильный ход Монополии.
+      player.inJail = false;
+      player.jailTurns = 0;
+
+      // Очищаем контекст прошлой анимации (он относился к попытке
+      // выхода из тюрьмы, а не к обычному движению). После нажатия
+      // «Бросить кубики» сервер сам сформирует новый `state.lastDice`
+      // и `state.moveAnimation` в `handleRolling`/`handleDiceAnimation`.
+      state.lastDice = undefined;
+      state.moveAnimation = undefined;
+
+      // Переходим в ROLLING: игрок увидит активную кнопку «Бросить
+      // кубики». Бросок сделает он сам — фишка начнёт движение
+      // от клетки 10 (JAIL) как обычно.
+      state.phase = "ROLLING";
+      return {};
+    }
+
+    // Обычная ветка: ROLL_DICE (не из тюрьмы) 
     // Логика дублей — перенесена сюда из старого processMovement.
     if (isDouble) {
       player.consecutiveDoubles += 1;
@@ -670,7 +757,6 @@ export class GamesService {
     player.position = newPos;
 
     // Прохождение GO через wrap - зарплата.
-    //
     // ВАЖНО: если игрок приземлился РОВНО на клетку 0
     // (например, position=38 + бросок 2 = 40 → 0), зарплату
     // начислит `handleResolvingLanding` (ветка `cell.type === "GO"`)
@@ -730,7 +816,6 @@ export class GamesService {
       }
       return {};
     }
-
     // GOTO_JAIL (id=30) — «попадание в тюрьму» по правилам Монополии.
     //
     // Это СПЕЦИАЛЬНОЕ событие, объединяющее в себе «бросок + вытягивание
@@ -785,7 +870,6 @@ export class GamesService {
       state.phase = "JAIL_DECISION";
       return {};
     }
-
     // CHANCE / TREASURY — двухфазная обработка:
     //   1) CARD_REVEAL  — сервер вытягивает карту, кладёт её в state.cardContext,
     //                     НО НЕ применяет эффект. Клиент показывает модалку.
@@ -802,7 +886,6 @@ export class GamesService {
       state.phase = "CARD_REVEAL";
       return { card };
     }
-
     // PROPERTY / RAILROAD / UTILITY.
     if (cell.type === "PROPERTY" || cell.type === "RAILROAD" || cell.type === "UTILITY") {
       // На всякий случай чистим прошлый контекст.
@@ -821,7 +904,6 @@ export class GamesService {
       }
       return {};
     }
-
     // TAX.
     if (cell.type === "TAX") {
       // Вариант "luxury" (id=38) — карточка-формула из колоды LUXURY_TAX_CARDS.
@@ -853,7 +935,6 @@ export class GamesService {
       state.phase = "BUILDING";
       return {};
     }
-
     // PARKING (id=20) — «отдых» по правилам Монополии: цепочка
     // «бросок → движение → эффект» обрывается.
     //
@@ -878,7 +959,6 @@ export class GamesService {
       }
       return {};
     }
-
     // JAIL (visit, id=10) — «просто посещение», ничего не делаем.
     //
     // Правило дублей действует и здесь, как для Парковки/Тюрьмы:
@@ -896,7 +976,6 @@ export class GamesService {
     }
     return {};
   }
-
   /**
    * PAY_RENT — двухфазная оплата ренты (аренда чужой собственности):
    *
@@ -1493,6 +1572,11 @@ export class GamesService {
     state.lastDice = undefined;
     state.cardContext = undefined;
     state.moveAnimation = undefined;
+    // Сбрасываем outcome попытки выхода из тюрьмы — он уже должен
+    // быть обработан в `handleDiceAnimation` после CONFIRM_DICE_ANIMATION.
+    // На всякий случай (если каким-то образом остался) — чистим здесь,
+    // чтобы он не «протёк» в следующий ход.
+    state.jailRollOutcome = undefined;
     return {};
   }
 
@@ -1542,6 +1626,23 @@ export class GamesService {
       );
     }
 
+    if (!player.inJail) {
+      // Уже вышли из тюрьмы (например, применили карту «выход из тюрьмы»
+      // по предыдущему ходу, или `tryDoubleOrPay` только что сделал
+      // `escape`/`pay` — но в этом случае `jailRollOutcome` уже задан
+      // и ниже сработает ветка `TRY_DOUBLE`). Передаём ход через
+      // мгновенный START_TURN.
+      this.advanceToNextPlayer(state);
+      const next = state.players[state.currentPlayerIndex];
+      if (next) {
+        state.phase = "ROLLING";
+        await this.handleStartTurn(state, next, action);
+      } else {
+        state.phase = "ROLLING";
+      }
+      return {};
+    }
+
     if (action.type === "PAY_JAIL_FINE") {
       if (player.money < 50) throw new ForbiddenException("Недостаточно денег");
       player.money -= 50;
@@ -1564,22 +1665,13 @@ export class GamesService {
       const diceResult = this.roll(state);
       const isDouble = diceResult[0] === diceResult[1];
       state.lastDice = { dice: diceResult, isDouble };
+      // Сохраняем outcome в state.jailRollOutcome — итог (escape / pay / stay)
+      // будет обработан в `handleDiceAnimation` после CONFIRM_DICE_ANIMATION.
+      // Это позволяет клиенту увидеть анимацию кубиков и в случае «промаха»
+      // (stay) — и в случае «выхода» (escape/pay).
       const outcome = this.jail.tryDoubleOrPay(player, diceResult);
-      if (outcome === "escape" || outcome === "pay") {
-        player.inJail = false;
-        // Переход в DICE_ANIMATION (анимация кубиков в тюрьме).
-        state.phase = "DICE_ANIMATION";
-        return { dice: diceResult };
-      }
-      // "stay" — остаёмся в тюрьме, передаём ход через мгновенный START_TURN.
-      this.advanceToNextPlayer(state);
-      const next = state.players[state.currentPlayerIndex];
-      if (next) {
-        state.phase = "ROLLING";
-        await this.handleStartTurn(state, next, action);
-      } else {
-        state.phase = "ROLLING";
-      }
+      state.jailRollOutcome = outcome;
+      state.phase = "DICE_ANIMATION";
       return { dice: diceResult };
     }
 

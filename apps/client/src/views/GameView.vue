@@ -226,11 +226,23 @@ watch(
 watch(
   () => state.value.phase,
   (newPhase: Phase) => {
-    // Только что попал в тюрьму (в этом ходу) — модалку с тремя способами
-    // выхода НЕ показываем: игроку остаётся только END_TURN. Модалка
-    // появится в начале СЛЕДУЮЩЕГО хода, когда `state.justEnteredJail`
-    // будет сброшен в `handleStartTurn`.
-    showJailModal.value = newPhase === "JAIL_DECISION" && !state.value.justEnteredJail;
+    // JAIL_DECISION отменяется как для escape/pay (игрок вышел и движется),
+    // так и для stay (фаза переходит в DICE_ANIMATION -> BUILDING).
+    // Поэтому в JAIL_DECISION в нашем кейсе мы НЕ закрываем модалку тут
+    // (для justEnteredJail=true это уже не было открыто).
+    // Для попытки выхода дубля (TRY_DOUBLE) модалку закрываем:
+    // сервер переключит фазу в DICE_ANIMATION, и кубики покажутся.
+    if (newPhase !== "JAIL_DECISION") {
+      showJailModal.value = false;
+    } else if (newPhase === "JAIL_DECISION" && state.value.justEnteredJail) {
+      // Только что попал в тюрьму — модалку с тремя способами выхода
+      // НЕ показываем, но она и не должна быть открыта (вход в JAIL_DECISION
+      // для только что попавшего игрока — это just-entered-режим).
+      showJailModal.value = false;
+    } else if (newPhase === "JAIL_DECISION" && !state.value.justEnteredJail) {
+      // Обычный вход в JAIL_DECISION (новый ход) — открываем модалку.
+      showJailModal.value = isMyTurn.value;
+    }
     showBuyModal.value = newPhase === "BUY_DECISION" && isMyTurn.value;
     showAuctionModal.value =
       (newPhase === "AUCTION_BIDDING" || newPhase === "AUCTION_RESOLVE") &&

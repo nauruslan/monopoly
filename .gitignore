@@ -55,3 +55,4 @@ Thumbs.db
 # === Dev ===
 docs
 .gigacode
+vite-out.txt

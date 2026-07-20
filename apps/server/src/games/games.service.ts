@@ -576,7 +576,7 @@ export class GamesService {
     const dice = state.lastDice.dice;
     const isDouble = state.lastDice.isDouble;
 
-    // Ветка: бросок из TRY_DOUBLE (попытка выхода из тюрьмы) 
+    // Ветка: бросок из TRY_DOUBLE (попытка выхода из тюрьмы)
     if (state.jailRollOutcome) {
       const outcome = state.jailRollOutcome;
       // Сразу сбрасываем поле, чтобы при повторном заходе (теоретически)
@@ -645,7 +645,7 @@ export class GamesService {
       return {};
     }
 
-    // Обычная ветка: ROLL_DICE (не из тюрьмы) 
+    // Обычная ветка: ROLL_DICE (не из тюрьмы)
     // Логика дублей — перенесена сюда из старого processMovement.
     if (isDouble) {
       player.consecutiveDoubles += 1;
@@ -804,7 +804,16 @@ export class GamesService {
     //  - После дубля: ДВОЙНАЯ зарплата (2× goSalary), и `mustRollAgain`
     //    СОХРАНЯЕТСЯ — игрок бросает ещё раз (фаза ROLLING).
     if (cell.type === "GO") {
-      const isDouble = state.lastDice?.isDouble === true;
+      // раньше здесь проверялось `state.lastDice?.isDouble`,
+      // что в общем случае совпадает с `player.mustRollAgain`, но
+      // может рассинхронизироваться:
+      //  - после `tryDouble` из тюрьмы `lastDice` обнуляется, и при
+      //    дальнейшем движении `isDouble` теряется;
+      //  - при ручном выставлении `mustRollAgain` (тесты, edge-cases).
+      // Используем `player.mustRollAgain` — это ЕДИНСТВЕННЫЙ
+      // каноничный флаг «игрок обязан бросить ещё раз» (см.
+      // turn-permissions.ts:mustRollDiceNow).
+      const isDouble = player.mustRollAgain === true;
       if (isDouble) {
         // Остановка на GO после дубля: двойная зарплата, и
         // право на повторный бросок сохраняется (правило дублей).
@@ -893,12 +902,26 @@ export class GamesService {
         state.rentContext = undefined;
         state.phase = "BUY_DECISION";
       } else if (cell.ownerId === player.id) {
+        // Своя клетка: раньше здесь ВСЕГДА ставилась фаза
+        // BUILDING, без проверки `mustRollAgain`. Это приводило к
+        // ступору после дубля:
+        //   canEndTurn=false (т.к. mustRollAgain=true в BUILDING)
+        //   canRoll=false (т.к. фаза ≠ ROLLING)
+        //   → ни одна кнопка не активна.
+        //
+        // По правилам Монополии: PROPERTY/RAILROAD/UTILITY — это
+        // «нейтральные» клетки, на которые правило дублей ДЕЙСТВУЕТ
+        // (как и на парковку/тюрьму-визит). После дубля на СВОЕЙ
+        // клетке игрок должен бросить ещё раз. Без дубля — обычный
+        // переход в BUILDING (можно строить, торговать, завершить ход).
         state.rentContext = undefined;
-        state.phase = "BUILDING";
+        state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
       } else {
         // Чужая — рассчитываем ренту заранее и кладём в state.rentContext,
         // затем переходим в PAY_RENT. Деньги НЕ списываем — клиент должен
         // сначала показать модалку и отправить CONFIRM_RENT_PAYMENT.
+        // После CONFIRM_RENT_PAYMENT сервер сам переведёт фазу в
+        // ROLLING (если `mustRollAgain=true`) — см. `afterRentOrTax`.
         state.rentContext = this.buildRentContext(state, cell);
         state.phase = "PAY_RENT";
       }
@@ -1240,30 +1263,36 @@ export class GamesService {
     state.cardContext.applied = true;
 
     // ─── Правило «дубль + карточка» ─────────────────────────────────────
-    // Если игрок выбросил дубль (mustRollAgain=true) и затем попал на клетку
-    // Шанс/Казна, по правилам Монополии право на ещё один бросок
-    // действует только если карточка оставляет игрока «в основном цикле»:
-    //  - money / jail-free / luxury-tax-house (stay) — игрок остаётся на той же
-    //    клетке и бросает ещё раз;
-    //  - move-relative (шаг вперёд/назад, не меняющий «логическую» позицию
-    //    на парковку/тюрьму) — аналогично сохраняем право на бросок.
+    // раньше здесь безусловно сбрасывались `mustRollAgain`
+    // и `consecutiveDoubles` для ЛЮБЫХ карт `move` и `move-relative`. Это
+    // ломало правило дублей для карточек «Вернитесь на N клеток назад»:
+    // игрок выбрасывал дубль, попадал на Шанс, вытягивал такую карту,
+    // и вместо повторного броска получал фазу BUILDING с заблокированными
+    // обеими кнопками (canEndTurn=false из-за mustRollAgain=true,
+    // canRoll=false из-за фазы ≠ ROLLING) → ступор.
     //
-    // Для «выводящих» из обычного цикла карточек (`move` на конкретную
-    // клетку: парковку, тюрьму, GO и т.п.) право на ещё один бросок
-    // ТЕРЯЕТСЯ: цепочка «бросок → движение → эффект» обрывается, игрок
-    // перемещается в новую локацию и должен завершить ход.
+    // Корректные правила Монополии:
+    //  - money / jail-free / luxury-tax-house (stay) — игрок остаётся
+    //    на той же клетке, `mustRollAgain` СОХРАНЯЕТСЯ (бросок ещё раз).
+    //  - move-relative (шаг вперёд/назад, любая дистанция) — это НЕ
+    //    «выводящая» карточка: игрок остаётся в основном цикле хода,
+    //    `mustRollAgain` СОХРАНЯЕТСЯ.
+    //  - go-salary (target=0 через move) — игрок остаётся в основном
+    //    цикле, `mustRollAgain` СОХРАНЯЕТСЯ (правило дублей действует).
+    //  - move на конкретную клетку вроде ул. Арбат (target=37) — тоже
+    //    НЕ «выводящая» карточка, `mustRollAgain` СОХРАНЯЕТСЯ.
+    //  - move на парковку (target=20) — «выводящая» (отдых), сброс
+    //    делается в специальной ветке ниже (там ставится
+    //    `justArrivedAtParking=true` и фаза BUILDING).
+    //  - move в тюрьму (target=10) и goto-jail — `sendToJail` уже
+    //    сбрасывает `mustRollAgain` и `consecutiveDoubles`.
     //
-    // `goto-jail` уже сбрасывает флаги внутри `JailHandlerService.sendToJail`.
-    // Для `move` / `go-salary` (тоже `move` с target=0) и `move-relative`
-    // сбрасываем здесь, на сервере — это единая точка истины.
-    // Сброс применяем ДО проверок target/steps, чтобы он работал
-    // для любого варианта карты движения.
-    if (outcome.kind === "move" || outcome.kind === "move-relative") {
-      if (player.mustRollAgain || player.consecutiveDoubles > 0) {
-        player.mustRollAgain = false;
-        player.consecutiveDoubles = 0;
-      }
-    }
+    // Поэтому здесь НЕ сбрасываем флаги. Они сбрасываются только
+    // в спецветках (парковка, тюрьма) или в `afterRentOrTax` (для
+    // stay-исходов, если `mustRollAgain=false`).
+    // (Сброс `mustRollAgain`/`consecutiveDoubles` намеренно НЕ
+    // делается здесь — см. правила выше. Для «выводящих» карточек
+    // (парковка, тюрьма) сброс делается в специальных ветках ниже.)
 
     if (outcome.kind === "move") {
       // Если телепорт через клетку 0 (GO) — начисляем goSalary.
@@ -1292,6 +1321,13 @@ export class GamesService {
       // Флаг сбрасывается в `handleStartTurn` при начале СЛЕДУЮЩЕГО хода.
       const PARKING_ID = 20;
       if (outcome.target === PARKING_ID) {
+        // «выводящая» карточка парковки обрывает
+        // цепочку дубля. Сбрасываем `mustRollAgain`/`consecutiveDoubles`
+        // явно ЗДЕСЬ, потому что общий безусловный сброс мы удалили
+        // выше (он ломал move-relative). Спецлогика парковки в этом
+        // ходу: игрок может только завершить ход.
+        player.mustRollAgain = false;
+        player.consecutiveDoubles = 0;
         state.justArrivedAtParking = true;
         state.moveAnimation = undefined;
         state.cardContext = undefined;

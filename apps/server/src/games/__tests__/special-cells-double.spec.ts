@@ -202,7 +202,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Главная проверка bugfix: двойная зарплата, mustRollAgain сохранён,
+    // Главная проверка: двойная зарплата, mustRollAgain сохранён,
     // фаза ROLLING (игрок бросает ещё раз).
     expect(p.money).toBe(moneyBefore + goSalary * 2);
     expect(p.mustRollAgain).toBe(true);
@@ -249,7 +249,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Главная проверка bugfix: mustRollAgain сохранён, фаза ROLLING,
+    // Главная проверка: mustRollAgain сохранён, фаза ROLLING,
     // игрок бросает ещё раз. Визит НЕ считается арестом.
     expect(p.inJail).toBe(false);
     expect(p.mustRollAgain).toBe(true);
@@ -296,7 +296,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Главная проверка bugfix: mustRollAgain сохранён, фаза ROLLING.
+    // Главная проверка: mustRollAgain сохранён, фаза ROLLING.
     // Это ОТЛИЧАЕТСЯ от карточки «Отправляйтесь на парковку», где
     // право на ещё один бросок ТЕРЯЕТСЯ.
     expect(p.mustRollAgain).toBe(true);
@@ -359,7 +359,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Главная проверка bugfix: даже при дубле попадание на 30
+    // Главная проверка: даже при дубле попадание на 30
     // (GOTO_JAIL) забирает право на ещё один бросок.
     expect(activeState.phase).toBe("CARD_REVEAL");
     expect(activeState.cardContext?.card.effect.kind).toBe("goto-jail");
@@ -410,7 +410,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
 
     await act({ type: "CONFIRM_CARD" });
 
-    // Главная проверка bugfix: даже через карточку при дубле
+    // Главная проверка: даже через карточку при дубле
     // mustRollAgain сбрасывается, фишка на 10, inJail=true.
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
@@ -453,5 +453,106 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("JAIL_DECISION");
     expect(activeState.justEnteredJail).toBe(true);
+  });
+
+  // 5) PROPERTY (своя клетка) при дубле 
+  //
+  // Сценарий бага: игрок бросает дубль → mustRollAgain=true →
+  // попадает на СВОЮ клетку (PROPERTY/RAILROAD/UTILITY). До
+  // `handleResolvingLanding` для своей клетки безусловно ставил фазу
+  // BUILDING, не учитывая `mustRollAgain`. В результате:
+  //   - canRollDice=false (фаза ≠ ROLLING);
+  //   - canEndTurn=false (mustRollAgain=true блокирует завершение).
+  // Игра зависала: ни «Бросить», ни «Завершить» не активны.
+  //
+  // Исправление: для нейтральных клеток (своя клетка — это
+  // «не событие», а просто приземление) правило дублей должно
+  // продолжать действовать. Поэтому фаза = ROLLING, mustRollAgain
+  // СОХРАНЯЕТСЯ.
+
+  it("PROPERTY своя при дубле: mustRollAgain сохранён, фаза ROLLING (регресс #2)", async () => {
+    const p = activeState.players[activeState.currentPlayerIndex]!;
+    // Ищем первую PROPERTY и делаем её своей.
+    const propertyCell = activeState.board.find((c) => c.type === "PROPERTY");
+    expect(propertyCell).toBeDefined();
+    if (!propertyCell) return;
+    // Игрок встаёт ровно за N-2 от своей клетки, чтобы дубль [1,1]=2
+    // привёл его на неё.
+    p.position = (propertyCell.id - 2 + 40) % 40;
+    p.mustRollAgain = true;
+    p.consecutiveDoubles = 1;
+    // Делаем клетку своей.
+    activeState.board[propertyCell.id] = { ...propertyCell, ownerId: p.id };
+    p.properties = [propertyCell.id];
+    activeState.lastDice = { dice: [1, 1], isDouble: true };
+    activeState.phase = "MOVE_ANIMATION";
+
+    // 1) CONFIRM_MOVE_ANIMATION: handleMoveAnimation сдвигает на
+    //    клетку propertyCell.id, фаза → RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(p.position).toBe(propertyCell.id);
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // 2) CONFIRM_LANDING: handleResolvingLanding → cell.type=PROPERTY,
+    //    cell.ownerId === p.id → раньше фаза = BUILDING, mustRollAgain
+    //    оставался true → зависание. После mustRollAgain
+    //    СОХРАНЯЕТСЯ, фаза = ROLLING.
+    await act({ type: "CONFIRM_LANDING" });
+    expect(p.mustRollAgain).toBe(true);
+    expect(p.consecutiveDoubles).toBe(1);
+    expect(activeState.phase).toBe("ROLLING");
+    // UI-контракт: «Бросить» активна, «Завершить» — нет.
+    expect(canRollDice(activeState, p)).toBe(true);
+    expect(canEndTurn(activeState, p)).toBe(false);
+  });
+
+  it("RAILROAD своя при дубле: mustRollAgain сохранён, фаза ROLLING (регресс #2)", async () => {
+    const p = activeState.players[activeState.currentPlayerIndex]!;
+    const railroadCell = activeState.board.find((c) => c.type === "RAILROAD");
+    expect(railroadCell).toBeDefined();
+    if (!railroadCell) return;
+    p.position = (railroadCell.id - 2 + 40) % 40;
+    p.mustRollAgain = true;
+    p.consecutiveDoubles = 1;
+    activeState.board[railroadCell.id] = { ...railroadCell, ownerId: p.id };
+    p.properties = [railroadCell.id];
+    activeState.lastDice = { dice: [1, 1], isDouble: true };
+    activeState.phase = "MOVE_ANIMATION";
+
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(p.position).toBe(railroadCell.id);
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    await act({ type: "CONFIRM_LANDING" });
+    expect(p.mustRollAgain).toBe(true);
+    expect(p.consecutiveDoubles).toBe(1);
+    expect(activeState.phase).toBe("ROLLING");
+    expect(canRollDice(activeState, p)).toBe(true);
+    expect(canEndTurn(activeState, p)).toBe(false);
+  });
+
+  it("UTILITY своя при дубле: mustRollAgain сохранён, фаза ROLLING (регресс #2)", async () => {
+    const p = activeState.players[activeState.currentPlayerIndex]!;
+    const utilityCell = activeState.board.find((c) => c.type === "UTILITY");
+    expect(utilityCell).toBeDefined();
+    if (!utilityCell) return;
+    p.position = (utilityCell.id - 2 + 40) % 40;
+    p.mustRollAgain = true;
+    p.consecutiveDoubles = 1;
+    activeState.board[utilityCell.id] = { ...utilityCell, ownerId: p.id };
+    p.properties = [utilityCell.id];
+    activeState.lastDice = { dice: [1, 1], isDouble: true };
+    activeState.phase = "MOVE_ANIMATION";
+
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(p.position).toBe(utilityCell.id);
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    await act({ type: "CONFIRM_LANDING" });
+    expect(p.mustRollAgain).toBe(true);
+    expect(p.consecutiveDoubles).toBe(1);
+    expect(activeState.phase).toBe("ROLLING");
+    expect(canRollDice(activeState, p)).toBe(true);
+    expect(canEndTurn(activeState, p)).toBe(false);
   });
 });

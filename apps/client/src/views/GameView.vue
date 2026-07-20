@@ -98,6 +98,14 @@ const canRoll = computed(() => {
   if (!isMyTurn.value) return false;
   if (state.value.phase !== "ROLLING") return false;
   if (currentPlayer.value?.inJail) return false;
+  // BUGFIX: во время анимации кубиков (DICE_ANIMATION) или движения
+  // фишки (MOVE_ANIMATION) кнопка должна быть неактивна. `phase=ROLLING`
+  // на сервере держится ~миллисекунду до DICE_ANIMATION, но если в
+  // этот промежуток игрок успеет кликнуть — будет дубль броска. Кроме
+  // того, после reconnect/reload `diceRolling` синхронизируется из
+  // `state.lastDice` (см. game.ts), и без этой проверки кнопка
+  // мигала бы активной во время проигрывания анимации.
+  if (diceRolling.value) return false;
   return true;
 });
 const canBuy = computed(

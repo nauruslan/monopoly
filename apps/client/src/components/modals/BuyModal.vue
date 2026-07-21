@@ -53,8 +53,18 @@ const emit = defineEmits<{
       >
         Купить ₽{{ cell?.price }}
       </button>
-      <button class="action-btn btn-cancel" @click="emit('decline')">Пропустить</button>
+      <button
+        class="action-btn btn-auction"
+        :disabled="!cell"
+        title="Клетка уйдёт на аукцион между всеми игроками"
+        @click="emit('decline')"
+      >
+        🔨 На аукцион
+      </button>
     </div>
+    <p class="auction-hint">
+      💡 Если откажетесь — клетка будет продана на аукционе между всеми активными игроками.
+    </p>
   </Modal>
 </template>
 
@@ -75,6 +85,15 @@ const emit = defineEmits<{
   margin-top: 4px;
 }
 
+.auction-hint {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  text-align: center;
+  font-style: italic;
+}
+
 .btn-buy {
   background: linear-gradient(135deg, var(--green), var(--accent));
   color: #fff;
@@ -92,7 +111,7 @@ const emit = defineEmits<{
   cursor: not-allowed;
 }
 
-.btn-cancel {
+.btn-auction {
   background: var(--surface-3);
   color: var(--text);
   border: 1px solid var(--glass-border);
@@ -101,5 +120,18 @@ const emit = defineEmits<{
   border-radius: var(--radius-sm);
   font-weight: 700;
   cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.1s ease;
+}
+
+.btn-auction:hover:not(:disabled) {
+  background: var(--surface-2);
+  transform: translateY(-1px);
+}
+
+.btn-auction:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 </style>

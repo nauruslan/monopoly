@@ -127,6 +127,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
         stateSnapshot: state,
       })),
       updateSnapshot: jest.fn(async () => undefined),
+      replaceSnapshot: jest.fn(async () => true),
       findById: jest.fn(async () => null),
     };
 
@@ -455,7 +456,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.justEnteredJail).toBe(true);
   });
 
-  // 5) PROPERTY (своя клетка) при дубле 
+  // 5) PROPERTY (своя клетка) при дубле
   //
   // Сценарий бага: игрок бросает дубль → mustRollAgain=true →
   // попадает на СВОЮ клетку (PROPERTY/RAILROAD/UTILITY). До

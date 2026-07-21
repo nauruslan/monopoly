@@ -113,6 +113,7 @@ describe("GamesService.applyAction (FSM)", () => {
         stateSnapshot: state,
       })),
       updateSnapshot: jest.fn(async () => undefined),
+      replaceSnapshot: jest.fn(async () => true),
       findById: jest.fn(async () => null),
     };
 
@@ -136,7 +137,7 @@ describe("GamesService.applyAction (FSM)", () => {
     (activeState as any).id = "g-test";
   });
 
-  // Вспомогательные 
+  // Вспомогательные
   async function act(action: Parameters<GamesService["applyAction"]>[2]) {
     const gameId = "g-test";
     (service as any).activeGames.set(gameId, activeState);
@@ -147,7 +148,7 @@ describe("GamesService.applyAction (FSM)", () => {
     );
   }
 
-  // Базовые проверки 
+  // Базовые проверки
 
   it("состояние партии инициализировано: phase=ROLLING, currentPlayerIndex=0", () => {
     expect(activeState.phase).toBe("ROLLING");
@@ -217,8 +218,12 @@ describe("GamesService.applyAction (FSM)", () => {
     ).rejects.toThrow();
   });
 
-  it("AUCTION_BID без активного state.auction отклоняется", async () => {
-    await expect(act({ type: "AUCTION_BID", amount: 100 })).rejects.toThrow();
+  it("AUCTION_MAKE_BID в фазе ROLLING отклоняется", async () => {
+    await expect(act({ type: "AUCTION_MAKE_BID", amount: 100 })).rejects.toThrow();
+  });
+
+  it("AUCTION_PASS в фазе ROLLING отклоняется", async () => {
+    await expect(act({ type: "AUCTION_PASS" })).rejects.toThrow();
   });
 
   it("CONFIRM_DICE_ANIMATION в фазе ROLLING отклоняется", async () => {
@@ -246,7 +251,7 @@ describe("GamesService.applyAction (FSM)", () => {
     await expect(service.applyAction(gameId, "p0", { type: "ROLL_DICE" })).rejects.toThrow();
   });
 
-  // Broadcast 
+  // Broadcast
 
   it("onStateChanged вызывается после applyAction", async () => {
     const gameId = "g-test";
@@ -261,7 +266,7 @@ describe("GamesService.applyAction (FSM)", () => {
     expect(lastCall[1]).toBe(activeState);
   });
 
-  // Карты (фазы CARD_REVEAL → CARD_EFFECT) 
+  // Карты (фазы CARD_REVEAL → CARD_EFFECT)
 
   it("CHANCE: вытягивает карту в CARD_REVEAL, эффект НЕ применён", async () => {
     // Найдём клетку CHANCE.
@@ -404,7 +409,7 @@ describe("GamesService.applyAction (FSM)", () => {
     expect(["BUILDING", "ROLLING"]).toContain(activeState.phase);
   });
 
-  // ТЮРЬМА: вход через карту / 3 дубля / клетку 
+  // ТЮРЬМА: вход через карту / 3 дубля / клетку
   describe("Jail entry (justEnteredJail)", () => {
     /** Хелпер: ставит активного игрока на нужную клетку, фазу ROLLING, прогоняет ROLL_DICE. */
     async function setupAndRollTo(state: GameState, position: number, dice: [number, number]) {
@@ -495,7 +500,7 @@ describe("GamesService.applyAction (FSM)", () => {
     });
   });
 
-  // ТЮРЬМА: попытка выйти дублём (TRY_DOUBLE) 
+  // ТЮРЬМА: попытка выйти дублём (TRY_DOUBLE)
   describe("Jail TRY_DOUBLE (попытка выбросить дубль)", () => {
     /**
      * Хелпер: ставит игрока в JAIL_DECISION (без justEnteredJail) с заданным

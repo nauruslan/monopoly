@@ -18,6 +18,7 @@ import SettingsPanel from "../components/SettingsPanel.vue";
 import LogPanel from "../components/LogPanel.vue";
 import { useAuthStore } from "../stores/auth";
 import { useGameStore } from "../stores/game";
+import { useAuctionStore } from "../stores/auction";
 import { useSettingsStore } from "../stores/settings";
 import { useSocket, disconnectSocket } from "../composables/useSocket";
 import type { Cell, GameAction, TradeOffer, Phase } from "@monopoly/shared";
@@ -43,8 +44,20 @@ const {
   lastDrawnCard,
 } = storeToRefs(game);
 
-// Кому принадлежит ход
-const myPlayerId = computed(() => players.value[0]?.id ?? "");
+// Кому принадлежит ход. `useAuthStore` даёт нам userId; резолвим
+// в playerId через `state.players` (ищем первого human-игрока, чей
+// id в локальном маппинге, либо — для одиночной партии — просто
+// первого human).
+// На клиенте нет надёжного маппинга userId → playerId (сервер
+// не отдаёт userId в state). Берём первого human-игрока (обычно хост).
+const auctionStore = useAuctionStore();
+const myPlayerId = computed<string>(() => {
+  const me = state.value?.players?.find((p) => p.kind === "human");
+  if (me) return me.id;
+  return players.value[0]?.id ?? "";
+});
+// Синхронизируем с auctionStore.
+watch(myPlayerId, (id) => auctionStore.setMyPlayerId(id), { immediate: true });
 const isMyTurn = computed(
   () => currentPlayer.value?.kind === "human" && currentPlayer.value?.id === myPlayerId.value,
 );
@@ -98,7 +111,7 @@ const canRoll = computed(() => {
   if (!isMyTurn.value) return false;
   if (state.value.phase !== "ROLLING") return false;
   if (currentPlayer.value?.inJail) return false;
-  // BUGFIX: во время анимации кубиков (DICE_ANIMATION) или движения
+  // во время анимации кубиков (DICE_ANIMATION) или движения
   // фишки (MOVE_ANIMATION) кнопка должна быть неактивна. `phase=ROLLING`
   // на сервере держится ~миллисекунду до DICE_ANIMATION, но если в
   // этот промежуток игрок успеет кликнуть — будет дубль броска. Кроме
@@ -206,7 +219,6 @@ function onRoll() {
   stopBlink();
   dispatchAction({ type: "ROLL_DICE" });
 }
-
 // Анимация кубиков (фаза DICE_ANIMATION)
 // Dice.vue эмитит 'roll-done' ровно через 2 секунды.
 // По этому событию шлём CONFIRM_DICE_ANIMATION — сервер переходит
@@ -252,9 +264,15 @@ watch(
       showJailModal.value = isMyTurn.value;
     }
     showBuyModal.value = newPhase === "BUY_DECISION" && isMyTurn.value;
+    // Аукцион показываем, если идёт аукцион (любая из 3 фаз) или
+    // state.auction ещё не очищен (сразу после SOLD/UNSOLD — короткий
+    // момент в фазе AUCTION_FINISHED). Модалку видят ВСЕ клиенты
+    // (для прозрачности), а не только участники.
     showAuctionModal.value =
-      (newPhase === "AUCTION_BIDDING" || newPhase === "AUCTION_RESOLVE") &&
-      (state.value.auction?.activeBidders?.includes(myPlayerId.value) ?? false);
+      newPhase === "AUCTION_AWAITING_START" ||
+      newPhase === "AUCTION_ACTIVE" ||
+      newPhase === "AUCTION_FINISHED" ||
+      !!state.value.auction;
     showTradeModal.value =
       (newPhase === "TRADING_NEGOTIATE" || newPhase === "TRADING_CONFIRM") &&
       !!state.value.trade &&
@@ -416,19 +434,6 @@ function onUseJailCard() {
 function onTryDouble() {
   showJailModal.value = false;
   dispatchAction({ type: "TRY_DOUBLE" });
-}
-
-function onAuctionBid(amount: number) {
-  if (!Number.isFinite(amount) || amount <= 0) {
-    console.warn("Auction bid rejected: invalid amount", amount);
-    return;
-  }
-  dispatchAction({ type: "AUCTION_BID", amount });
-}
-
-function onAuctionPass() {
-  showAuctionModal.value = false;
-  dispatchAction({ type: "AUCTION_PASS" });
 }
 
 function onTradeAccept() {
@@ -650,11 +655,6 @@ function animatePlayerTo(playerId: string, from: number, to: number) {
       clearInterval(id);
       delete animTimers[playerId];
       try {
-        // По завершении анимации — отправляем подтверждение.
-        // ВАЖНО (bugfix «рассинхрон ходов ботов»): раньше здесь стояла
-        // проверка `isMyTurn.value`, из-за которой для бота confirm
-        // не отправлялся. Теперь шлём от ЛЮБОГО текущего игрока (хоть
-        // человек, хоть бот) — это и есть синхронизация.
         sendConfirmForCurrentPhase("MOVE_ANIMATION", { type: "CONFIRM_MOVE_ANIMATION" });
       } catch (e) {
         console.warn("CONFIRM_MOVE_ANIMATION dispatch failed", e);
@@ -738,38 +738,59 @@ function logout() {
     </div>
 
     <template v-else>
-      <SettingsPanel />
+      <!--
+        ОСНОВНОЙ UI (доска + панели) рендерится ОДИН раз.
+        Во время аукциона весь контейнер .app-locked получает
+        атрибут `inert` + CSS-фильтр, а поверх — .app-backdrop.
+        Никакого дублирования досок/панелей.
+      -->
+      <div class="layout" :class="{ 'app-locked': showAuctionModal }" :inert="showAuctionModal">
+        <div class="board-area">
+          <SettingsPanel />
+          <Board
+            :cells="cells"
+            :players="players"
+            :display-positions="displayPositions"
+            :dice-values="diceValues"
+            :dice-rolling="diceRolling"
+            @cell-click="onCellClick"
+            @dice-roll-done="onDiceRollDone"
+          />
+        </div>
 
-      <Board
-        :cells="cells"
-        :players="players"
-        :display-positions="displayPositions"
-        :dice-values="diceValues"
-        :dice-rolling="diceRolling"
-        @cell-click="onCellClick"
-        @dice-roll-done="onDiceRollDone"
-      />
+        <aside class="sidebar">
+          <PlayersPanel :players="players" :current-player-id="currentPlayerId" />
+          <ActionsPanel
+            :can-roll="canRoll && !showAuctionModal"
+            :can-buy="canBuy && !showAuctionModal"
+            :can-end-turn="canEndTurn && !showAuctionModal"
+            :must-roll-again="mustRollAgain"
+            @roll="onRoll"
+            @buy="onBuy"
+            @end-turn="onEndTurn"
+          />
+          <LogPanel />
+        </aside>
+      </div>
 
-      <aside class="sidebar">
-        <PlayersPanel :players="players" :current-player-id="currentPlayerId" />
-        <ActionsPanel
-          :can-roll="canRoll"
-          :can-buy="canBuy"
-          :can-end-turn="canEndTurn"
-          :must-roll-again="mustRollAgain"
-          @roll="onRoll"
-          @buy="onBuy"
-          @end-turn="onEndTurn"
-        />
-        <LogPanel />
-      </aside>
+      <!--
+        Backdrop + аукционная модалка рендерятся ВСЕГДА, когда
+        идёт аукцион. Backdrop не блокирует клики по модалке
+        (модалка вынесена наружу .app-locked и находится на
+        более высоком z-index).
+      -->
+      <div v-if="showAuctionModal" class="app-backdrop" aria-hidden="true" />
+      <Teleport v-if="showAuctionModal" to="body">
+        <AuctionModal />
+      </Teleport>
 
       <BuyModal
         :show="showBuyModal"
         :cell="currentCell"
-        :money="players[0]?.money ?? 0"
+        :money="currentPlayer?.money ?? 0"
         @close="onDeclineBuy"
         @confirm="onConfirmBuy"
+        @decline="onDeclineBuy"
       />
 
       <CardModal
@@ -806,14 +827,6 @@ function logout() {
         @close="showJailModal = false"
       />
 
-      <AuctionModal
-        :show="showAuctionModal"
-        :state="state"
-        @bid="onAuctionBid"
-        @pass="onAuctionPass"
-        @close="onAuctionPass"
-      />
-
       <TradeModal
         :show="showTradeModal"
         :state="state"
@@ -834,21 +847,75 @@ function logout() {
 </template>
 
 <style scoped>
+/* Полная блокировка приложения во время аукциона. */
+.app-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 999;
+  pointer-events: auto;
+}
+.app-locked {
+  position: relative;
+  pointer-events: none;
+  user-select: none;
+  filter: grayscale(0.2) brightness(0.85);
+}
+.app-locked[inert] {
+  /* fallback: блокируем pointer events */
+  pointer-events: none;
+}
+</style>
+<style scoped>
 .game-container {
-  display: flex;
-  gap: 24px;
+  display: block;
   padding: 20px;
   max-width: 1560px;
   margin: 0 auto;
-  align-items: flex-start;
 }
-.sidebar {
-  flex: 1;
-  min-width: 300px;
-  max-width: 380px;
+
+/* Внутри .game-container: доска слева (60%), панели справа (40%). */
+.layout {
+  display: flex;
+  flex-direction: row;
+  gap: 24px;
+  align-items: stretch;
+  width: 100%;
+  box-sizing: border-box;
+}
+.board-area {
+  flex: 0 0 60%;
+  max-width: 60%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  align-items: stretch;
+}
+.sidebar {
+  flex: 1 1 40%;
+  max-width: 40%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: stretch;
+}
+/* Каждая панель внутри .sidebar растягивается на всю ширину контейнера. */
+.sidebar > * {
+  width: 100%;
+  box-sizing: border-box;
+  align-self: stretch;
+}
+@media (max-width: 1100px) {
+  .layout {
+    flex-direction: column;
+  }
+  .board-area,
+  .sidebar {
+    flex: 1 1 100%;
+    max-width: 100%;
+  }
 }
 .connecting {
   flex: 1;

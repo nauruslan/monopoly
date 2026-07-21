@@ -51,7 +51,7 @@ describe("BotService.decide", () => {
       expect(bot.decide(player, state)).toBe("BUY");
     });
 
-    it("END_TURN (отказ), если денег впритык", () => {
+    it("DECLINE_BUY (отказ), если денег впритык", () => {
       const cell = makeCell({ price: 200 });
       const player = makePlayer({ position: 0, money: 200 }); // ровно впритык
       const board = makeMonopolyBoard(3);
@@ -61,10 +61,14 @@ describe("BotService.decide", () => {
         players: [player],
         board,
       });
-      expect(bot.decide(player, state)).toBe("END_TURN");
+      // Раньше возвращался "END_TURN", что приводило к ForbiddenException
+      // (END_TURN недопустим в BUY_DECISION) и зависанию бота после дубля +
+      // карточки move-relative (бот терял право на ещё один бросок).
+      // Корректно: фаза BUY_DECISION принимает только BUY_PROPERTY/DECLINE_BUY.
+      expect(bot.decide(player, state)).toBe("DECLINE_BUY");
     });
 
-    it("END_TURN, если у клетки уже есть владелец", () => {
+    it("DECLINE_BUY, если у клетки уже есть владелец", () => {
       const cell = makeCell({ price: 200, ownerId: "another" });
       const player = makePlayer({ position: 0, money: 1500 });
       const board = makeMonopolyBoard(3);
@@ -74,7 +78,7 @@ describe("BotService.decide", () => {
         players: [player],
         board,
       });
-      expect(bot.decide(player, state)).toBe("END_TURN");
+      expect(bot.decide(player, state)).toBe("DECLINE_BUY");
     });
   });
 
@@ -149,63 +153,94 @@ describe("BotService.decide", () => {
   });
 
   // ─────────────────────── AUCTION ───────────────────────
-  describe("AUCTION_BIDDING phase", () => {
+  describe("AUCTION_ACTIVE phase", () => {
+    /**
+     * Фабрика состояния «активный аукцион» v2.
+     * По умолчанию:
+     *  - 2 игрока: me (id="me"), other (id="other");
+     *  - cellId=0 (моно-доска makeMonopolyBoard(3), базовая цена 200₽);
+     *  - me — текущий «на часах» (currentBidderId="me");
+     *  - currentBid=0, highestBidderId=null;
+     *  - оба участника активны.
+     */
     function makeAuctionState(
       overrides: Partial<{
         currentBid: number;
         highestBidderId: string | null;
         activeBidders: string[];
+        currentBidderId: string | null;
+        meMoney: number;
       }> = {},
     ): GameState {
-      const me = makePlayer({ id: "me", money: 1500 });
+      const me = makePlayer({ id: "me", money: overrides.meMoney ?? 1500 });
       const other = makePlayer({ id: "other", money: 1500 });
       const board = makeMonopolyBoard(3);
+      const activeBidders = overrides.activeBidders ?? [me.id, other.id];
+      const currentBidderId = overrides.currentBidderId ?? me.id;
+      const currentBidderIndex = Math.max(0, activeBidders.indexOf(currentBidderId));
       return makeState({
-        phase: "AUCTION_BIDDING",
+        phase: "AUCTION_ACTIVE",
         currentPlayerIndex: 0,
         players: [me, other],
         board,
         auction: {
+          id: "auc1",
           cellId: 0,
+          initiatorId: "other",
+          status: "AUCTION_ACTIVE",
           currentBid: overrides.currentBid ?? 0,
           highestBidderId: overrides.highestBidderId ?? null,
           bidderOrder: [me.id, other.id],
-          currentBidderIndex: 0,
-          activeBidders: overrides.activeBidders ?? [me.id, other.id],
-          bidDeadline: new Date(Date.now() + 10000).toISOString(),
+          activeBidders,
+          currentBidderIndex,
+          currentBidderId,
+          timerStartedAt: Date.now(),
+          turnDurationMs: 30000,
+          actionLog: [],
+          winnerId: null,
+          finalBid: 0,
+          finishReason: null,
+          startedAt: Date.now(),
+          closedAt: null,
         },
       });
     }
 
-    it("PASS, если уже лидирует", () => {
+    it("PASS, если бот уже лидирует (не перебивает сам себя)", () => {
       const state = makeAuctionState({ currentBid: 50, highestBidderId: "me" });
       const me = state.players[0]!;
       expect(bot.decide(me, state)).toBe("AUCTION_PASS");
     });
 
-    it("BID, если цена ниже 80% от базовой", () => {
+    it("BID c amount=10, если цена ниже 80% от базовой (на пустой клетке)", () => {
+      // cellId=0, price=200, 80% = 160. currentBid=0, nextBid = 10.
+      // 10 <= 160, и auctionWorthBidding (без группы → 10 <= 100) →
+      // возвращаем объект с amount=10.
       const state = makeAuctionState({ currentBid: 0, highestBidderId: null });
-      // cellId=0 имеет price=200, 80% = 160. Ставка от 0 с инкрементом min(10, 10)=10.
       const me = state.players[0]!;
-      expect(bot.decide(me, state)).toBe("AUCTION_BID");
+      const decision = bot.decide(me, state) as Extract<BotDecision, { kind: "AUCTION_BID" }>;
+      expect(decision).toEqual({ kind: "AUCTION_BID", amount: 10 });
     });
 
     it("PASS, если минимальная ставка выше 80% от базовой", () => {
-      // currentBid=170, инкремент = max(10, 200*0.05) = 10 → nextBid=180 > 160.
+      // currentBid=170, инкремент = max(10, 200*0.05) = 10 → nextBid=180.
+      // 180 > 160 (80% от 200) → PASS.
       const state = makeAuctionState({ currentBid: 170, highestBidderId: "other" });
       const me = state.players[0]!;
       expect(bot.decide(me, state)).toBe("AUCTION_PASS");
     });
 
-    it("PASS, если денег впритык", () => {
-      const state = makeAuctionState({ currentBid: 0, highestBidderId: null });
-      // nextBid = 0 + max(10, 10) = 10. Запас в боте = +100, нужно > 10+100=110.
-      state.players[0]!.money = 100; // меньше 10+100=110
+    it("PASS, если денег впритык (нет запаса 100₽)", () => {
+      // currentBid=0 → nextBid=10. Запас в боте = +100, нужно >= 110.
+      const state = makeAuctionState({
+        currentBid: 0,
+        highestBidderId: null,
+        meMoney: 100,
+      });
       const me = state.players[0]!;
       expect(bot.decide(me, state)).toBe("AUCTION_PASS");
     });
   });
-
   // ─────────────────────── TRADE ───────────────────────
   describe("TRADING_NEGOTIATE / TRADING_CONFIRM phase", () => {
     it("REJECT, если нет state.trade", () => {

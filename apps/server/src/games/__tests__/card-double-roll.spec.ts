@@ -112,6 +112,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
         stateSnapshot: state,
       })),
       updateSnapshot: jest.fn(async () => undefined),
+      replaceSnapshot: jest.fn(async () => true),
       findById: jest.fn(async () => null),
     };
 

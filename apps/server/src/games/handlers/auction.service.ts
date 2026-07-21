@@ -1,102 +1,375 @@
 import { Injectable, Logger } from "@nestjs/common";
-import type { GameState, Player } from "@monopoly/shared";
+import type {
+  AuctionActionLogEntry,
+  GameState,
+  Player,
+} from "@monopoly/shared";
+import {
+  applyAuctionCommand,
+  initAuction as initAuctionEngine,
+  activateAuction as activateAuctionEngine,
+  type AuctionCommand,
+  type AuctionEngineError,
+  type AuctionEngineResult,
+} from "./auction.engine";
 
 /**
- * AuctionService — сервис аукциона.
+ * WebSocket-события, которые `AuctionService` шлёт клиенту через
+ * callback `onAuctionEvent`, зарегистрированный в `GamesService`.
  *
- * Аукцион запускается в `BUY_DECISION` фазе после `DECLINE_BUY`
- * (если `settings.auctionEnabled = true`).
+ * Все события рассылаются ВСЕМ клиентам в комнате `game:<id>` —
+ * клиент не должен знать о серверной логике ботов, он только рендерит
+ * то, что пришло.
  *
- * Состояние аукциона хранится в `state.auction`:
- *  - `cellId` — какая клетка продаётся;
- *  - `currentBid` — текущая максимальная ставка;
- *  - `highestBidderId` — лидер;
- *  - `bidderOrder` — порядок участников (начиная со следующего после инициатора);
- *  - `currentBidderIndex` — индекс текущего участника;
- *  - `activeBidders` — активные (не выбывшие) участники;
- *  - `bidDeadline` — ISO-время, когда текущий участник должен сделать ставку.
+ * Формат payload (см. тип `AuctionEvent` ниже) — единый объект
+ * с полями `type` и дополнительными данными.
+ */
+export type AuctionEvent =
+  | {
+      type: "AUCTION_START";
+      propertyId: number;
+      initiatorId: string;
+      firstBidderId: string;
+      participants: string[];
+      turnDurationMs: number;
+      timerStartedAt: number;
+    }
+  | {
+      type: "AUCTION_TURN_UPDATE";
+      activeBidderId: string | null;
+      currentBid: number;
+      highestBidderId: string | null;
+      timeLeft: number;
+      activeBidders: string[];
+    }
+  | {
+      type: "AUCTION_ACTION";
+      playerId: string;
+      action: "BID" | "PASS" | "TIMEOUT";
+      amount?: number;
+      // Доп. контекст: ID нового активного после действия (для UI).
+      nextBidderId: string | null;
+      // Обновлённый список активных (для UI-синхронизации).
+      activeBidders: string[];
+    }
+  | {
+      type: "AUCTION_END";
+      winnerId: string | null;
+      finalBid: number;
+      propertyId: number;
+      status: "SOLD" | "UNSOLD";
+    };
+
+/**
+ * Callback-интерфейс для отправки WS-событий.
+ * `GamesService` подключает его в конструкторе: `this.auction.onAuctionEvent = (...) => this.gateway.emit(...)`.
+ */
+export type AuctionEventCallback = (gameId: string, event: AuctionEvent) => void;
+
+/**
+ * AuctionService — оркестратор аукциона (тонкая обёртка вокруг чистого
+ * `AuctionEngine`).
  *
- * Правила:
- *  1. В аукционе участвуют ВСЕ активные (не банкроты) игроки, КРОМЕ инициатора.
- *  2. Минимальная ставка = `currentBid + 1` (или 1, если bid ещё не было).
- *  3. Игрок, у которого недостаточно денег для минимальной ставки, считается
- *     автоматически выбывшим.
- *  4. Аукцион завершается, когда:
- *     - остался один активный участник (он побеждает с текущей ставкой);
- *     - все выбыли (клетка остаётся у Банка).
+ * Что делает:
+ *  - инициализирует `state.auction` (вызывает `initAuction` из движка);
+ *  - применяет команды (`AUCTION_MAKE_BID` / `AUCTION_PASS`);
+ *  - управляет таймером (30 сек на ход, по таймауту — авто-пас);
+ *  - шлёт WS-события через callback `onAuctionEvent`.
+ *
+ * Сетевая часть (`Socket.IO`, `gateway.to(...).emit(...)`) — снаружи;
+ * сервис лишь дёргает callback с готовым payload. Это позволяет
+ * тестировать логику без поднятия сокет-сервера.
+ *
+ * Правила (синхронизированы со спекой v2):
+ *  1. Участники: все живые игроки, ВКЛЮЧАЯ инициатора.
+ *  2. Первый «на часах» — инициатор; далее по кругу `bidderOrder`.
+ *  3. Лимит ставки: `Max_Bid = player.money` (наличные, без залога).
+ *  4. Ставка должна быть СТРОГО > `currentBid`.
+ *  5. Если время вышло — сервер шлёт `TIMEOUT` от лица текущего.
+ *  6. Пас/таймаут — игрок НАВСЕГДА выбывает из текущего аукциона.
+ *  7. Аукцион закрывается:
+ *     - `activeBidders.length === 1` → SOLD;
+ *     - `activeBidders.length === 0` → UNSOLD.
+ *  8. Клиент не должен знать о логике ботов — сервер сам решает, когда
+ *     бот торгуется, и присылает `AUCTION_ACTION` после задержки.
  */
 @Injectable()
 export class AuctionService {
   private readonly logger = new Logger(AuctionService.name);
 
+  /** Дефолтная длительность хода в аукционе (мс). */
+  static readonly DEFAULT_TURN_DURATION_MS = 30_000;
+
   /**
-   * Инициализировать новый аукцион.
+   * Callback для отправки WS-событий. Устанавливается извне
+   * (`GamesService` в конструкторе).
+   */
+  onAuctionEvent: AuctionEventCallback | null = null;
+
+  /**
+   * Инициализировать новый аукцион. Возвращает `false`, если нет
+   * активных участников — клетка остаётся у банка, никаких торгов.
    *
-   * @param state состояние партии
-   * @param cell клетка, которая продаётся
-   * @param initiator игрок, отказавшийся от покупки
+   * После успешного `initAuction` сервис шлёт WS-событие `AUCTION_START`
+   * и переводит state в `AUCTION_ACTIVE`. Никаких таймеров здесь не
+   * запускается — это делает `GamesService` (он знает gameId для
+   * отправки событий).
    */
-  startAuction(state: GameState, cell: { id: number }, initiator: Player): void {
-    const alive = state.players.filter((p) => !p.isBankrupt && p.id !== initiator.id);
-    if (alive.length === 0) {
-      // Никто не может участвовать — клетка остаётся у Банка.
+  startAuction(
+    gameId: string,
+    state: GameState,
+    cell: { id: number },
+    initiator: Player,
+    now: number = Date.now(),
+  ): boolean {
+    const turnDurationMs =
+      state.settings.auctionBidTimeoutMs ?? AuctionService.DEFAULT_TURN_DURATION_MS;
+    const next = initAuctionEngine(state, cell, initiator, { turnDurationMs }, now);
+    if (!next || !next.auction) {
       this.logger.debug(`[AuctionService] no participants for cell ${cell.id}`);
-      return;
+      return false;
     }
+    // Мутируем state.in place (GamesService хранит state по ссылке).
+    state.auction = next.auction;
 
-    const ms = state.settings.auctionBidTimeoutMs ?? 15000;
-    const deadline = new Date(Date.now() + ms).toISOString();
+    // Сразу активируем (AWAITING_START → AUCTION_ACTIVE) и шлём AUCTION_START.
+    const active = activateAuctionEngine(state, now);
+    state.auction = active.auction!;
 
-    state.auction = {
-      cellId: cell.id,
-      currentBid: 0,
-      highestBidderId: null,
-      bidderOrder: alive.map((p) => p.id),
-      currentBidderIndex: 0,
-      activeBidders: alive.map((p) => p.id),
-      bidDeadline: deadline,
+    this.logger.log(
+      `[AuctionService] auction started for cell ${cell.id} with ${state.auction.bidderOrder.length} bidders`,
+    );
+
+    // Шлём broadcast: AUCTION_START (один раз в начале).
+    this.emit(gameId, {
+      type: "AUCTION_START",
+      propertyId: cell.id,
+      initiatorId: initiator.id,
+      firstBidderId: state.auction.currentBidderId!,
+      participants: state.auction.bidderOrder,
+      turnDurationMs,
+      timerStartedAt: state.auction.timerStartedAt,
+    });
+
+    // И сразу TURN_UPDATE с timeLeft = turnDurationMs.
+    this.emit(gameId, {
+      type: "AUCTION_TURN_UPDATE",
+      activeBidderId: state.auction.currentBidderId,
+      currentBid: state.auction.currentBid,
+      highestBidderId: state.auction.highestBidderId,
+      timeLeft: turnDurationMs,
+      activeBidders: state.auction.activeBidders,
+    });
+    return true;
+  }
+
+  /**
+   * Применить команду (`AUCTION_MAKE_BID` / `AUCTION_PASS`).
+   *
+   * ВАЖНО: метод МУТИРУЕТ `state.auction` (in place, как ожидает
+   * `GamesService`). На успех шлёт:
+   *  - `AUCTION_ACTION`  — с действием текущего игрока;
+   *  - `AUCTION_TURN_UPDATE` — если аукцион продолжается;
+   *  - `AUCTION_END`     — если аукцион закрылся (SOLD/UNSOLD).
+   *
+   * На ошибку возвращает `{ ok: false, error }`, и `GamesService`
+   * бросает `ForbiddenException` (на старом `auction.service.ts`
+   * для этого был `auctionErrorMessage`).
+   */
+  applyCommand(
+    gameId: string,
+    state: GameState,
+    cmd: AuctionCommand,
+    now: number = Date.now(),
+  ): AuctionEngineResult {
+    const result = applyAuctionCommand(state, cmd, now);
+    if (!result.ok) return result;
+    // Копируем свежие поля (state.auction и, при sold, players/board)
+    // — `applyAuctionCommand` возвращает НОВЫЙ state, но в этой обёртке
+    // мы работаем по ссылке (GamesService так делает для скорости).
+    state.auction = result.state.auction;
+    if (result.state.auction?.status === "FINISHED") {
+      state.players = result.state.players;
+      state.board = result.state.board;
+    }
+    // Шлём broadcast-события.
+    this.broadcastAfterCommand(gameId, state, result.events, now);
+    return result;
+  }
+
+  /**
+   * Зарегистрировать авто-пас по таймеру (вызывается из `GamesService`).
+   * Возвращает объект с `cancel()` для отмены (например, при новом ходе).
+   *
+   * Сервер сам вызовет `applyCommand` с `type: "timeout"`, имитируя
+   * `AUCTION_PASS` от текущего «на часах» с `reason: "TIMEOUT"`.
+   */
+  scheduleTimeout(
+    gameId: string,
+    state: GameState,
+    onTimeout: (playerId: string) => Promise<void>,
+  ): { cancel: () => void } {
+    const a = state.auction;
+    if (!a || a.status !== "AUCTION_ACTIVE" || !a.currentBidderId) {
+      return { cancel: () => undefined };
+    }
+    const expectedActiveAtStart = a.currentBidderId;
+    const expectedStartedAt = a.timerStartedAt;
+    const turnDurationMs = a.turnDurationMs;
+    const remaining = Math.max(0, expectedStartedAt + turnDurationMs - Date.now());
+    const timer = setTimeout(() => {
+      const cur = state.auction;
+      if (!cur || cur.status !== "AUCTION_ACTIVE") return;
+      if (cur.currentBidderId !== expectedActiveAtStart) return;
+      if (cur.timerStartedAt !== expectedStartedAt) return;
+      const player = state.players.find((p) => p.id === expectedActiveAtStart);
+      if (!player || player.isBankrupt) return;
+      void onTimeout(expectedActiveAtStart);
+    }, remaining);
+    return {
+      cancel: () => clearTimeout(timer),
     };
-
-    this.logger.log(
-      `[AuctionService] auction started for cell ${cell.id} with ${alive.length} bidders`,
-    );
   }
 
   /**
-   * Завершить аукцион: передать клетку победителю.
-   * Если победителя нет (все выбыли) — клетка остаётся у Банка.
+   * Рассылка событий по результатам команды. Вызывается из `applyCommand`
+   * (или напрямую из `GamesService` при таймауте).
    */
-  resolveAuction(state: GameState): void {
+  private broadcastAfterCommand(
+    gameId: string,
+    state: GameState,
+    events: ReturnType<typeof applyAuctionCommand> extends infer R
+      ? R extends { ok: true; events: infer E }
+        ? E
+        : never
+      : never,
+    now: number,
+  ): void {
     if (!state.auction) return;
-    const { cellId, currentBid, highestBidderId, activeBidders } = state.auction;
+    for (const ev of events) {
+      switch (ev.type) {
+        case "BID_PLACED": {
+          this.emit(gameId, {
+            type: "AUCTION_ACTION",
+            playerId: ev.playerId,
+            action: "BID",
+            amount: ev.amount,
+            nextBidderId: state.auction.currentBidderId,
+            activeBidders: state.auction.activeBidders,
+          });
+          break;
+        }
+        case "PLAYER_PASSED": {
+          this.emit(gameId, {
+            type: "AUCTION_ACTION",
+            playerId: ev.playerId,
+            action: ev.reason,
+            nextBidderId: state.auction.currentBidderId,
+            activeBidders: state.auction.activeBidders,
+          });
+          break;
+        }
+        case "TURN_ADVANCED": {
+          this.emit(gameId, {
+            type: "AUCTION_TURN_UPDATE",
+            activeBidderId: ev.nextPlayerId,
+            currentBid: state.auction.currentBid,
+            highestBidderId: state.auction.highestBidderId,
+            timeLeft: state.auction.turnDurationMs,
+            activeBidders: state.auction.activeBidders,
+          });
+          break;
+        }
+        case "AUCTION_SOLD": {
+          this.emit(gameId, {
+            type: "AUCTION_END",
+            winnerId: ev.playerId,
+            finalBid: ev.amount,
+            propertyId: state.auction.cellId,
+            status: "SOLD",
+          });
+          break;
+        }
+        case "AUCTION_UNSOLD": {
+          this.emit(gameId, {
+            type: "AUCTION_END",
+            winnerId: null,
+            finalBid: 0,
+            propertyId: state.auction.cellId,
+            status: "UNSOLD",
+          });
+          break;
+        }
+      }
+    }
+    // Подавляем unused
+    void now;
+  }
 
-    if (!highestBidderId || activeBidders.length === 0) {
-      this.logger.log(`[AuctionService] auction for cell ${cellId} ended with no winner`);
+  /**
+   * Хелпер: безопасный emit через callback.
+   */
+  private emit(gameId: string, event: AuctionEvent): void {
+    if (!this.onAuctionEvent) {
+      this.logger.debug(
+        `[AuctionService] onAuctionEvent not registered; skipping ${event.type}`,
+      );
       return;
     }
-
-    const cell = state.board[cellId];
-    const winner = state.players.find((p) => p.id === highestBidderId);
-    if (!cell || !winner) return;
-
-    // Списываем деньги победителю.
-    winner.money = Math.max(0, winner.money - currentBid);
-    winner.properties.push(cell.id);
-    cell.ownerId = winner.id;
-
-    this.logger.log(
-      `[AuctionService] cell ${cellId} sold to ${winner.displayName} for ${currentBid}`,
-    );
+    try {
+      this.onAuctionEvent(gameId, event);
+    } catch (err) {
+      this.logger.error(
+        `onAuctionEvent callback failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
-   * Проверить, может ли текущий участник сделать минимальную ставку.
-   * Если нет — автоматически выбывает.
+   * Очистить `state.auction` после `AUCTION_FINISHED` (вызывается
+   * из `GamesService` при переходе фазы).
    */
-  isCurrentBidderAffordable(state: GameState): boolean {
-    if (!state.auction) return false;
-    const bidder = state.players[state.auction.currentBidderIndex];
-    if (!bidder) return false;
-    return bidder.money >= state.auction.currentBid + 1;
+  finalize(state: GameState): void {
+    if (!state.auction) return;
+    const { cellId, winnerId, finalBid, finishReason } = state.auction;
+    if (state.auction.status === "FINISHED" && finishReason === "SOLD" && winnerId) {
+      this.logger.log(
+        `[AuctionService] finalized: cell ${cellId} → ${winnerId} for ${finalBid}`,
+      );
+    } else if (state.auction.status === "FINISHED" && finishReason === "UNSOLD") {
+      this.logger.log(`[AuctionService] finalized: cell ${cellId} unsold`);
+    }
+    // НЕ очищаем state.auction сразу — клиенту нужно увидеть
+    // AUCTION_END и отрендерить финальный экран. GamesService сам
+    // вызовет `clearAuction(state)` через ~2 сек.
+  }
+
+  /**
+   * Полностью убрать `state.auction` (после AUCTION_FINISHED-экрана).
+   * Вызывается из `GamesService` через 2 сек после AUCTION_END.
+   */
+  clearAuction(state: GameState): void {
+    state.auction = undefined;
+  }
+
+  /**
+   * Преобразовать код ошибки движка в человеко-читаемое сообщение.
+   */
+  describeError(err: AuctionEngineError): string {
+    switch (err) {
+      case "NOT_ON_CLOCK":
+        return "Сейчас не ваша очередь ставить";
+      case "BANKRUPT":
+        return "Игрок не участвует в аукционе";
+      case "BID_TOO_LOW":
+        return "Ставка должна быть строго больше текущей";
+      case "INSUFFICIENT_FUNDS":
+        return "Недостаточно денег";
+      case "ALREADY_CLOSED":
+        return "Аукцион уже завершён";
+      case "NOT_ACTIVE":
+      default:
+        return "Аукцион не активен";
+    }
   }
 }

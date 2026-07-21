@@ -13,6 +13,7 @@ import { Logger, OnModuleInit } from "@nestjs/common";
 import { GamesService } from "../games/games.service";
 import { AuthService } from "../auth/auth.service";
 import type { GameAction, GameState, GameEvent } from "@monopoly/shared";
+import type { AuctionEvent } from "../games/handlers/auction.service";
 
 /**
  * GameGateway — WebSocket-шлюз для real-time игры
@@ -84,6 +85,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     this.logger.log(
       `[GameGateway] onStateChanged callback registered (onModuleInit). isGamesDefined=${!!this.games}`,
     );
+
+    // Регистрируем gateway в GamesService для broadcast-а событий аукциона.
+    this.games.setGateway({
+      broadcastAuctionEvent: (gameId, ev) => this.broadcastAuctionEvent(gameId, ev),
+    });
   }
 
   /**
@@ -322,5 +328,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
    */
   broadcastCard(gameId: string, payload: { playerId: string; card: unknown }) {
     this.server.to(`game:${gameId}`).emit("game:card", payload);
+  }
+
+  /**
+   * Broadcast события аукциона (AUCTION_START, AUCTION_TURN_UPDATE,
+   * AUCTION_ACTION, AUCTION_END). Канал: "auction:event".
+   * Это ДОПОЛНИТЕЛЬНЫЙ канал к основному broadcast-у `game:state` —
+   * он нужен клиенту, чтобы:
+   *   - мгновенно показывать таймер/повышение ставки без задержки
+   *     `game:state` (атомарный снэпшот всего state);
+   *   - корректно анимировать чужой ход в аукционе.
+   */
+  broadcastAuctionEvent(gameId: string, event: AuctionEvent): void {
+    const room = `game:${gameId}`;
+    this.server.to(room).emit("auction:event", event);
   }
 }

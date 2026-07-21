@@ -5,7 +5,7 @@ import { BOARD } from "@monopoly/shared";
 /**
  * Решения бота.
  *
- * Простые решения — строки. Решения с параметром клетки — объекты.
+ * Простые решения — строки. Решения с параметром — объекты.
  * `null` означает «бот не знает, что делать» — в таком случае
  * `GamesService` сам завершит ход (для фаз BUILDING, END_TURN) или
  * таймер сработает на AUCTION_PASS / TRADE_REJECT.
@@ -15,25 +15,29 @@ import { BOARD } from "@monopoly/shared";
  *  - Покупку клетки (BUY_DECISION)
  *  - Завершение хода (BUILDING)
  *  - Решения в тюрьме (JAIL_DECISION)
- *  - Ставки на аукционе (AUCTION_BIDDING)
+ *  - Ставки на аукционе (AUCTION_ACTIVE)
  *  - Ответы на обмен (TRADING_NEGOTIATE, TRADING_CONFIRM)
  *  - Банкротство: приоритет — продать дома / заложить, потом объявить
  *
  * ВАЖНО (после рефакторинга FSM):
  *  - Визуальные фазы (`DICE_ANIMATION`, `MOVE_ANIMATION`, `CARD_REVEAL`,
  *    `RESOLVING_LANDING`, `END_TURN`, `CARD_EFFECT`) НЕ обрабатываются здесь.
- *    Сервер сам шлёт соответствующие CONFIRM_* по таймеру.
  *  - Бот отвечает только на фазы, где нужен выбор: ROLLING, BUY_DECISION,
- *    BUILDING, JAIL_DECISION, AUCTION_BIDDING, TRADING_*, BANKRUPTCY_LIQUIDATE.
+ *    BUILDING, JAIL_DECISION, AUCTION_ACTIVE, TRADING_*, BANKRUPTCY_LIQUIDATE.
+ *
+ * AUCTION_BID — это объект с amount: `BotService` сам вычисляет
+ * желаемую ставку (на основе текущей + minIncrement + maxBid) и
+ * возвращает { kind: "AUCTION_BID", amount }. `GamesService` потом
+ * использует этот amount в `AUCTION_MAKE_BID`.
  */
 export type BotDecision =
   | "ROLL"
   | "BUY"
+  | "DECLINE_BUY"
   | "END_TURN"
   | "PAY_FINE"
   | "USE_CARD"
   | "TRY_DOUBLE"
-  | "AUCTION_BID"
   | "AUCTION_PASS"
   | "TRADE_ACCEPT"
   | "TRADE_REJECT"
@@ -41,46 +45,30 @@ export type BotDecision =
   | { kind: "SELL_HOUSE"; cellId: number }
   | { kind: "MORTGAGE"; cellId: number }
   | { kind: "UNMORTGAGE"; cellId: number }
+  | { kind: "AUCTION_BID"; amount: number }
   | "DECLARE_BANKRUPTCY"
   | { kind: "LIQUIDATE_HOUSES"; cellId: number }
   | { kind: "MORTGAGE_FOR_BANKRUPTCY"; cellId: number };
 
 /**
  * BotService — мозг ботов на сервере.
- *
- * Боты живут ТОЛЬКО здесь (раньше логика была в
- * `apps/client/src/composables/botAI.ts`, что не работало в мультиплеере).
- *
- * После рефакторинга (FSM) бот использует тот же путь принятия решений,
- * что и человек — единый dispatch() в GamesService. Разница только в
- * том, что вместо UI-ввода решение формирует `decide()`.
  */
 @Injectable()
 export class BotService {
   /**
    * Решить, что делать боту в текущей фазе.
    * Возвращает `null`, если бот не должен действовать.
-   *
-   * ВАЖНО: для визуальных фаз (DICE_ANIMATION, MOVE_ANIMATION, CARD_REVEAL,
-   * RESOLVING_LANDING, END_TURN, CARD_EFFECT) возвращаем null —
-   * сервер сам отправит CONFIRM_* по таймеру.
    */
   decide(player: Player, state: GameState): BotDecision | null {
     const cell = state.board[player.position];
 
     switch (state.phase) {
-      // ──────── Стандартные фазы хода ────────
+      // Стандартные фазы хода
       case "ROLLING":
-        // Если игрок в тюрьме — сначала надо выйти (использовать карточку
-        // или попробовать дубль), а не бросать кубики. Решение об оплате
-        // штрафа и логика tryDouble vs payFine — в JAIL_DECISION, куда
-        // GamesService переведёт фазу после нашего действия.
         if (player.inJail) {
           if (player.jailCards > 0) return "USE_CARD";
           return "TRY_DOUBLE";
         }
-        // В ROLLING бот кидает кубики (потом сервер сам переходит в
-        // DICE_ANIMATION и по таймеру двигает дальше).
         return "ROLL";
 
       case "BUY_DECISION":
@@ -89,29 +77,29 @@ export class BotService {
       case "BUILDING":
         return this.decideBuild(player, state);
 
-      // ──────── Тюрьма ────────
+      // Тюрьма
       case "JAIL_DECISION":
-        // Svezhee popadanie v tyurmu (v ETOM khodu) — po pravilam Monopolii
-        // igrok ne prinimaet reshenie o vykhode v tom zhe khodu: tolko END_TURN.
-        // Modalnaya okna s tremya sposobami vykhoda poyavitsya v SLEDUYUSHEM khodu.
         if (state.justEnteredJail) return "END_TURN";
         if (player.jailCards > 0) return "USE_CARD";
         if (player.money >= 50) return "PAY_FINE";
         return "TRY_DOUBLE";
-      // ──────── Прерывания: аукцион ────────
-      case "AUCTION_BIDDING":
+
+      // Прерывания: аукцион
+      case "AUCTION_ACTIVE":
         return this.decideAuctionBid(player, state);
 
-      // ──────── Прерывания: обмен ────────
+      // Прерывания: обмен
       case "TRADING_NEGOTIATE":
       case "TRADING_CONFIRM":
         return this.decideTrade(player, state);
 
-      // ──────── Прерывания: банкротство ────────
+      // Прерывания: банкротство
       case "BANKRUPTCY_LIQUIDATE":
         return this.decideBankruptcy(player, state);
 
-      // ──────── Визуальные/автоматические фазы (бот не действует) ────────
+      // Визуальные/автоматические фазы (бот не действует)
+      case "AUCTION_AWAITING_START":
+      case "AUCTION_FINISHED":
       case "START_TURN":
       case "DICE_ANIMATION":
       case "MOVE_ANIMATION":
@@ -120,7 +108,6 @@ export class BotService {
       case "CARD_EFFECT":
       case "PAY_RENT":
       case "END_TURN":
-      case "AUCTION_RESOLVE":
       case "BANKRUPTCY_TRANSFER":
       case "IDLE":
       case "LOBBY":
@@ -131,25 +118,14 @@ export class BotService {
     }
   }
 
-  // ────────────────────────────────────────────
   // Решения для конкретных фаз
-  // ────────────────────────────────────────────
 
-  /**
-   * Покупаем, если у бота останется запас минимум 200₽. Иначе отказываемся.
-   */
   private decideBuy(player: Player, cell: Cell | undefined): BotDecision {
-    if (!cell || cell.ownerId || cell.price === undefined) return "END_TURN";
+    if (!cell || cell.ownerId || cell.price === undefined) return "DECLINE_BUY";
     if (player.money >= cell.price + 200) return "BUY";
-    return "END_TURN";
+    return "DECLINE_BUY";
   }
 
-  /**
-   * Стратегия строительства:
-   *  1. Если есть полная монополия и деньги — строим дом.
-   *  2. Иначе пробуем раскредитовать (unmortgage) заложенное в монополии.
-   *  3. Иначе END_TURN.
-   */
   private decideBuild(player: Player, state: GameState): BotDecision {
     const houseId = this.findBuildHouseTarget(player, state);
     if (houseId !== null) return { kind: "BUILD_HOUSE", cellId: houseId };
@@ -158,9 +134,6 @@ export class BotService {
     return "END_TURN";
   }
 
-  /**
-   * Возвращает cellId для постройки дома или null, если строить нечего.
-   */
   private findBuildHouseTarget(player: Player, state: GameState): number | null {
     const myProps = state.board.filter(
       (c) => c.type === "PROPERTY" && c.ownerId === player.id && !c.isMortgaged,
@@ -186,9 +159,6 @@ export class BotService {
     return null;
   }
 
-  /**
-   * Возвращает cellId для раскредитования или null.
-   */
   private findUnmortgageTarget(player: Player, state: GameState): number | null {
     const mortgaged = state.board
       .filter((c) => c.type === "PROPERTY" && c.ownerId === player.id && c.isMortgaged)
@@ -202,7 +172,9 @@ export class BotService {
   /**
    * Аукцион: бот делает ставку, если текущая цена ниже 80% от базовой
    * стоимости и покупка даст боту прогресс (новый цвет или застройка).
-   * Иначе — пас.
+   * Иначе — пас. Возвращает объект { kind: "AUCTION_BID", amount }
+   * (или "AUCTION_PASS") — сумма вычисляется ЗДЕСЬ, чтобы не размазывать
+   * логику между bot и games services.
    */
   private decideAuctionBid(player: Player, state: GameState): BotDecision {
     const auction = state.auction;
@@ -211,17 +183,22 @@ export class BotService {
     const cell = state.board[auction.cellId];
     if (!cell) return "AUCTION_PASS";
 
+    // Лидер не может перебивать сам себя — это автоматический пас.
     if (auction.highestBidderId === player.id) return "AUCTION_PASS";
 
+    // Нет денег на минимальную ставку — пас.
     const minIncrement = Math.max(10, Math.floor((cell.price ?? 0) * 0.05));
     const nextBid = (auction.currentBid ?? 0) + minIncrement;
+    if (player.money < nextBid) return "AUCTION_PASS";
 
+    // Не готовы платить больше 80% от базовой стоимости — пас.
     const maxBid = Math.floor((cell.price ?? 0) * 0.8);
     if (nextBid > maxBid) return "AUCTION_PASS";
+    // Оставляем запас 100₽.
     if (player.money < nextBid + 100) return "AUCTION_PASS";
 
     if (this.auctionWorthBidding(player, cell, nextBid, state)) {
-      return "AUCTION_BID";
+      return { kind: "AUCTION_BID", amount: nextBid };
     }
     return "AUCTION_PASS";
   }
@@ -239,11 +216,6 @@ export class BotService {
     return bid <= (cell.price ?? 0) * 0.5;
   }
 
-  /**
-   * Трейд: простая эвристика — оцениваем стоимость того, что получаем
-   * (деньги считаем 1:1, клетки — по `price`), и сравниваем с тем, что
-   * отдаём. Если получаем ≥ 90% — ACCEPT, иначе REJECT.
-   */
   private decideTrade(player: Player, state: GameState): BotDecision {
     const trade = state.trade;
     if (!trade || !trade.offer) return "TRADE_REJECT";
@@ -282,10 +254,6 @@ export class BotService {
     return { value, cost };
   }
 
-  /**
-   * Банкротство: бот пробует расплатиться, продавая дома и закладывая
-   * имущество. Если и этого мало — объявляет банкротство.
-   */
   private decideBankruptcy(player: Player, state: GameState): BotDecision {
     const proc = state.bankruptcy;
     if (!proc) return "DECLARE_BANKRUPTCY";

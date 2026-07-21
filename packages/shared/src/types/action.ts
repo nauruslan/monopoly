@@ -12,7 +12,7 @@ import type { TradeOffer } from "./game";
  *
  * 1. **Turn Actions** — основной цикл хода
  * 2. **Special Actions** — тюрьма
- * 3. **Interrupt: Auction Actions** — AUCTION_BIDDING → AUCTION_RESOLVE
+ * 3. **Interrupt: Auction Actions** — AUCTION_ACTIVE (ход игрока)
  * 4. **Interrupt: Trade Actions** — TRADING_NEGOTIATE → TRADING_CONFIRM
  * 5. **Interrupt: Bankruptcy Actions** — автоматические, не от клиента
  * 6. **Property Actions** — застройка/ипотека (BUILDING)
@@ -58,13 +58,22 @@ export type GameAction =
   | { type: "MORTGAGE_PROPERTY"; cellId: number } // залог
   | { type: "UNMORTGAGE_PROPERTY"; cellId: number } // выкуп из залога (+10%)
 
-  // Interrupt: Auction
-  /** Сделать ставку в аукционе. */
-  | { type: "AUCTION_BID"; amount: number }
-  /** Пропустить ставку (Pass). */
+  // Interrupt: Auction (новая логика, v2)
+  /**
+   * Сделать ставку в аукционе. Сервер валидирует:
+   *  - `amount` > текущей ставки (строго);
+   *  - `amount` <= наличных игрока;
+   *  - игрок сейчас «на часах»;
+   *  - аукцион в фазе AUCTION_ACTIVE.
+   */
+  | { type: "AUCTION_MAKE_BID"; amount: number }
+  /** Пропустить ход в аукционе (Pass). Игрок НАВСЕГДА выбывает из текущего аукциона. */
   | { type: "AUCTION_PASS" }
-  /** Пропустить весь аукцион (например, нет денег — авто-обработка). */
-  | { type: "AUCTION_AUTO_PASS" } // серверная команда от бота, клиентом не отправляется
+  /**
+   * Клиент закрыл модалку с результатом аукциона (AUCTION_FINISHED).
+   * После этого сервер очищает state.auction и переходит к следующей фазе.
+   */
+  | { type: "CONFIRM_AUCTION" }
 
   // Interrupt: Trading
   /** Инициировать торговое предложение (открывает TRADING_NEGOTIATE). */

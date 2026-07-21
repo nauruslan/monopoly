@@ -27,7 +27,7 @@ import { JailHandlerService } from "./handlers/jail-handler.service";
 import { CardHandlerService } from "./handlers/card-handler.service";
 import { BankruptcyService } from "./handlers/bankruptcy.service";
 import { BotService, type BotDecision } from "./bots/bot.service";
-import { AuctionService } from "./handlers/auction.service";
+import { AuctionService, type AuctionEvent } from "./handlers/auction.service";
 import { TradeService } from "./handlers/trade.service";
 import { canRollDice, canEndTurn } from "./turn-permissions";
 
@@ -121,6 +121,42 @@ export class GamesService {
     if (!this.initializer)
       console.error("[GamesService] GameInitializerService не заинжектирован!");
     if (!this.repo) console.error("[GamesService] GameRepository не заинжектирован!");
+
+    // Подписываем AuctionService на широковещание событий через
+    // callback: события AUCTION_START / AUCTION_TURN_UPDATE /
+    // AUCTION_ACTION / AUCTION_END эмитятся на отдельном WS-канале,
+    // параллельно с onStateChanged (который шлёт весь state).
+    this.auction.onAuctionEvent = (gameId, ev) => {
+      try {
+        this.broadcastAuctionEvent(gameId, ev);
+      } catch (err) {
+        this.logger.error(
+          `broadcastAuctionEvent failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+  }
+
+  /**
+   * Транслирует событие аукциона в WS-комнату игры.
+   * Канал: "auction:event" (для всех клиентов комнаты).
+   * ВАЖНО: broadcast идёт через инжектированный GameGateway
+   * (см. `setGateway`), чтобы избежать циклической зависимости.
+   */
+  private gateway: {
+    broadcastAuctionEvent: (gameId: string, event: AuctionEvent) => void;
+  } | null = null;
+
+  setGateway(gw: { broadcastAuctionEvent: (gameId: string, event: AuctionEvent) => void }) {
+    this.gateway = gw;
+  }
+
+  private broadcastAuctionEvent(gameId: string, ev: AuctionEvent): void {
+    if (!this.gateway) {
+      this.logger.warn("[GamesService] gateway не зарегистрирован, auction event пропущен");
+      return;
+    }
+    this.gateway.broadcastAuctionEvent(gameId, ev);
   }
 
   // Создание и получение партий
@@ -272,7 +308,8 @@ export class GamesService {
       action.type === "CONFIRM_RENT_PAYMENT" ||
       action.type === "CONFIRM_TAX" ||
       action.type === "CONFIRM_CARD" ||
-      action.type === "CONFIRM_END_TURN";
+      action.type === "CONFIRM_END_TURN" ||
+      action.type === "CONFIRM_AUCTION";
 
     if (!isVisualConfirm && !this.isInterruptPhase(state.phase)) {
       const currentPlayer = state.players[state.currentPlayerIndex];
@@ -291,7 +328,14 @@ export class GamesService {
     // текущего игрока (например, бота). Это и приводило к тому, что
     // фишка бота не двигалась, а фишка человека двигалась во время хода
     // бота.
-    if (isVisualConfirm) {
+    // Подмену `player` на currentPlayer делаем ТОЛЬКО для чисто
+    // визуальных confirm'ов. Для аукционных actions (AUCTION_MAKE_BID,
+    // AUCTION_PASS) и CONFIRM_AUCTION сохраняем реального отправителя —
+    // в `handleAuctionActive` нам нужен ИМЕННО тот, кто нажал кнопку
+    // (а не инициатор аукциона), иначе движок получает NOT_ON_CLOCK,
+    // когда ход перешёл к другому игроку, а submitter — это он, а
+    // не `currentPlayerIndex`.
+    if (isVisualConfirm && action.type !== "CONFIRM_AUCTION") {
       const currentPlayer = state.players[state.currentPlayerIndex];
       if (!currentPlayer) {
         throw new NotFoundException("Не найден текущий игрок");
@@ -391,6 +435,7 @@ export class GamesService {
       "TAX_PAYMENT",
       "RESOLVING_LANDING",
       "END_TURN",
+      "AUCTION_FINISHED",
       "BOT_THINKING",
     ]);
     if (!waitingForClientConfirm.has(state.phase)) {
@@ -456,10 +501,22 @@ export class GamesService {
         return this.handleJailDecision(state, player, action);
 
       // Interrupt: Auction
-      case "AUCTION_BIDDING":
-        return this.handleAuctionBidding(state, player, action);
-      case "AUCTION_RESOLVE":
-        return this.handleAuctionResolve(state, player, action);
+      case "AUCTION_AWAITING_START":
+        // Мгновенная фаза: AuctionService.startAuction уже заполнил
+        // state.auction и активировал его. Переходим в AUCTION_ACTIVE.
+        this.handleAuctionAwaitingStart(state);
+        return {};
+      case "AUCTION_ACTIVE":
+        return this.handleAuctionActive(state, player, action);
+      case "AUCTION_FINISHED":
+        // Клиент увидел результат и нажал ОК в модалке.
+        // Очищаем state.auction и переходим к следующей фазе (BUILDING/ROLLING).
+        if (action.type !== "CONFIRM_AUCTION") {
+          throw new ForbiddenException("В фазе AUCTION_FINISHED ожидается CONFIRM_AUCTION");
+        }
+        this.clearAuctionTimer(this.findGameIdByState(state));
+        this.afterAuctionFinished(state);
+        return {};
 
       // Interrupt: Bankruptcy
       case "BANKRUPTCY_LIQUIDATE":
@@ -1162,10 +1219,31 @@ export class GamesService {
 
     if (action.type === "DECLINE_BUY") {
       if (state.settings.auctionEnabled) {
-        // Запускаем аукцион.
-        this.auction.startAuction(state, cell, player);
-        state.phase = "AUCTION_BIDDING";
-        this.scheduleAuctionTimer(state, this.findGameIdByState(state), state.auction!.bidDeadline);
+        // Запускаем аукцион: AuctionService выставляет state.auction
+        // (статус AWAITING_START → AUCTION_ACTIVE) и эмитит
+        // AUCTION_START + AUCTION_TURN_UPDATE через onAuctionEvent.
+        const started = this.auction.startAuction(
+          this.findGameIdByState(state),
+          state,
+          cell,
+          player,
+        );
+        if (!started) {
+          // Никто не может участвовать (все банкроты) — пропускаем фазу.
+          state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
+          return {};
+        }
+        // ВАЖНО: AuctionService.startAuction уже активировал движок
+        // (state.auction.status === "AUCTION_ACTIVE"). Ставим фазу сразу
+        // в AUCTION_ACTIVE, иначе scheduleAuctionTimer в начале проверит
+        // state.phase !== "AUCTION_ACTIVE" и вернётся (return) — таймер
+        // для бота не запустится, и аукцион «зависнет» на ходу первого
+        // участника. Раньше фаза AUCTION_AWAITING_START ждала
+        // dispatch → handleAuctionAwaitingStart, но в реальности
+        // никто из клиентов не присылает confirm для этой фазы —
+        // переход должен происходить синхронно при DECLINE_BUY.
+        state.phase = "AUCTION_ACTIVE";
+        this.scheduleAuctionTimer(state);
         return {};
       }
       // Без аукциона — сразу следующая фаза.
@@ -1717,10 +1795,13 @@ export class GamesService {
   // Interrupt: Auction
 
   /**
-   * AUCTION_BIDDING — текущий участник делает ставку или пасует.
-   * Допустимые: AUCTION_BID, AUCTION_PASS.
+   * AUCTION_ACTIVE — текущий участник делает ставку или пасует.
+   * Допустимые: AUCTION_MAKE_BID, AUCTION_PASS.
+   *
+   * Логика делегирована `AuctionService.applyCommand`, который
+   * использует чистый `AuctionEngine`.
    */
-  private async handleAuctionBidding(
+  private async handleAuctionActive(
     state: GameState,
     player: Player,
     action: GameAction,
@@ -1730,85 +1811,127 @@ export class GamesService {
       return {};
     }
 
-    const currentBidder = state.players[state.auction.currentBidderIndex];
-    if (!currentBidder || currentBidder.id !== player.id) {
-      throw new ForbiddenException("Сейчас не ваша очередь ставить");
-    }
-
-    if (action.type === "AUCTION_PASS") {
-      state.auction.activeBidders = state.auction.activeBidders.filter((id) => id !== player.id);
-      return this.advanceAuction(state);
-    }
-
-    if (action.type === "AUCTION_BID") {
-      const minBid = state.auction.currentBid + 1;
-      if (action.amount < minBid) {
-        throw new ForbiddenException(`Минимальная ставка: ${minBid}`);
+    if (action.type === "AUCTION_MAKE_BID") {
+      const result = this.auction.applyCommand(this.findGameIdByState(state), state, {
+        type: "placeBid",
+        playerId: player.id,
+        amount: action.amount,
+      });
+      if (!result.ok) {
+        throw new ForbiddenException(this.auctionErrorMessage(result.error));
       }
-      if (player.money < action.amount) {
-        throw new ForbiddenException("Недостаточно денег");
+    } else if (action.type === "AUCTION_PASS") {
+      const result = this.auction.applyCommand(this.findGameIdByState(state), state, {
+        type: "pass",
+        playerId: player.id,
+      });
+      if (!result.ok) {
+        throw new ForbiddenException(this.auctionErrorMessage(result.error));
       }
-      state.auction.currentBid = action.amount;
-      state.auction.highestBidderId = player.id;
-      return this.advanceAuction(state);
+    } else {
+      throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе AUCTION_ACTIVE`);
     }
 
-    throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе AUCTION_BIDDING`);
+    return this.afterAuctionTurn(state);
   }
 
   /**
-   * AUCTION_RESOLVE — аукцион завершён, передаём клетку победителю.
-   * Допустимые: AUCTION_AUTO_PASS, END_TURN.
+   * afterAuctionFinished — очистка state.auction и переход к
+   * следующей фазе (вызывается из dispatch при AUCTION_FINISHED).
+   *
+   * Сервер уже сделал передачу клетки/списание денег на этапе `sold`
+   * (внутри `applyAuctionCommand → finalizeSold`). Тут мы только
+   * очищаем `state.auction` и переключаем фазу.
+   *
+   * Сохраняем mustRollAgain: если аукцион был начат после дубля
+   * (например через карточку move-relative → BUY_DECISION →
+   * DECLINE_BUY → AUCTION), игрок должен иметь право на ещё
+   * один бросок.
    */
-  private async handleAuctionResolve(
-    state: GameState,
-    _player: Player,
-    action: GameAction,
-  ): Promise<{ card?: unknown; event?: GameEvent }> {
-    if (action.type !== "END_TURN" && action.type !== "AUCTION_AUTO_PASS") {
-      throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе AUCTION_RESOLVE`);
-    }
+  private afterAuctionFinished(state: GameState): void {
+    this.auction.finalize(state);
+    // ВАЖНО: тут же очищаем state.auction, иначе клиент продолжает
+    // показывать модалку аукциона (auctionStore.status === "FINISHED"
+    // → isOpen === true). Клиент уже подтвердил просмотр результата
+    // (CONFIRM_AUCTION), дальше state.auction ему не нужен.
+    delete state.auction;
+    const player = state.players[state.currentPlayerIndex];
+    state.phase = player?.mustRollAgain ? "ROLLING" : "BUILDING";
+  }
 
-    if (state.auction) {
-      this.auction.resolveAuction(state);
+  /**
+   * AUCTION_AWAITING_START — мгновенная фаза. AuctionService.startAuction
+   * уже сделал init+activate и заэмитил AUCTION_START + AUCTION_TURN_UPDATE
+   * в handleBuyDecision. Здесь только переходим в AUCTION_ACTIVE и
+   // ставим таймер для "на часах".
+   */
+  private handleAuctionAwaitingStart(state: GameState): void {
+    state.phase = "AUCTION_ACTIVE";
+    this.scheduleAuctionTimer(state);
+  }
+
+  /**
+   * После хода аукциона (ставка/пас):
+   *   - если аукцион закрылся (SOLD/UNSOLD) — переходим в AUCTION_FINISHED
+   *     и через 2 секунды очищаем state.auction;
+   *   - если нет — перепланировать таймер на нового «на часах».
+   */
+  private afterAuctionTurn(state: GameState): { card?: unknown; event?: GameEvent } {
+    if (!state.auction || state.auction.status !== "AUCTION_ACTIVE") {
+      // Аукцион закрылся. Переходим в AUCTION_FINISHED и ждём
+      // клиентского подтверждения (кнопка «ОК» в AuctionModal).
+      // Сервер не очищает state.auction сам — это делает dispatch()
+      // по приходу CONFIRM_AUCTION.
+      const gameId = this.findGameIdByState(state);
+      this.clearAuctionTimer(gameId);
+      if (state.phase !== "AUCTION_FINISHED") {
+        state.phase = "AUCTION_FINISHED";
+      }
+      return {};
     }
-    state.auction = undefined;
-    state.phase = "BUILDING";
+    // Продолжаем — ставим новый таймер на нового «на часах».
+    this.scheduleAuctionTimer(state);
     return {};
   }
 
   /**
-   * Продвигает аукцион: переходит к следующему участнику или в AUCTION_RESOLVE.
+   * Таймер 2-секундного показа результата аукциона. После этого —
+   * очищаем state.auction и переключаем фазу.
    */
-  private advanceAuction(state: GameState): { card?: unknown; event?: GameEvent } {
-    if (!state.auction) {
-      state.phase = "AUCTION_RESOLVE";
-      return {};
+  private scheduleAuctionFinishClear(gameId: string): void {
+    // Чистим предыдущий (если был).
+    const prev = this.auctionTimers.get(gameId);
+    if (prev) {
+      clearTimeout(prev);
+      this.auctionTimers.delete(gameId);
     }
+    const timer = setTimeout(() => {
+      this.auctionTimers.delete(gameId);
+      const s = this.activeGames.get(gameId);
+      if (!s) return;
+      if (s.phase !== "AUCTION_FINISHED") return;
+      this.afterAuctionFinished(s);
+    }, 2000);
+    this.auctionTimers.set(gameId, timer);
+  }
 
-    if (state.auction.activeBidders.length <= 1) {
-      state.phase = "AUCTION_RESOLVE";
-      return {};
+  /** Преобразует код ошибки движка в человеко-читаемое сообщение. */
+  private auctionErrorMessage(err: string): string {
+    switch (err) {
+      case "NOT_ON_CLOCK":
+        return "Сейчас не ваша очередь ставить";
+      case "BANKRUPT":
+        return "Игрок не участвует в аукционе";
+      case "BID_TOO_LOW":
+        return "Ставка ниже минимальной";
+      case "INSUFFICIENT_FUNDS":
+        return "Недостаточно денег";
+      case "ALREADY_CLOSED":
+        return "Аукцион уже завершён";
+      case "NOT_ACTIVE":
+      default:
+        return "Аукцион не активен";
     }
-
-    let nextIndex = state.auction.currentBidderIndex + 1;
-    let attempts = 0;
-    while (attempts < state.players.length) {
-      const candidateId = state.auction.bidderOrder[nextIndex % state.auction.bidderOrder.length];
-      if (candidateId && state.auction.activeBidders.includes(candidateId)) {
-        state.auction.currentBidderIndex = state.auction.bidderOrder.findIndex(
-          (id) => id === candidateId,
-        );
-        const gameId = this.findGameIdByState(state);
-        this.scheduleAuctionTimer(state, gameId, state.auction.bidDeadline);
-        return {};
-      }
-      nextIndex++;
-      attempts++;
-    }
-
-    state.phase = "AUCTION_RESOLVE";
-    return {};
   }
 
   // Interrupt: Bankruptcy
@@ -1917,7 +2040,10 @@ export class GamesService {
     action: GameAction,
   ): Promise<{ card?: unknown; event?: GameEvent }> {
     if (!state.trade) {
-      state.phase = "BUILDING";
+      // Сохраняем mustRollAgain: торги разрешены только в BUILDING,
+      // поэтому прерывать дубль они не могут. На всякий случай
+      // возвращаемся в правильную фазу.
+      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
       return {};
     }
 
@@ -1928,13 +2054,15 @@ export class GamesService {
     if (action.type === "TRADE_ACCEPT") {
       this.trade.executeTrade(state);
       state.trade = undefined;
-      state.phase = "BUILDING";
+      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
       return {};
     }
 
     if (action.type === "TRADE_REJECT") {
       state.trade = undefined;
-      state.phase = "BUILDING";
+      // Сохраняем mustRollAgain, чтобы не терять право на ещё один бросок
+      // после дубля, если торги были инициированы после карточки на дубле.
+      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
       return {};
     }
 
@@ -1953,7 +2081,7 @@ export class GamesService {
         throw new ForbiddenException("Отменить может только инициатор");
       }
       state.trade = undefined;
-      state.phase = "BUILDING";
+      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
       return {};
     }
 
@@ -1972,8 +2100,9 @@ export class GamesService {
 
   private isInterruptPhase(phase: Phase): boolean {
     return (
-      phase === "AUCTION_BIDDING" ||
-      phase === "AUCTION_RESOLVE" ||
+      phase === "AUCTION_AWAITING_START" ||
+      phase === "AUCTION_ACTIVE" ||
+      phase === "AUCTION_FINISHED" ||
       phase === "BANKRUPTCY_LIQUIDATE" ||
       phase === "BANKRUPTCY_TRANSFER" ||
       phase === "TRADING_NEGOTIATE" ||
@@ -2176,6 +2305,7 @@ export class GamesService {
       phase === "PAY_RENT" ||
       phase === "RESOLVING_LANDING" ||
       phase === "END_TURN" ||
+      phase === "AUCTION_FINISHED" ||
       phase === "BOT_THINKING"
     );
   }
@@ -2203,6 +2333,8 @@ export class GamesService {
         return { type: "CONFIRM_LANDING" };
       case "END_TURN":
         return { type: "CONFIRM_END_TURN" };
+      case "AUCTION_FINISHED":
+        return { type: "CONFIRM_AUCTION" };
       default:
         return null;
     }
@@ -2298,19 +2430,14 @@ export class GamesService {
           return { type: "ROLL_DICE" };
         case "BUY":
           return { type: "BUY_PROPERTY" };
+        case "DECLINE_BUY":
+          return { type: "DECLINE_BUY" };
         case "END_TURN":
           return { type: "END_TURN" };
         case "PAY_FINE":
           return { type: "PAY_JAIL_FINE" };
         case "USE_CARD":
           return { type: "USE_JAIL_CARD" };
-        case "AUCTION_BID": {
-          const auction = state.auction;
-          const cell = auction ? state.board[auction.cellId] : null;
-          const minInc = cell?.price ? Math.max(10, Math.floor(cell.price * 0.05)) : 10;
-          const nextBid = (auction?.currentBid ?? 0) + minInc;
-          return { type: "AUCTION_BID", amount: nextBid };
-        }
         case "AUCTION_PASS":
           return { type: "AUCTION_PASS" };
         case "TRADE_ACCEPT":
@@ -2324,6 +2451,10 @@ export class GamesService {
       }
     }
     switch (d.kind) {
+      case "AUCTION_BID":
+        // Бот прислал { kind: "AUCTION_BID", amount }. Превращаем
+        // в AUCTION_MAKE_BID-action для dispatch.
+        return { type: "AUCTION_MAKE_BID", amount: d.amount };
       case "BUILD_HOUSE":
         return { type: "BUILD_HOUSE", cellId: d.cellId };
       case "SELL_HOUSE":
@@ -2343,28 +2474,51 @@ export class GamesService {
 
   // Таймеры: аукцион, торговля, END_TURN (человек)
 
-  private scheduleAuctionTimer(state: GameState, gameId: string, _deadline: string) {
-    const prev = this.auctionTimers.get(gameId);
-    if (prev) {
-      clearTimeout(prev);
-      this.auctionTimers.delete(gameId);
-    }
-    if (state.phase !== "AUCTION_BIDDING") return;
-    if (!state.auction) return;
+  /**
+   * Планирует таймер для текущего участника аукциона:
+   *   - бот: маленькая задержка auctionBotThinkMs (имитация «подумать»);
+   *   - человек: полный turnDurationMs, потом авто-пас через движок (timeout).
+   */
+  private scheduleAuctionTimer(state: GameState): void {
+    const gameId = this.findGameIdByState(state);
+    this.clearAuctionTimer(gameId);
+    if (state.phase !== "AUCTION_ACTIVE") return;
+    if (!state.auction || state.auction.status !== "AUCTION_ACTIVE") return;
+    if (!state.auction.currentBidderId) return;
 
-    const currentBidder = state.players[state.auction.currentBidderIndex];
+    const currentBidderId = state.auction.currentBidderId;
+    const currentBidder = state.players.find((p) => p.id === currentBidderId);
     if (!currentBidder) return;
 
-    const ms = state.settings.auctionBidTimeoutMs ?? 15000;
-    const timer = setTimeout(async () => {
+    if (currentBidder.kind === "bot") {
+      // Бот «думает» 1.5–3 секунды, потом делает ход.
+      const thinkMs = (state.settings.auctionBotThinkMs ?? 1500) + Math.floor(Math.random() * 1500);
+      const timer = setTimeout(() => {
+        this.auctionTimers.delete(gameId);
+        void this.runAuctionBotTurn(gameId, currentBidderId);
+      }, thinkMs);
+      this.auctionTimers.set(gameId, timer);
+      return;
+    }
+
+    // Человек: ждём turnDurationMs, потом авто-пас через движок (timeout).
+    const ms = Math.max(0, state.auction.turnDurationMs);
+    const startedAt = state.auction.timerStartedAt;
+    const timer = setTimeout(() => {
       this.auctionTimers.delete(gameId);
       try {
-        if (state.phase !== "AUCTION_BIDDING" || !state.auction) return;
-        const decision = this.bot.decide(currentBidder, state);
-        const action = this.botDecisionToAction(decision ?? "AUCTION_PASS", state);
-        if (action) {
-          await this.applyAction(gameId, currentBidder.id, action);
-        }
+        const s = this.activeGames.get(gameId);
+        if (!s || !s.auction) return;
+        if (s.auction.status !== "AUCTION_ACTIVE") return;
+        if (s.auction.currentBidderId !== currentBidderId) return;
+        // Защита: timer мог быть перезапущен для нового участника.
+        if (s.auction.timerStartedAt !== startedAt) return;
+        // Применяем таймаут через AuctionService (эмитит событие).
+        this.auction.applyCommand(gameId, s, {
+          type: "timeout",
+          playerId: currentBidderId,
+        });
+        this.afterAuctionTurn(s);
       } catch (err) {
         this.logger.error(
           `Auction timer failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2372,6 +2526,43 @@ export class GamesService {
       }
     }, ms);
     this.auctionTimers.set(gameId, timer);
+  }
+
+  /** Очистить таймер аукциона (если есть). */
+  private clearAuctionTimer(gameId: string) {
+    const prev = this.auctionTimers.get(gameId);
+    if (prev) {
+      clearTimeout(prev);
+      this.auctionTimers.delete(gameId);
+    }
+  }
+
+  /**
+   * Ход бота в аукционе. Вызывается из scheduleAuctionTimer после
+   * auctionBotThinkMs. Защитные проверки гарантируют идемпотентность:
+   * если состояние изменилось — ничего не делаем.
+   */
+  private async runAuctionBotTurn(gameId: string, expectedBidderId: string) {
+    try {
+      const state = this.activeGames.get(gameId);
+      if (!state) return;
+      if (!state.auction) return;
+      if (state.auction.status !== "AUCTION_ACTIVE") return;
+      if (state.auction.currentBidderId !== expectedBidderId) return;
+      const bot = state.players.find((p) => p.id === expectedBidderId);
+      if (!bot || bot.kind !== "bot" || bot.isBankrupt) return;
+
+      const decision = this.bot.decide(bot, state);
+      // BotService возвращает либо строку, либо объект { kind, ... }.
+      // Для AUCTION_BID объект содержит amount.
+      const action = this.botDecisionToAction(decision ?? "AUCTION_PASS", state);
+      if (!action) return;
+      await this.applyAction(gameId, bot.id, action);
+    } catch (err) {
+      this.logger.error(
+        `Auction bot turn failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private scheduleTradeTimer(

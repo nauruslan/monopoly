@@ -10,10 +10,29 @@ import type { Card } from "../data/cards";
  * 2. **Turn** — `START_TURN`, `ROLLING`, `DICE_ANIMATION`, `MOVE_ANIMATION`,
  *              `RESOLVING_LANDING`, `PAY_RENT`, `TAX_PAYMENT`, `BUY_DECISION`,
  *              `CARD_REVEAL`, `CARD_EFFECT`, `BUILDING`, `END_TURN`
- * 3. **Special / Interrupt** — `JAIL_DECISION`, `AUCTION_BIDDING`,
- *              `AUCTION_RESOLVE`, `BANKRUPTCY_LIQUIDATE`,
- *              `BANKRUPTCY_TRANSFER`, `TRADING_NEGOTIATE`, `TRADING_CONFIRM`
+ * 3. **Special / Interrupt** — `JAIL_DECISION`,
+ *              `AUCTION_AWAITING_START`, `AUCTION_ACTIVE`, `AUCTION_FINISHED`,
+ *              `BANKRUPTCY_LIQUIDATE`, `BANKRUPTCY_TRANSFER`,
+ *              `TRADING_NEGOTIATE`, `TRADING_CONFIRM`
  * 4. **UX-фаза** `BOT_THINKING` — декоратор, не часть FSM (просто визуальная пауза).
+ *
+ * ## Аукцион: три фазы (новая логика, v2)
+ *
+ * Аукцион — это СОБСТВЕННЫЙ мини-FSM, живущий параллельно основному ходу:
+ *  - `AUCTION_AWAITING_START` — инициатор отказался покупать, аукцион СОЗДАН,
+ *                               но сервер ещё не начал торги. Может длиться
+ *                               один «тик», пока сервер не отправит всем
+ *                               клиентам `AUCTION_START` (broadcast) и не
+ *                               переведёт фазу в `AUCTION_ACTIVE`.
+ *  - `AUCTION_ACTIVE`         — текущий «на часах» делает ход (ставка/пас).
+ *                               Таймер 30 секунд. Сервер ждёт команды
+ *                               `AUCTION_MAKE_BID` / `AUCTION_PASS` от
+ *                               активного игрока или автоматически
+ *                               засчитывает «пас» по таймауту.
+ *  - `AUCTION_FINISHED`       — аукцион завершён (продан / ничья). Клиент
+ *                               показывает финальный экран ~2 секунды, после
+ *                               чего сервер сам переключает фазу на
+ *                               `BUILDING` (или `ROLLING` при `mustRollAgain`).
  *
  * ## КРИТИЧНО: каждая фаза имеет ЧЁТКИЙ СОБЫТИЙНЫЙ КРИТЕРИЙ ЗАВЕРШЕНИЯ.
  *
@@ -59,7 +78,7 @@ import type { Card } from "../data/cards";
  *                        ↓     ┌───────────┴────────────┐     ↓
  *                        ↓     ↓                        ↓     ↓
  *                        ↓   END_TURN             → MOVE_  END_TURN
- *                        ↓   (новый ход)             ANIM.
+ *                        ↓   (новый ход)             ANIM.  (новый ход)
  *                        ↓     ↓                  (если
  *                        ↓     ↓                   карта
  *                        ↓     ↓                   телепорт.)
@@ -102,9 +121,10 @@ export type Phase =
   // Special
   | "JAIL_DECISION"
 
-  // Interrupt: Аукцион
-  | "AUCTION_BIDDING"
-  | "AUCTION_RESOLVE"
+  // Interrupt: Аукцион (v2 — три фазы)
+  | "AUCTION_AWAITING_START"
+  | "AUCTION_ACTIVE"
+  | "AUCTION_FINISHED"
 
   // Interrupt: Банкротство
   | "BANKRUPTCY_LIQUIDATE"
@@ -129,7 +149,7 @@ export interface GameSettings {
   freeParkingVariant: "classic" | "tax-pot";
   /** Лимит итераций counter-offer в торговле (защита от бесконечного цикла). */
   tradingMaxCounterOffers?: number;
-  /** Длительность аукциона на одну ставку (мс). */
+  /** Длительность хода в аукционе (мс). По умолчанию 30 секунд. */
   auctionBidTimeoutMs?: number;
   /** Длительность торговли между сторонами (мс). */
   tradingResponseTimeoutMs?: number;
@@ -137,6 +157,11 @@ export interface GameSettings {
   diceAnimationMs?: number;
   /** Длительность анимации движения на 1 клетку (мс). Сервер ждёт это × N. */
   moveStepMs?: number;
+  /**
+   * Задержка перед ходом бота в аукционе (мс). Сервер ждёт это время,
+   * чтобы игрок успел «увидеть», что бот думает. Дефолт: 1500 мс.
+   */
+  auctionBotThinkMs?: number;
 }
 
 /**
@@ -155,6 +180,25 @@ export interface CardDeckState {
   cards: string[];
   /** Следующий индекс для выдачи. */
   cursor: number;
+}
+
+/**
+ * AuctionActionLogEntry — одна запись в логе торгов аукциона.
+ *
+ * Сервер ведёт полный лог действий (ставка/пас/таймаут) и отдаёт его
+ * клиенту в `state.auction.actionLog`. Клиент рендерит его в виде
+ * «истории» в модалке аукциона — игрок видит, ЧТО происходило, а не
+ * только финальный результат.
+ */
+export interface AuctionActionLogEntry {
+  /** ID игрока, совершившего действие. */
+  playerId: string;
+  /** Тип действия. */
+  action: "BID" | "PASS" | "TIMEOUT";
+  /** Сумма ставки (только для `action === "BID"`). */
+  amount?: number;
+  /** Метка времени (ms epoch), когда произошло действие. */
+  at: number;
 }
 
 /**
@@ -198,23 +242,120 @@ export interface GameState {
     endsAt: string;
   };
   /**
-   * Контекст аукциона (когда `phase ∈ {AUCTION_BIDDING, AUCTION_RESOLVE}`).
+   * Контекст аукциона (v2 — упрощённая модель по новой спеке).
+   *
+   * Жизненный цикл:
+   *  1) Игрок отказался покупать (`DECLINE_BUY` в фазе `BUY_DECISION`).
+   *  2) Сервер создаёт `state.auction` со `status = "AWAITING_START"`,
+   *     `phase = "AUCTION_AWAITING_START"`. `active_bidders` содержит
+   *     ВСЕХ живых игроков, ВКЛЮЧАЯ инициатора. Первый «на часах» — инициатор.
+   *  3) Сервер шлёт WS-событие `AUCTION_START` всем клиентам и переключает
+   *     фазу на `AUCTION_ACTIVE`. Таймер 30 сек на ход.
+   *  4) Активный игрок присылает `AUCTION_MAKE_BID` или `AUCTION_PASS`.
+   *  5) Сервер:
+   *     - при `BID`    — обновляет `highest_bid` / `highest_bidder_id`,
+   *       сдвигает `current_bidder_index` по кругу, перезапускает таймер,
+   *       шлёт `AUCTION_TURN_UPDATE` (новый активный) и `AUCTION_ACTION`
+   *       (событие для лога).
+   *     - при `PASS`   — удаляет игрока из `active_bidders`, сдвигает индекс,
+   *       шлёт события. Если `active_bidders.length === 0` — аукцион
+   *       заканчивается ничьей (UNSOLD). Если `=== 1` — победитель.
+   *     - при таймауте — то же, что `PASS`, но `reason: "TIMEOUT"`.
+   *  6) Когда аукцион закрыт, сервер ставит `status = "FINISHED"`, фазу
+   *     `AUCTION_FINISHED`, заполняет `winner_id` / `final_bid` (или оба
+   *     `null` при UNSOLD), шлёт `AUCTION_END`. Через ~2 сек (по
+   *     `setTimeout` в `GamesService`) сервер сам переводит фазу в
+   *     `BUILDING` (или `ROLLING` при `mustRollAgain`).
+   *
+   * Правила:
+   *  - **Лимит ставки**: `maxBid = player.money` (наличные, без залога).
+   *  - **Строго больше**: `amount > highest_bid` (на 1₽ или больше — не важно).
+   *  - **Пас безвозвратен**: выбыл — больше в этом аукционе не участвует.
+   *  - **Нет денег на минимальную ставку → пас**.
+   *  - **Блокировка действий**: пока `status === "AUCTION_ACTIVE"`,
+   *    сервер отклоняет любые запросы на продажу/залог/обмен/покупку.
+   *
+   * Поля совместимы с прежним клиентом — `currentBid` / `highestBidderId`
+   * сохранены как алиасы, `currentBidderId` — ID активного игрока.
    */
   auction?: {
+    /** Уникальный ID аукциона. */
+    id: string;
     /** Клетка, которая продаётся с аукциона. */
     cellId: number;
-    /** Текущая максимальная ставка. */
+    /** Кто инициировал аукцион (отказался от покупки). */
+    initiatorId: string;
+    /**
+     * Внутреннее состояние аукциона.
+     *  - `AWAITING_START` — создан, но сервер ещё не отправил broadcast.
+     *                       (живёт один тик).
+     *  - `AUCTION_ACTIVE`  — идут торги.
+     *  - `FINISHED`        — победитель определён или ничья; клиент
+     *                       показывает финальный экран.
+     */
+    status: "AWAITING_START" | "AUCTION_ACTIVE" | "FINISHED";
+
+    /** Текущая максимальная ставка (0 = ставок е��ё не было). */
     currentBid: number;
-    /** ID лидирующего игрока. */
+    /** ID лидирующего игрока (после первой ставки). */
     highestBidderId: string | null;
-    /** Порядок участников (начиная со следующего после инициатора). */
+    /**
+     * Полный порядок участников (по часовой стрелке от инициатора).
+     * Используется только при инициализации; далее массив не изменяется.
+     */
     bidderOrder: string[];
-    /** Индекс текущего участника в `bidderOrder`. */
-    currentBidderIndex: number;
-    /** Активные (не выбывшие) участники. */
+    /**
+     * Список АКТИВНЫХ участников (кто ещё не спасовал и не был удалён
+     * по таймауту). Это ЕДИНСТВЕННЫЙ источник правды о том, кто может
+     * делать ход. При пасе/таймауте игрок удаляется из массива. Аукцион
+     * заканчивается, когда массив пуст (UNSOLD) или в нём ровно 1 игрок
+     * (победитель).
+     */
     activeBidders: string[];
-    /** ISO-время, когда текущий участник должен сделать ставку. */
-    bidDeadline: string;
+    /**
+     * Индекс активного игрока в `activeBidders`. Сервер сдвигает его
+     * по кругу через `(currentBidderIndex + 1) % activeBidders.length`
+     * после каждого действия. Когда `activeBidders.length <= 1` —
+     * аукцион закрывается.
+     */
+    currentBidderIndex: number;
+    /** ID текущего «на часах» (алиас `activeBidders[currentBidderIndex]`). */
+    currentBidderId: string | null;
+    /**
+     * Timestamp (ms epoch), когда сервер поставил таймер на текущий ход.
+     * Используется для расчёта `time_left` в broadcast-событии
+     * `AUCTION_TURN_UPDATE` (сервер присылает `time_left` явно).
+     */
+    timerStartedAt: number;
+    /** Длительность одного хода в мс (из `settings.auctionBidTimeoutMs`). */
+    turnDurationMs: number;
+
+    /**
+     * Полная история действий — рендерится клиентом в виде лога торгов.
+     * Сервер пишет сюда каждое событие (BID / PASS / TIMEOUT) сразу при
+     * обработке команды, до broadcast'а.
+     */
+    actionLog: AuctionActionLogEntry[];
+
+    /** Победитель (только при `status === "FINISHED"`, sold). */
+    winnerId: string | null;
+    /** Финальная ставка (только при `status === "FINISHED"`, sold). */
+    finalBid: number;
+    /**
+     * Причина закрытия. Только при `status === "FINISHED"`.
+     *  - `"SOLD"`    — есть победитель, клетка передана.
+     *  - `"UNSOLD"`  — все спасовали до первой ставки, клетка у Банка.
+     */
+    finishReason: "SOLD" | "UNSOLD" | null;
+
+    /**
+     * Время начала (ms epoch).
+     */
+    startedAt: number;
+    /**
+     * Время закрытия (ms epoch). `null` пока аукцион не закончен.
+     */
+    closedAt: number | null;
   };
   /**
    * Контекст торговли (когда `phase ∈ {TRADING_NEGOTIATE, TRADING_CONFIRM}`).
@@ -409,8 +550,9 @@ export const DEFAULT_SETTINGS: GameSettings = {
   turnTimeoutMs: 120000,
   freeParkingVariant: "classic",
   tradingMaxCounterOffers: 3,
-  auctionBidTimeoutMs: 15000,
-  tradingResponseTimeoutMs: 30000,
+  auctionBidTimeoutMs: 30_000, // 30 сек на ход в аукционе
+  tradingResponseTimeoutMs: 30_000,
   diceAnimationMs: 2000,
   moveStepMs: 450,
+  auctionBotThinkMs: 1500,
 };

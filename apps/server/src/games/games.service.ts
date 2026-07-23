@@ -29,7 +29,9 @@ import { BankruptcyService } from "./handlers/bankruptcy.service";
 import { BotService, type BotDecision } from "./bots/bot.service";
 import { AuctionService, type AuctionEvent } from "./handlers/auction.service";
 import { TradeService } from "./handlers/trade.service";
-import { canRollDice, canEndTurn } from "./turn-permissions";
+import { canRollDice, canEndTurn, isCurrentPlayer } from "./turn-permissions";
+import type { GameEventKind } from "@monopoly/shared";
+import { randomUUID } from "crypto";
 
 export type GameStateChangedCallback = (
   gameId: string,
@@ -290,6 +292,34 @@ export class GamesService {
       throw new ForbiddenException("Нельзя торговать, находясь в тюрьме");
     }
 
+    // 2.4) Ранняя защита блокировки торговли: TRADE_OFFER получателю,
+    // который добавил инициатора в `blocked_players`, отклоняется.
+    if (action.type === "TRADE_OFFER") {
+      const recipient = state.players.find((p) => p.id === action.recipientId);
+      if (recipient?.blockedPlayers?.includes(player.id)) {
+        throw new ForbiddenException("Торговля с этим игроком заблокирована");
+      }
+    }
+
+    // 2.5) Торговлю и блокировку запрещено начинать во время interrupt-фаз
+    // (аукцион, банкротство, уже идущая сделка) и в анимационных фазах
+    // (DICE_ANIMATION, MOVE_ANIMATION), чтобы UI-тайминги оставались
+    // предсказуемыми. GDD §1.1 разрешает торговлю в любой момент хода
+    // текущего игрока, кроме этих «защитных» фаз.
+    if (action.type === "TRADE_OFFER" || action.type === "TRADE_TOGGLE_BLOCK") {
+      if (state.trade && action.type === "TRADE_OFFER") {
+        throw new ForbiddenException("Сделка уже идёт, дождитесь её завершения");
+      }
+      if (this.isInterruptPhase(state.phase)) {
+        throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе ${state.phase}`);
+      }
+      if (state.phase === "DICE_ANIMATION" || state.phase === "MOVE_ANIMATION") {
+        throw new ForbiddenException(
+          `Недопустимое действие ${action.type} во время анимации ${state.phase}`,
+        );
+      }
+    }
+
     // 3) Проверить, что ход именно этого игрока (для не-interrupt фаз).
     // ВАЖНО: для визуальных CONFIRM_* actions (CONFIRM_DICE_ANIMATION,
     // CONFIRM_MOVE_ANIMATION, CONFIRM_LANDING, CONFIRM_RENT_PAYMENT,
@@ -462,6 +492,12 @@ export class GamesService {
     this.logger.log(
       `[dispatch] entered: action=${action.type} currentPhase=${state.phase} playerPos=${player.position}`,
     );
+    // Торговля и блокировка партнёра доступны на любом шаге хода текущего игрока
+    // (GDD §1.1). Обрабатываем их ДО выбора фазы, чтобы не отказывать игроку
+    // в фазе ROLLING, DICE_ANIMATION, MOVE_ANIMATION и т.п.
+    if (action.type === "TRADE_OFFER" || action.type === "TRADE_TOGGLE_BLOCK") {
+      return this.handleBuilding(state, player, action);
+    }
     switch (state.phase) {
       // Global
       case "IDLE":
@@ -564,6 +600,8 @@ export class GamesService {
     // гарантирует, что в новом ходу мы не «провалимся» в ветку
     // DICE_ANIMATION как будто бы это была попытка выхода из тюрьмы.
     state.jailRollOutcome = undefined;
+    // Новый ход — сбрасываем журнал попыток инициации торговли.
+    state.tradeInitiationLog = [];
     if (player.inJail) {
       state.phase = "JAIL_DECISION";
     } else {
@@ -1625,10 +1663,45 @@ export class GamesService {
       }
 
       case "TRADE_OFFER": {
-        this.trade.startTrade(state, player, action.recipientId, action.offer);
+        // Запоминаем фазу, в которой находилась партия ДО начала торговли,
+        // чтобы корректно восстановить её после accept/reject/cancel.
+        // Если игрок ещё не бросал кубики (фаза ROLLING), он должен
+        // вернуться в ROLLING после сделки, чтобы мочь бросить.
+        // Если игрок уже в BUILDING (т.е. строится или конец хода) —
+        // возвращаемся в BUILDING.
+        // Передаём preTradePhase в startTrade — теперь он сохраняется
+        // сразу при инициализации state.trade (а не мутацией после), и
+        // остаётся устойчивым после counter-offer'ов.
+        const preTradePhase = state.phase;
+        this.trade.startTrade(state, player, action.recipientId, action.offer, preTradePhase);
         state.phase = "TRADING_NEGOTIATE";
+        // Фиксируем попытку инициации за этот ход (чтобы бот не спамил).
+        if (!state.tradeInitiationLog) state.tradeInitiationLog = [];
+        state.tradeInitiationLog.push({
+          initiatorId: player.id,
+          recipientId: action.recipientId,
+          at: Date.now(),
+        });
         const gameId = this.findGameIdByState(state);
         this.scheduleTradeTimer(state, gameId, state.trade!);
+        const recipient = state.players.find((p) => p.id === action.recipientId);
+        return {
+          event: this.makeEvent("TRADE_STARTED", player, {
+            message: `🤝 ${player.displayName} предлагает обмен игроку ${recipient?.displayName ?? "?"}`,
+            type: "trade",
+            payload: { otherPlayerId: action.recipientId },
+          }),
+        };
+      }
+
+      case "TRADE_TOGGLE_BLOCK": {
+        if (this.isInterruptPhase(state.phase)) {
+          throw new ForbiddenException(`Нельзя менять блокировки в interrupt-фазе ${state.phase}`);
+        }
+        if (!isCurrentPlayer(state, player)) {
+          throw new ForbiddenException("Сейчас не ваш ход");
+        }
+        this.trade.toggleBlock(state, player, action.targetId);
         return {};
       }
 
@@ -2040,10 +2113,9 @@ export class GamesService {
     action: GameAction,
   ): Promise<{ card?: unknown; event?: GameEvent }> {
     if (!state.trade) {
-      // Сохраняем mustRollAgain: торги разрешены только в BUILDING,
-      // поэтому прерывать дубль они не могут. На всякий случай
-      // возвращаемся в правильную фазу.
-      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
+      // Аварийный путь: state.trade уже сброшен (например, таймаут).
+      // preTradePhase уже утерян (state.trade = undefined) — fallback в BUILDING.
+      state.phase = this.resolvePhaseAfterTrade(state, player, undefined);
       return {};
     }
 
@@ -2051,19 +2123,38 @@ export class GamesService {
       throw new ForbiddenException("Сейчас не ваша очередь в торговле");
     }
 
+    // ВАЖНО: захватываем preTradePhase В ЛОКАЛЬНУЮ ПЕРЕМЕННУЮ до сброса
+    // state.trade, иначе resolvePhaseAfterTrade прочитает undefined.
+    const preTradePhase = state.trade.preTradePhase;
+
     if (action.type === "TRADE_ACCEPT") {
+      const initiator = state.players.find((p) => p.id === state.trade!.initiatorId);
       this.trade.executeTrade(state);
       state.trade = undefined;
-      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
-      return {};
+      state.phase = this.resolvePhaseAfterTrade(state, player, preTradePhase);
+      return {
+        event: this.makeEvent("TRADE_COMPLETED", player, {
+          message: `✅ ${player.displayName} и ${initiator?.displayName ?? "?"} завершили обмен`,
+          type: "trade",
+          payload: { otherPlayerId: initiator?.id },
+        }),
+      };
     }
 
     if (action.type === "TRADE_REJECT") {
+      const initiator = state.players.find((p) => p.id === state.trade!.initiatorId);
       state.trade = undefined;
       // Сохраняем mustRollAgain, чтобы не терять право на ещё один бросок
-      // после дубля, если торги были инициированы после карточки на дубле.
-      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
-      return {};
+      // после дубля, и возвращаемся в фазу, в которой были ДО сделки
+      // (если торги начались в ROLLING — туда и возвращаемся).
+      state.phase = this.resolvePhaseAfterTrade(state, player, preTradePhase);
+      return {
+        event: this.makeEvent("TRADE_REJECTED", player, {
+          message: `❌ ${player.displayName} отклонил(а) обмен от ${initiator?.displayName ?? "?"}`,
+          type: "trade",
+          payload: { otherPlayerId: initiator?.id },
+        }),
+      };
     }
 
     if (action.type === "TRADE_COUNTER") {
@@ -2073,16 +2164,30 @@ export class GamesService {
       }
       this.trade.makeCounterOffer(state, action.offer);
       this.scheduleTradeTimer(state, this.findGameIdByState(state), state.trade!);
-      return {};
+      const newCounterparty = state.players.find((p) => p.id === state.trade!.currentPartyId);
+      return {
+        event: this.makeEvent("TRADE_COUNTER", player, {
+          message: `↩️ ${player.displayName} сделал(а) встречное предложение игроку ${newCounterparty?.displayName ?? "?"}`,
+          type: "trade",
+          payload: { otherPlayerId: newCounterparty?.id },
+        }),
+      };
     }
 
     if (action.type === "TRADE_CANCEL") {
       if (player.id !== state.trade.initiatorId) {
         throw new ForbiddenException("Отменить может только инициатор");
       }
+      const recipient = state.players.find((p) => p.id === state.trade!.recipientId);
       state.trade = undefined;
-      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
-      return {};
+      state.phase = this.resolvePhaseAfterTrade(state, player, preTradePhase);
+      return {
+        event: this.makeEvent("TRADE_CANCELLED", player, {
+          message: `🚫 ${player.displayName} отменил(а) обмен с ${recipient?.displayName ?? "?"}`,
+          type: "trade",
+          payload: { otherPlayerId: recipient?.id },
+        }),
+      };
     }
 
     throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе TRADING_NEGOTIATE`);
@@ -2094,6 +2199,61 @@ export class GamesService {
     action: GameAction,
   ): Promise<{ card?: unknown; event?: GameEvent }> {
     return this.handleTradingNegotiate(state, player, action);
+  }
+
+  /**
+   * Множество фаз Turn FSM, в которых игрок имеет право торговать
+   * (`canTrade === true`) и в которые мы можем вернуться после сделки.
+   * Эти же фазы сервер устанавливает как `preTradePhase` при TRADE_OFFER.
+   *
+   * Если торги начались в одной из этих фаз, после accept/reject/cancel
+   * партия должна вернуться ровно в неё (например, ROLLING → ROLLING,
+   * чтобы игрок мог бросить кубики; BUY_DECISION → BUY_DECISION).
+   */
+  private static readonly RESTORABLE_PHASES_AFTER_TRADE: ReadonlySet<Phase> = new Set<Phase>([
+    "START_TURN",
+    "ROLLING",
+    "DICE_ANIMATION",
+    "RESOLVING_LANDING",
+    "BUY_DECISION",
+    "CARD_REVEAL",
+    "CARD_EFFECT",
+    "JAIL_DECISION",
+    "PAY_RENT",
+    "TAX_PAYMENT",
+    "BUILDING",
+    "END_TURN",
+  ]);
+
+  /**
+   * Возвращает фазу, в которую партия должна вернуться после завершения торговли
+   * (accept / reject / cancel / confirm).
+   *
+   * Логика:
+   *  1. Если у игрока есть право на ещё один бросок (`mustRollAgain === true`) —
+   *     всегда возвращаемся в ROLLING (право на бросок не должно сгорать из-за сделки).
+   *  2. Иначе — если `preTradePhase` сохранён и это «своя» Turn-фаза (из
+   *     RESTORABLE_PHASES_AFTER_TRADE), возвращаем её. Это покрывает кейс
+   *     «игрок инициировал сделку в фазе ROLLING (ещё не ходил)» — после
+   *     reject/cancel он снова окажется в ROLLING и сможет бросить кубики.
+   *  3. Если `preTradePhase` не сохранён (старые снапшоты, аварийный путь,
+   *     counter-offer без пробрасывания) — fallback в BUILDING.
+   *
+   * `preTradePhase` передаётся параметром (а не читается из `state.trade`),
+   * потому что к моменту вызова `state.trade` уже сброшен в `undefined`.
+   */
+  private resolvePhaseAfterTrade(
+    _state: GameState,
+    player: Player,
+    preTradePhase: Phase | undefined,
+  ): Phase {
+    if (player.mustRollAgain) {
+      return "ROLLING";
+    }
+    if (preTradePhase && GamesService.RESTORABLE_PHASES_AFTER_TRADE.has(preTradePhase)) {
+      return preTradePhase;
+    }
+    return "BUILDING";
   }
 
   // Вспомогательные методы
@@ -2136,6 +2296,26 @@ export class GamesService {
     if (player.isBankrupt) {
       throw new ForbiddenException("Игрок обанкротился");
     }
+  }
+
+  /**
+   * Хелпер: сконструировать GameEvent с дефолтными полями.
+   * Используется обработчиками, чтобы не дублировать id/at/playerId.
+   */
+  private makeEvent(
+    kind: GameEventKind,
+    player: Player,
+    fields: Pick<GameEvent, "message" | "type"> & { payload?: GameEvent["payload"] },
+  ): GameEvent {
+    return {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      kind,
+      playerId: player.id,
+      message: fields.message,
+      type: fields.type,
+      ...(fields.payload ? { payload: fields.payload } : {}),
+    };
   }
 
   private advanceToNextPlayer(state: GameState) {
@@ -2467,6 +2647,10 @@ export class GamesService {
         return { type: "BANKRUPTCY_LIQUIDATE_HOUSES", cellId: d.cellId };
       case "MORTGAGE_FOR_BANKRUPTCY":
         return { type: "BANKRUPTCY_MORTGAGE", cellId: d.cellId };
+      case "TRADE_OFFER":
+        return { type: "TRADE_OFFER", recipientId: d.recipientId, offer: d.offer };
+      case "TRADE_COUNTER":
+        return { type: "TRADE_COUNTER", offer: d.offer };
       default:
         return null;
     }
@@ -2580,7 +2764,11 @@ export class GamesService {
     const currentParty = state.players.find((p) => p.id === state.trade!.currentPartyId);
     if (!currentParty) return;
 
-    const ms = state.settings.tradingResponseTimeoutMs ?? 30000;
+    // Для бота — отдельный короткий таймаут, чтобы UI не висел впустую.
+    const isBot = currentParty.kind === "bot";
+    const ms = isBot
+      ? (state.settings.tradingBotResponseTimeoutMs ?? 3500)
+      : (state.settings.tradingResponseTimeoutMs ?? 30000);
     const timer = setTimeout(async () => {
       this.tradeTimers.delete(gameId);
       try {

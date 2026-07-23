@@ -219,10 +219,40 @@ describe("turn-permissions", () => {
     });
   });
 
-  describe("canTrade (блок в тюрьме)", () => {
+  describe("canTrade (GDD §1.1: торги в любой момент хода)", () => {
     it("true в фазе BUILDING, если игрок НЕ в тюрьме", () => {
       const s = makeState({ phase: "BUILDING" });
       expect(canTrade(s, s.players[0]!)).toBe(true);
+    });
+
+    it("true в фазе ROLLING (торговля до броска кубиков)", () => {
+      const s = makeState({ phase: "ROLLING" });
+      expect(canTrade(s, s.players[0]!)).toBe(true);
+    });
+
+    it("true в фазе DICE_ANIMATION (торговля во время анимации броска)", () => {
+      const s = makeState({ phase: "DICE_ANIMATION" });
+      expect(canTrade(s, s.players[0]!)).toBe(true);
+    });
+
+    it("true в фазе BUY_DECISION (торговля на этапе покупки)", () => {
+      const s = makeState({ phase: "BUY_DECISION" });
+      expect(canTrade(s, s.players[0]!)).toBe(true);
+    });
+
+    it("false в фазе MOVE_ANIMATION (нельзя прерывать анимацию перемещения)", () => {
+      const s = makeState({ phase: "MOVE_ANIMATION" });
+      expect(canTrade(s, s.players[0]!)).toBe(false);
+    });
+
+    it("false в фазе AUCTION_ACTIVE (interrupt-фаза)", () => {
+      const s = makeState({ phase: "AUCTION_ACTIVE" });
+      expect(canTrade(s, s.players[0]!)).toBe(false);
+    });
+
+    it("false в фазе FINISHED", () => {
+      const s = makeState({ phase: "FINISHED" });
+      expect(canTrade(s, s.players[0]!)).toBe(false);
     });
 
     it("false в фазе BUILDING, если игрок В тюрьме (правила Монополии)", () => {
@@ -231,8 +261,11 @@ describe("turn-permissions", () => {
       expect(canTrade(s, p)).toBe(false);
     });
 
-    it("false в фазе ROLLING (торговля только в BUILDING)", () => {
-      const s = makeState({ phase: "ROLLING" });
+    it("false если moveAnimation заполнен (анимация идёт)", () => {
+      const s = makeState({
+        phase: "BUILDING",
+        moveAnimation: { playerId: "p1", from: 0, to: 5, steps: 5, isDouble: false },
+      });
       expect(canTrade(s, s.players[0]!)).toBe(false);
     });
   });

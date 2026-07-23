@@ -319,7 +319,14 @@ describe("GamesService.applyAction: regression дубль + карточка →
       initiatorId: "p1",
       recipientId: p.id,
       currentPartyId: p.id,
-      offer: { fromProperties: [], fromCash: 50, toProperties: [], toCash: 0 },
+      offer: {
+        fromProperties: [],
+        fromCash: 50,
+        fromJailCards: 0,
+        toProperties: [],
+        toCash: 0,
+        toJailCards: 0,
+      },
       counterCount: 0,
     };
 
@@ -384,7 +391,14 @@ describe("GamesService.applyAction: regression дубль + карточка →
       initiatorId: p1.id,
       recipientId: p.id,
       currentPartyId: p.id,
-      offer: { fromProperties: [], fromCash: 50, toProperties: [], toCash: 0 },
+      offer: {
+        fromProperties: [],
+        fromCash: 50,
+        fromJailCards: 0,
+        toProperties: [],
+        toCash: 0,
+        toJailCards: 0,
+      },
       counterCount: 0,
     };
 
@@ -414,5 +428,137 @@ describe("GamesService.applyAction: regression дубль + карточка →
     expect(activeState.phase).toBe("ROLLING");
     expect(p.mustRollAgain).toBe(true);
     expect(p.consecutiveDoubles).toBe(1);
+  });
+
+  /**
+   * Регрессия «preTradePhase теряется при counter-offer / неизвестных фазах».
+   *
+   * Сценарий бага: игрок в ROLLING инициирует trade → соперник делает
+   * counter-offer → инициатор отклоняет. До фикса `makeCounterOffer`
+   * пересоздавал `state.trade` БЕЗ поля `preTradePhase`, поэтому после
+   * TRADE_REJECT `resolvePhaseAfterTrade` видела undefined и фолбэчила
+   * в BUILDING. Кнопка «Бросить кубики» становилась неактивной, хотя
+   * игрок ещё не ходил.
+   */
+  // Вспомогательная: подготавливает state.trade с заданным preTradePhase
+  // и возвращает пару игроков. Используем прямой вызов handleTradingNegotiate
+  // (а не act), чтобы не зависеть от currentPlayerIndex (в торгах активная
+  // сторона определяется state.trade.currentPartyId, а не currentPlayerIndex).
+  function setupTradeInNegotiate(preTradePhase: GameState["phase"]) {
+    const p = activeState.players[activeState.currentPlayerIndex]!;
+    const p1 = activeState.players[1]!;
+    activeState.phase = "TRADING_NEGOTIATE";
+    activeState.trade = {
+      initiatorId: p.id,
+      recipientId: p1.id,
+      currentPartyId: p1.id,
+      offer: {
+        fromProperties: [],
+        fromCash: 50,
+        fromJailCards: 0,
+        toProperties: [],
+        toCash: 0,
+        toJailCards: 0,
+      },
+      counterCount: 0,
+      preTradePhase,
+    };
+    return { p, p1 };
+  }
+
+  it("regression: preTradePhase=ROLLING → TRADE_REJECT → фаза ROLLING (без counter)", async () => {
+    const { p1 } = setupTradeInNegotiate("ROLLING");
+    await (service as any).handleTradingNegotiate(activeState, p1, { type: "TRADE_REJECT" });
+    expect(activeState.trade).toBeUndefined();
+    expect(activeState.phase).toBe("ROLLING");
+  });
+
+  it("regression: preTradePhase=BUILDING → TRADE_REJECT → фаза BUILDING (без изменений)", async () => {
+    const { p1 } = setupTradeInNegotiate("BUILDING");
+    await (service as any).handleTradingNegotiate(activeState, p1, { type: "TRADE_REJECT" });
+    expect(activeState.trade).toBeUndefined();
+    expect(activeState.phase).toBe("BUILDING");
+  });
+
+  it("regression: preTradePhase=ROLLING + counter-offer → TRADE_REJECT → фаза ROLLING (counter не затирает preTradePhase)", async () => {
+    // Шаг 1: торги инициированы из ROLLING.
+    const p = activeState.players[activeState.currentPlayerIndex]!;
+    const p1 = activeState.players[1]!;
+    activeState.phase = "TRADING_NEGOTIATE";
+    activeState.trade = {
+      initiatorId: p.id,
+      recipientId: p1.id,
+      currentPartyId: p1.id,
+      offer: {
+        fromProperties: [],
+        fromCash: 50,
+        fromJailCards: 0,
+        toProperties: [],
+        toCash: 0,
+        toJailCards: 0,
+      },
+      counterCount: 0,
+      preTradePhase: "ROLLING",
+    };
+
+    // Шаг 2: p1 делает counter-offer. preTradePhase НЕ должен пропасть.
+    // В этом юнит-тесте вызываем makeCounterOffer напрямую (action.type
+    // проверяется в handleTradingNegotiate, который работает через
+    // applyAction; но для проверки целостности state.trade достаточно
+    // прямого вызова).
+    (service as any).trade.makeCounterOffer(activeState, {
+      fromProperties: [],
+      fromCash: 0,
+      fromJailCards: 0,
+      toProperties: [],
+      toCash: 30,
+      toJailCards: 0,
+    });
+    expect(activeState.trade?.preTradePhase).toBe("ROLLING");
+    expect(activeState.trade?.counterCount).toBe(1);
+
+    // Шаг 3: инициатор (p) отклоняет встречное предложение. Должны
+    // вернуться в ROLLING, а не в BUILDING.
+    await act({ type: "TRADE_REJECT" });
+    expect(activeState.trade).toBeUndefined();
+    expect(activeState.phase).toBe("ROLLING");
+  });
+
+  it("regression: preTradePhase=DICE_ANIMATION → TRADE_REJECT → фаза DICE_ANIMATION (resolvePhaseAfterTrade знает все «свои» фазы)", async () => {
+    const { p1 } = setupTradeInNegotiate("DICE_ANIMATION");
+    await (service as any).handleTradingNegotiate(activeState, p1, { type: "TRADE_REJECT" });
+    expect(activeState.trade).toBeUndefined();
+    expect(activeState.phase).toBe("DICE_ANIMATION");
+  });
+
+  it("regression: preTradePhase=BUY_DECISION → TRADE_REJECT → фаза BUY_DECISION (торги на этапе покупки не ломают покупку)", async () => {
+    const { p1 } = setupTradeInNegotiate("BUY_DECISION");
+    await (service as any).handleTradingNegotiate(activeState, p1, { type: "TRADE_REJECT" });
+    expect(activeState.trade).toBeUndefined();
+    expect(activeState.phase).toBe("BUY_DECISION");
+  });
+
+  it("regression: startTrade сохраняет preTradePhase в state.trade сразу (а не мутацией после)", () => {
+    // Проверяем, что startTrade сразу пишет preTradePhase в создаваемый
+    // state.trade (а не требует пост-мутации, как раньше). Это
+    // страхует от потери при будущих рефакторингах.
+    const p = activeState.players[activeState.currentPlayerIndex]!;
+    const p1 = activeState.players[1]!;
+    activeState.phase = "ROLLING";
+    (service as any).trade.startTrade(
+      activeState,
+      p,
+      p1.id,
+      {
+        fromProperties: [],
+        fromCash: 50,
+        fromJailCards: 0,
+        toProperties: [],
+        toCash: 0,
+        toJailCards: 0,
+      },
+      "ROLLING",
+    );
+    expect(activeState.trade?.preTradePhase).toBe("ROLLING");
   });
 });

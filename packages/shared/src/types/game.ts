@@ -153,6 +153,8 @@ export interface GameSettings {
   auctionBidTimeoutMs?: number;
   /** Длительность торговли между сторонами (мс). */
   tradingResponseTimeoutMs?: number;
+  /** Длительность торговли, когда отвечает бот (мс). По умолчанию 3500. */
+  tradingBotResponseTimeoutMs?: number;
   /** Длительность анимации броска кубиков (мс). Сервер ждёт это время. */
   diceAnimationMs?: number;
   /** Длительность анимации движения на 1 клетку (мс). Сервер ждёт это × N. */
@@ -371,7 +373,20 @@ export interface GameState {
     offer: TradeOffer;
     /** Количество counter-offer'ов (ограничение). */
     counterCount: number;
+    /**
+     * Фаза, в которой находилась партия ДО старта торговли.
+     * Используется, чтобы корректно восстановить фазу после завершения
+     * сделки (accept/reject/cancel):
+     *  - если торги начались в ROLLING (игрок ещё не ходил),
+     *    после них возвращаемся в ROLLING, чтобы игрок мог бросить кубики;
+     *  - если в BUILDING — остаёмся в BUILDING.
+     *
+     * `undefined` оставлен для обратной совместимости со снапшотами,
+     * сохранёнными до введения этого поля (fallback = "BUILDING").
+     */
+    preTradePhase?: Phase;
   };
+  tradeInitiationLog?: Array<{ initiatorId: string; recipientId: string; at: number }>;
   /**
    * Контекст банкротства (когда `phase ∈ {BANKRUPTCY_LIQUIDATE, BANKRUPTCY_TRANSFER}`).
    */
@@ -528,18 +543,32 @@ export interface GameState {
 /**
  * TradeOffer — структура предложения обмена.
  *
- * Содержит массивы ID клеток и суммы денег, которые участники
- * обменивают друг с другом.
+ * Содержит массивы ID клеток, карточки выхода из тюрьмы и суммы денег,
+ * которые участники обменивают друг с другом. ВАЖНО: `fromCash` и `toCash`
+ * задаются как ПОЛОЖИТЕЛЬНЫЕ числа (без отрицательных значений) — в
+ * отличие от старой схемы, где «-X» означало «получить X». Теперь
+ * «получить» = «противоположная сторона отдаёт».
+ *
+ * Карточки выхода из тюрьмы передаются как количество (`jailCards`).
+ * Сервер сам уменьшает `jailCards` отправителя и увеличивает получателю.
+ *
+ * ВАЖНО (правила Монополии): в оффер можно включать ТОЛЬКО клетки
+ * без зданий (`houses === 0`). Заложенные клетки передавать МОЖНО —
+ * получатель принимает их со статусом `isMortgaged === true`.
  */
 export interface TradeOffer {
   /** ID клеток, которые отдаёт initiator. */
   fromProperties: number[];
-  /** Деньги, которые отдаёт initiator (может быть отрицательным = получить). */
+  /** Деньги, которые отдаёт initiator (≥ 0). */
   fromCash: number;
+  /** Карточки выхода из тюрьмы, которые отдаёт initiator (≥ 0). */
+  fromJailCards: number;
   /** ID клеток, которые initiator хочет получить. */
   toProperties: number[];
-  /** Деньги, которые initiator хочет получить. */
+  /** Деньги, которые initiator хочет получить (≥ 0). */
   toCash: number;
+  /** Карточки выхода из тюрьмы, которые initiator хочет получить (≥ 0). */
+  toJailCards: number;
 }
 
 export const DEFAULT_SETTINGS: GameSettings = {
@@ -552,6 +581,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
   tradingMaxCounterOffers: 3,
   auctionBidTimeoutMs: 30_000, // 30 сек на ход в аукционе
   tradingResponseTimeoutMs: 30_000,
+  tradingBotResponseTimeoutMs: 3500, // бот отвечает на торг быстро
   diceAnimationMs: 2000,
   moveStepMs: 450,
   auctionBotThinkMs: 1500,

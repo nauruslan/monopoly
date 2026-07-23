@@ -1,9 +1,10 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import type { GameState, Phase, Player, Card } from "@monopoly/shared";
+import type { GameState, Phase, Player, Card, GameEvent } from "@monopoly/shared";
 import { BOARD, DEFAULT_SETTINGS } from "@monopoly/shared";
 import { getSocket, setLastGameId } from "../composables/useSocket";
 import type { GameAction } from "@monopoly/shared";
+import { useTradeStore } from "./trade";
 
 /**
  * Игровой стор Pinia.
@@ -91,6 +92,7 @@ export const useGameStore = defineStore("game", () => {
     socket.off("game:error");
     socket.off("game:dice");
     socket.off("game:card");
+    socket.off("game:event");
 
     socket.on("game:state", (newState: GameState) => {
       console.log(
@@ -172,6 +174,18 @@ export const useGameStore = defineStore("game", () => {
       console.log(`[game.ts] game:card received: playerId=${payload.playerId}`);
     });
 
+    /**
+     * Подписка на события игрового журнала. Используется не только для
+     * `LogPanel`, но и для обновления UI-состояния торговли: когда сервер
+     * присылает `TRADE_COMPLETED` / `TRADE_REJECTED` / `TRADE_CANCELLED`,
+     * мы переключаем trade-store на экран уведомления о результате, чтобы
+     * пользователь увидел «Сделка состоялась!» / «Сделка отклонена» /
+     * «Сделка отменена» и подтвердил это нажатием «Принять».
+     */
+    socket.on("game:event", (ev: GameEvent) => {
+      handleGameEventForTrade(ev);
+    });
+
     socket.emit(
       "lobby:join",
       { gameId: gId },
@@ -184,6 +198,67 @@ export const useGameStore = defineStore("game", () => {
         }
       },
     );
+  }
+
+  /**
+   * Реакция на игровые события, относящиеся к торговле. Вызывается
+   * из `game:event`-обработчика.
+   *
+   * Показывает модальное окно уведомления с результатом сделки.
+   * Закрывается оно ТОЛЬКО через кнопку «Принять» в `TradeModal.vue`.
+   */
+  function handleGameEventForTrade(ev: GameEvent): void {
+    if (
+      ev.kind !== "TRADE_COMPLETED" &&
+      ev.kind !== "TRADE_REJECTED" &&
+      ev.kind !== "TRADE_CANCELLED"
+    ) {
+      return;
+    }
+    const trade = useTradeStore();
+    const myId = trade.myId;
+    const otherId = ev.payload?.otherPlayerId;
+    // Имя второй стороны для UI: пробуем взять из trade.recipient (если
+    // ещё не закрыли модалку), иначе по otherPlayerId, иначе "игрок".
+    let partnerName = "игрок";
+    if (otherId) {
+      const p = state.value.players.find((pl) => pl.id === otherId);
+      if (p) partnerName = p.displayName;
+    } else if (trade.recipient) {
+      partnerName = trade.recipient.displayName;
+    } else if (myId && ev.playerId && ev.playerId !== myId) {
+      const p = state.value.players.find((pl) => pl.id === ev.playerId);
+      if (p) partnerName = p.displayName;
+    }
+
+    // Сервер уже прислал готовое русское сообщение в `ev.message` —
+    // используем его как «детали», чтобы текст был консистентным с
+    // игровым журналом.
+    let status: "accepted" | "rejected" | "cancelled";
+    let title: string;
+    if (ev.kind === "TRADE_COMPLETED") {
+      status = "accepted";
+      // Если событие относится ко мне как инициатору — поздравляем,
+      // иначе — нейтральное уведомление.
+      if (ev.playerId === myId) {
+        title = "🎉 Сделка состоялась!";
+      } else {
+        title = "✅ Сделка состоялась";
+      }
+    } else if (ev.kind === "TRADE_REJECTED") {
+      status = "rejected";
+      title = "❌ Сделка отклонена";
+    } else {
+      status = "cancelled";
+      title = "🚫 Сделка отменена";
+    }
+
+    trade.setResult({
+      status,
+      partnerName,
+      title,
+      details: ev.message,
+    });
   }
 
   function createGameOnServer(playerNames: string[]) {

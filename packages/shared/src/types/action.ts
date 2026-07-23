@@ -86,6 +86,12 @@ export type GameAction =
   | { type: "TRADE_COUNTER"; offer: TradeOffer }
   /** Отменить торговлю (инициатор). */
   | { type: "TRADE_CANCEL" }
+  /**
+   * Заблокировать/разблокировать торговлю с конкретным игроком.
+   * Если target уже в `blocked_players` — он удаляется, иначе добавляется.
+   * Допустимо в любой не-interrupt фазе для текущего игрока.
+   */
+  | { type: "TRADE_TOGGLE_BLOCK"; targetId: string }
 
   // Interrupt: Bankruptcy (client-driven)
   /** На этапе BANKRUPTCY_LIQUIDATE: игрок решает, продавать ли дома/закладывать. */

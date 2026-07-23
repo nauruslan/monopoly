@@ -271,7 +271,14 @@ describe("BotService.decide", () => {
           initiatorId: "me",
           recipientId: "other",
           currentPartyId: "other",
-          offer: { fromProperties: [0], fromCash: 0, toProperties: [], toCash: 50 },
+          offer: {
+            fromProperties: [0],
+            fromCash: 0,
+            fromJailCards: 0,
+            toProperties: [],
+            toCash: 50,
+            toJailCards: 0,
+          },
           counterCount: 0,
         },
       });
@@ -282,8 +289,10 @@ describe("BotService.decide", () => {
       state.trade!.offer = {
         fromProperties: [], // me отдаёт 0
         fromCash: 50, // me даёт 50₽
+        fromJailCards: 0,
         toProperties: [1], // me просит cell 1 (200₽)
         toCash: 0,
+        toJailCards: 0,
       };
       // Пересчёт: other (recipient) получает fromProperties=[] (0) + fromCash=50 = 50.
       // other отдаёт toProperties=[1] (200) + toCash=0 = 200. 50/200 = 0.25 < 0.9 → REJECT.
@@ -306,7 +315,14 @@ describe("BotService.decide", () => {
           initiatorId: "other",
           recipientId: "me",
           currentPartyId: "me",
-          offer: { fromProperties: [0], fromCash: 100, toProperties: [1], toCash: 0 },
+          offer: {
+            fromProperties: [0],
+            fromCash: 100,
+            fromJailCards: 0,
+            toProperties: [1],
+            toCash: 0,
+            toJailCards: 0,
+          },
           counterCount: 0,
         },
       });
@@ -323,7 +339,14 @@ describe("BotService.decide", () => {
           initiatorId: "me",
           recipientId: "other",
           currentPartyId: "me",
-          offer: { fromProperties: [], fromCash: 0, toProperties: [], toCash: 0 },
+          offer: {
+            fromProperties: [],
+            fromCash: 0,
+            fromJailCards: 0,
+            toProperties: [],
+            toCash: 0,
+            toJailCards: 0,
+          },
           counterCount: 1,
         },
       });
@@ -392,5 +415,83 @@ describe("BotService.decide", () => {
     const me = makePlayer();
     const state = makeState({ phase: "IDLE", players: [me] });
     expect(bot.decide(me, state)).toBeNull();
+  });
+
+  // TRADE INITIATIVE (bot)
+  describe("Bot: инициация торговли (BUILDING)", () => {
+    it("не пытается инициировать, если игрок — человек", () => {
+      const me = makePlayer({ kind: "human", money: 1500 });
+      const state = makeState({ phase: "BUILDING", players: [me] });
+      const d = bot.decide(me, state);
+      expect(d).not.toEqual(expect.objectContaining({ kind: "TRADE_OFFER" }));
+    });
+
+    it("не пытается, если у бота мало денег (<200)", () => {
+      const me = makePlayer({ kind: "bot", money: 100 });
+      const state = makeState({ phase: "BUILDING", players: [me] });
+      const d = bot.decide(me, state);
+      expect(d).not.toEqual(expect.objectContaining({ kind: "TRADE_OFFER" }));
+    });
+
+    it("не пытается, если нет возможной цели", () => {
+      const me = makePlayer({ kind: "bot", money: 1500, properties: [] });
+      const other = makePlayer({ id: "other", properties: [] });
+      const state = makeState({ phase: "BUILDING", players: [me, other] });
+      const d = bot.decide(me, state);
+      expect(d).not.toEqual(expect.objectContaining({ kind: "TRADE_OFFER" }));
+    });
+
+    it("пытается купить клетку до монополии (TRADE_OFFER)", () => {
+      const board = makeMonopolyBoard(3, "brown");
+      const me = makePlayer({ id: "me-bot", kind: "bot", money: 1500 });
+      me.properties = [0, 1];
+      const other = makePlayer({ id: "other", money: 1500 });
+      other.properties = [2];
+      board[0].ownerId = "me-bot";
+      board[1].ownerId = "me-bot";
+      board[2].ownerId = "other";
+      const state = makeState({ phase: "BUILDING", players: [me, other], board });
+      const d = bot.decide(me, state) as Extract<BotDecision, { kind: "TRADE_OFFER" }>;
+      expect(d).toMatchObject({ kind: "TRADE_OFFER" });
+      expect(d.recipientId).toBe("other");
+      expect(d.offer.toProperties).toContain(2);
+    });
+
+    it("не пытается в одну и ту же группу игроку дважды за ход (tradeInitiationLog)", () => {
+      const board = makeMonopolyBoard(3, "brown");
+      const me = makePlayer({ id: "me-bot", kind: "bot", money: 1500 });
+      me.properties = [0, 1];
+      const other = makePlayer({ id: "other", money: 1500 });
+      other.properties = [2];
+      board[0].ownerId = "me-bot";
+      board[1].ownerId = "me-bot";
+      board[2].ownerId = "other";
+      const state = makeState({
+        phase: "BUILDING",
+        players: [me, other],
+        board,
+        tradeInitiationLog: [{ initiatorId: "me-bot", recipientId: "other", at: Date.now() }],
+      });
+      const d = bot.decide(me, state);
+      expect(d).not.toEqual(expect.objectContaining({ kind: "TRADE_OFFER" }));
+    });
+
+    it("уважает блокировку партнёра", () => {
+      const board = makeMonopolyBoard(3, "brown");
+      const me = makePlayer({ id: "me-bot", kind: "bot", money: 1500 });
+      me.properties = [0, 1];
+      const other = makePlayer({
+        id: "other",
+        money: 1500,
+        blockedPlayers: ["me-bot"],
+      });
+      other.properties = [2];
+      board[0].ownerId = "me-bot";
+      board[1].ownerId = "me-bot";
+      board[2].ownerId = "other";
+      const state = makeState({ phase: "BUILDING", players: [me, other], board });
+      const d = bot.decide(me, state);
+      expect(d).not.toEqual(expect.objectContaining({ kind: "TRADE_OFFER" }));
+    });
   });
 });

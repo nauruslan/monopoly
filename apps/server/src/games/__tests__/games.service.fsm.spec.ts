@@ -208,14 +208,24 @@ describe("GamesService.applyAction (FSM)", () => {
     await expect(act({ type: "UNMORTGAGE_PROPERTY", cellId: 0 })).rejects.toThrow();
   });
 
-  it("TRADE_OFFER в фазе ROLLING отклоняется (торги только в BUILDING)", async () => {
+  it("TRADE_OFFER в фазе ROLLING разрешается (GDD §1.1: торги в любой фазе хода)", async () => {
+    // По GDD §1.1 торговать можно в любой момент хода текущего игрока,
+    // включая ROLLING/DICE_ANIMATION/MOVE_ANIMATION. Пустой оффер в любом
+    // случае отклоняется валидацией в TradeService.startTrade, но не FSM.
     await expect(
       act({
         type: "TRADE_OFFER",
         recipientId: "p1",
-        offer: { fromProperties: [], fromCash: 0, toProperties: [], toCash: 0 },
+        offer: {
+          fromProperties: [],
+          fromCash: 0,
+          fromJailCards: 0,
+          toProperties: [],
+          toCash: 0,
+          toJailCards: 0,
+        },
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/Сделка не может быть пустой|Пустой оффер/i);
   });
 
   it("AUCTION_MAKE_BID в фазе ROLLING отклоняется", async () => {

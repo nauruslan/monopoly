@@ -3,6 +3,7 @@ defineProps<{
   canRoll: boolean;
   canBuy: boolean;
   canEndTurn: boolean;
+  canTrade: boolean;
   // флаг «выпал дубль, бросьте ещё раз» (правило дубля).
   mustRollAgain?: boolean;
 }>();
@@ -11,6 +12,7 @@ const emit = defineEmits<{
   (e: "roll"): void;
   (e: "buy"): void;
   (e: "end-turn"): void;
+  (e: "open-trade"): void;
 }>();
 </script>
 
@@ -25,6 +27,9 @@ const emit = defineEmits<{
         🎲 Бросить кубики
       </button>
       <button class="action-btn btn-buy" :disabled="!canBuy" @click="emit('buy')">🏠 Купить</button>
+      <button class="action-btn btn-trade" :disabled="!canTrade" @click="emit('open-trade')">
+        🤝 Торговля
+      </button>
       <button class="action-btn btn-end" :disabled="!canEndTurn" @click="emit('end-turn')">
         ✅ Завершить
       </button>
@@ -92,6 +97,11 @@ const emit = defineEmits<{
 
 .btn-buy {
   background: linear-gradient(135deg, var(--green), var(--accent));
+  color: #fff;
+}
+
+.btn-trade {
+  background: linear-gradient(135deg, #c8a955, #8b6914);
   color: #fff;
 }
 

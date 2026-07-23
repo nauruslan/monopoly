@@ -1473,8 +1473,11 @@ body {
   backdrop-filter: blur(30px);
   border-radius: 20px;
   padding: 28px;
-  max-width: 420px;
-  width: 92%;
+  max-width: min(720px, 96vw);
+  width: 96vw;
+  max-height: 90vh;
+  overflow: auto;
+  box-sizing: border-box;
   box-shadow:
     0 25px 80px rgba(0, 0, 0, 0.6),
     0 0 0 1px rgba(149, 114, 218, 0.2),

@@ -189,18 +189,43 @@ export function canBuyProperty(state: GameState, player: Player): boolean {
 /**
  * Может ли `player` сейчас инициировать обмен.
  *
- * Правила:
+ * Правила (GDD §1.1: торги в любой момент хода):
  *  - партия активна;
  *  - игрок не банкрот;
  *  - это ход именно этого игрока;
- *  - фаза = `BUILDING` (торговля разрешена только в фазе строительства);
- *  - игрок НЕ в тюрьме (правила Монополии запрещают торговлю в тюрьме).
+ *  - фаза партии — одна из «своих» Turn FSM (разрешено ТОРГОВАТЬ как ДО броска,
+ *    так и ПОСЛЕ — на этапе строительства, передвижения фишки и т.п.);
+ *  - ЗАПРЕЩЕНО во время анимации движения (`MOVE_ANIMATION`) и в interrupt-фазах
+ *    (аукцион, банкротство, чужая торговля, FINISHED, BOT_THINKING и т.п.);
+ *  - игрок НЕ в тюрьме (правилами Монополии торговля в тюрьме запрещена).
  */
 export function canTrade(state: GameState, player: Player): boolean {
   if (!baseChecksOk(state, player)) return false;
   if (!isCurrentPlayer(state, player)) return false;
-  if (state.phase !== "BUILDING") return false;
   if (player.inJail) return false;
+
+  // Разрешённые фазы — все «свои» фазы хода, плюс финальные/глобальные
+  // терминальные фазы явно запрещены.
+  const allowed: ReadonlyArray<GameState["phase"]> = [
+    "START_TURN",
+    "ROLLING",
+    "DICE_ANIMATION",
+    "RESOLVING_LANDING",
+    "PAY_RENT",
+    "TAX_PAYMENT",
+    "BUY_DECISION",
+    "CARD_REVEAL",
+    "CARD_EFFECT",
+    "BUILDING",
+    "JAIL_DECISION",
+    "END_TURN",
+  ];
+  if (!allowed.includes(state.phase)) return false;
+
+  // Анимация движения фишки — единственная «своя» фаза, где мы НЕ хотим
+  // открывать диалог торговли (иначе клиент словит десинхронизацию).
+  if (state.moveAnimation) return false;
+
   return true;
 }
 

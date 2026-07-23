@@ -35,6 +35,11 @@ export type GameEventKind =
   | "AUCTION_PASS"
   | "AUCTION_WON"
   | "AUCTION_UNSOLD"
+  | "TRADE_STARTED"
+  | "TRADE_COUNTER"
+  | "TRADE_COMPLETED"
+  | "TRADE_REJECTED"
+  | "TRADE_CANCELLED"
   | "GAME_OVER";
 
 export interface GameEvent {
@@ -64,5 +69,9 @@ export interface GameEvent {
     cellId?: number;
     /** Для AUCTION_PASS — был ли это авто-пас по таймауту. */
     timeout?: boolean;
+    /** Для TRADE_* — ID второй стороны сделки (получатель/инициатор). */
+    otherPlayerId?: string;
+    /** Для TRADE_COMPLETED — сумма, автоматически списанная в счёт долга. */
+    autoDebtCovered?: number;
   };
 }

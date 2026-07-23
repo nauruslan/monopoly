@@ -150,4 +150,93 @@ describe("TradeService", () => {
       expect(() => svc.executeTrade(state)).not.toThrow();
     });
   });
+
+  describe("addCashToPlayer (auto debt)", () => {
+    it("автоматически погашает долг при поступлении денег", () => {
+      const p = makePlayer({ money: 100, currentDebt: 300, creditorId: "bank" });
+      const { debtCovered } = TradeService.addCashToPlayer(p, 500);
+      expect(debtCovered).toBe(300);
+      expect(p.money).toBe(300); // 100 + 500 - 300
+      expect(p.currentDebt).toBe(0);
+      expect(p.creditorId).toBeNull();
+    });
+
+    it("частично погашает долг, если денег меньше долга", () => {
+      const p = makePlayer({ money: 50, currentDebt: 200, creditorId: "bank" });
+      const { debtCovered } = TradeService.addCashToPlayer(p, 100);
+      expect(debtCovered).toBe(100);
+      expect(p.money).toBe(50); // 50 + 100 - 100
+      expect(p.currentDebt).toBe(100);
+      expect(p.creditorId).toBe("bank");
+    });
+
+    it("не трагается на долг, если его нет", () => {
+      const p = makePlayer({ money: 100 });
+      const { debtCovered } = TradeService.addCashToPlayer(p, 50);
+      expect(debtCovered).toBe(0);
+      expect(p.money).toBe(150);
+    });
+  });
+
+  describe("toggleBlock", () => {
+    it("добавляет и удаляет игрока в блоклист", () => {
+      const me = makePlayer({ id: "me" });
+      const other = makePlayer({ id: "other" });
+      const state = makeState({ players: [me, other] });
+      expect(svc.toggleBlock(state, me, "other")).toBe(true);
+      expect(me.blockedPlayers).toContain("other");
+      expect(svc.toggleBlock(state, me, "other")).toBe(false);
+      expect(me.blockedPlayers).not.toContain("other");
+    });
+
+    it("бросает ошибку для самого себя", () => {
+      const me = makePlayer({ id: "me" });
+      const state = makeState({ players: [me] });
+      expect(() => svc.toggleBlock(state, me, "me")).toThrow();
+    });
+  });
+
+  describe("getTradableProperties", () => {
+    it("возвращает только клетки без зданий", () => {
+      const board = makeMonopolyBoard(3);
+      const me = makePlayer({ id: "me", properties: [0, 1, 2] });
+      board[0]!.ownerId = "me";
+      board[1]!.ownerId = "me";
+      board[2]!.ownerId = "me";
+      board[1]!.houses = 2; // с домом — не торгуется
+      const state = makeState({ players: [me], board });
+      const tradable = svc.getTradableProperties(me, state);
+      expect(tradable).toContain(0);
+      expect(tradable).toContain(2);
+      expect(tradable).not.toContain(1);
+    });
+  });
+
+  describe("executeTrade (debt auto-cover)", () => {
+    it("при получении денег долг автоматически погашается", () => {
+      const p0 = makePlayer({ id: "p0", money: 0, properties: [0], currentDebt: 100, creditorId: "bank" });
+      const p1 = makePlayer({ id: "p1", money: 500, properties: [1] });
+      const board = makeMonopolyBoard(3);
+      board[0]!.ownerId = "p0";
+      board[1]!.ownerId = "p1";
+      const state = makeState({ players: [p0, p1], board });
+      svc.startTrade(
+        state,
+        p0,
+        "p1",
+        makeTradeOffer({
+          fromProperties: [0],
+          fromCash: 0,
+          toProperties: [1],
+          toCash: 200,
+        }),
+      );
+      svc.executeTrade(state);
+      // p0 получил 200, но 100 идёт на погашение долга
+      expect(p0.money).toBe(100);
+      expect(p0.currentDebt).toBe(0);
+      expect(p0.creditorId).toBeNull();
+      expect(p0.properties).toEqual([1]);
+    });
+  });
 });

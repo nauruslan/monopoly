@@ -18,6 +18,7 @@ import SettingsPanel from "../components/SettingsPanel.vue";
 import LogPanel from "../components/LogPanel.vue";
 import { useAuthStore } from "../stores/auth";
 import { useGameStore } from "../stores/game";
+import { useTradeStore } from "../stores/trade";
 import { useAuctionStore } from "../stores/auction";
 import { useSettingsStore } from "../stores/settings";
 import { useSocket, disconnectSocket } from "../composables/useSocket";
@@ -141,6 +142,20 @@ const canEndTurn = computed(() => {
   // Если после события игрок ОБЯЗАН бросить ещё раз (правило дубля) —
   // `END_TURN` недопустим, сервер сам переключит фазу в ROLLING.
   if (currentPlayer.value?.mustRollAgain) return false;
+  return true;
+});
+
+// Торговля доступна в любой момент хода активного игрока (GDD §1.1).
+// Запрещаем только во время interrupt-фаз, анимации броска/движения и в тюрьме.
+const canTrade = computed(() => {
+  if (!isMyTurn.value) return false;
+  if (currentPlayer.value?.inJail) return false;
+  // Идёт анимация кубиков/движения — нельзя прерывать.
+  if (diceRolling.value) return false;
+  if (state.value.moveAnimation) return false;
+  // Запрещаем открывать, если активна другая interrupt-фаза (аукцион и т.п.).
+  if (showAuctionModal.value) return false;
+  if (showTradeModal.value) return false;
   return true;
 });
 const mustRollAgain = computed(() => currentPlayer.value?.mustRollAgain === true);
@@ -707,6 +722,13 @@ function onBuy() {
   if (!canBuy.value) return;
   showBuyModal.value = true;
 }
+function onOpenTrade() {
+  if (!canTrade.value) return;
+  // Открываем локальный store-экран (экран 1 — выбор партнёра).
+  // Если уже идёт активный обмен с сервера, модалка показывается через showTradeModal.
+  useTradeStore().openPartnerSelection();
+}
+
 function onConfirmBuy() {
   showBuyModal.value = false;
   dispatchAction({ type: "BUY_PROPERTY" });
@@ -764,7 +786,9 @@ function logout() {
             :can-roll="canRoll && !showAuctionModal"
             :can-buy="canBuy && !showAuctionModal"
             :can-end-turn="canEndTurn && !showAuctionModal"
+            :can-trade="canTrade && !showAuctionModal"
             :must-roll-again="mustRollAgain"
+            @open-trade="onOpenTrade"
             @roll="onRoll"
             @buy="onBuy"
             @end-turn="onEndTurn"
@@ -827,17 +851,7 @@ function logout() {
         @close="showJailModal = false"
       />
 
-      <TradeModal
-        :show="showTradeModal"
-        :state="state"
-        :my-player-id="myPlayerId"
-        :is-confirm-phase="state.phase === 'TRADING_CONFIRM'"
-        @accept="onTradeAccept"
-        @reject="onTradeReject"
-        @counter="onTradeCounter"
-        @cancel="onTradeCancel"
-        @close="onTradeCancel"
-      />
+      <TradeModal />
 
       <CellTooltip :cell="hoveredCell" :owner="cellOwner" :x="tooltipPos.x" :y="tooltipPos.y" />
 
@@ -847,7 +861,6 @@ function logout() {
 </template>
 
 <style scoped>
-/* Полная блокировка приложения во время аукциона. */
 .app-backdrop {
   position: fixed;
   inset: 0;
@@ -862,7 +875,6 @@ function logout() {
   filter: grayscale(0.2) brightness(0.85);
 }
 .app-locked[inert] {
-  /* fallback: блокируем pointer events */
   pointer-events: none;
 }
 </style>
@@ -874,7 +886,6 @@ function logout() {
   margin: 0 auto;
 }
 
-/* Внутри .game-container: доска слева (60%), панели справа (40%). */
 .layout {
   display: flex;
   flex-direction: row;
@@ -901,7 +912,6 @@ function logout() {
   gap: 16px;
   align-items: stretch;
 }
-/* Каждая панель внутри .sidebar растягивается на всю ширину контейнера. */
 .sidebar > * {
   width: 100%;
   box-sizing: border-box;

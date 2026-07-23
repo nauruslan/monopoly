@@ -99,8 +99,10 @@ export function makeTradeOffer(overrides: Partial<TradeOffer> = {}): TradeOffer 
   return {
     fromProperties: overrides.fromProperties ?? [],
     fromCash: overrides.fromCash ?? 0,
+    fromJailCards: overrides.fromJailCards ?? 0,
     toProperties: overrides.toProperties ?? [],
     toCash: overrides.toCash ?? 0,
+    toJailCards: overrides.toJailCards ?? 0,
   };
 }
 

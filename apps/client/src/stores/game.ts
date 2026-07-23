@@ -306,6 +306,12 @@ export const useGameStore = defineStore("game", () => {
       }) => {
         if (!response.ok) {
           console.error("Action failed:", response.error);
+          // Пробрасываем ошибку в соответствующий UI-стор по типу действия,
+          // чтобы пользователь увидел сообщение в модалке.
+          if (action.type === "MORTGAGE_PROPERTY" || action.type === "UNMORTGAGE_PROPERTY") {
+            // Ленивый импорт — избегаем циклической зависимости.
+            import("./mortgage").then((m) => m.useMortgageStore().setError(response.error ?? null));
+          }
           return;
         }
       },

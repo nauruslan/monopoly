@@ -40,6 +40,8 @@ export type GameEventKind =
   | "TRADE_COMPLETED"
   | "TRADE_REJECTED"
   | "TRADE_CANCELLED"
+  | "PROPERTY_MORTGAGED"
+  | "PROPERTY_UNMORTGAGED"
   | "GAME_OVER";
 
 export interface GameEvent {
@@ -73,5 +75,11 @@ export interface GameEvent {
     otherPlayerId?: string;
     /** Для TRADE_COMPLETED — сумма, автоматически списанная в счёт долга. */
     autoDebtCovered?: number;
+    /**
+     * Для PROPERTY_MORTGAGED / PROPERTY_UNMORTGAGED — стоимость операции:
+     *  - MORTGAGED    — сумма, зачисленная игроку (mortgageValue);
+     *  - UNMORTGAGED  — сумма, списанная с игрока (mortgageValue × 1.1).
+     */
+    mortgageAmount?: number;
   };
 }

@@ -14,11 +14,13 @@ import JailModal from "../components/modals/JailModal.vue";
 import GameOverModal from "../components/modals/GameOverModal.vue";
 import AuctionModal from "../components/modals/AuctionModal.vue";
 import TradeModal from "../components/modals/TradeModal.vue";
+import MortgageModal from "../components/modals/MortgageModal.vue";
 import SettingsPanel from "../components/SettingsPanel.vue";
 import LogPanel from "../components/LogPanel.vue";
 import { useAuthStore } from "../stores/auth";
 import { useGameStore } from "../stores/game";
 import { useTradeStore } from "../stores/trade";
+import { useMortgageStore } from "../stores/mortgage";
 import { useAuctionStore } from "../stores/auction";
 import { useSettingsStore } from "../stores/settings";
 import { useSocket, disconnectSocket } from "../composables/useSocket";
@@ -159,6 +161,48 @@ const canTrade = computed(() => {
   return true;
 });
 const mustRollAgain = computed(() => currentPlayer.value?.mustRollAgain === true);
+
+// Залог/выкуп по правилам Монополии возможен В ЛЮБОЙ «своей» фазе
+// хода — аналогично торговле (см. canTrade). Это удобно: если
+// игрок только что приземлился на новую клетку и хочет сразу её
+// заложить — он не обязан ждать фазы BUILDING.
+//
+// Запрещаем только:
+//   - чужой ход;
+//   - тюрьму (правилами запрещены любые операции с недвижимостью);
+//   - interrupt-фазы (аукцион, торговля, банкротство, FINISHED, ...);
+//   - анимации (бросок, движение фишки).
+//
+// Дополнительно требуется, чтобы хотя бы одна клетка была доступна
+// для операции — иначе модалка будет пустой, и кнопка бесполезна.
+const canMortgage = computed(() => {
+  if (!isMyTurn.value) return false;
+  if (currentPlayer.value?.inJail) return false;
+  if (diceRolling.value) return false;
+  if (state.value.moveAnimation) return false;
+  if (showAuctionModal.value) return false;
+  if (showTradeModal.value) return false;
+  // Разрешённые фазы — все «свои» фазы хода (тот же список, что и в
+  // canTrade на сервере — apps/server/src/games/turn-permissions.ts).
+  const phase = state.value.phase;
+  const allowed: ReadonlyArray<Phase> = [
+    "START_TURN",
+    "ROLLING",
+    "DICE_ANIMATION",
+    "RESOLVING_LANDING",
+    "PAY_RENT",
+    "TAX_PAYMENT",
+    "BUY_DECISION",
+    "CARD_REVEAL",
+    "CARD_EFFECT",
+    "BUILDING",
+    "JAIL_DECISION",
+    "END_TURN",
+  ];
+  if (!allowed.includes(phase)) return false;
+  const m = useMortgageStore();
+  return m.mortgageableProperties.length + m.unmortgageableProperties.length > 0;
+});
 
 // Модалки
 const showBuyModal = ref(false);
@@ -729,6 +773,11 @@ function onOpenTrade() {
   useTradeStore().openPartnerSelection();
 }
 
+function onOpenMortgage() {
+  if (!canMortgage.value) return;
+  useMortgageStore().open();
+}
+
 function onConfirmBuy() {
   showBuyModal.value = false;
   dispatchAction({ type: "BUY_PROPERTY" });
@@ -787,8 +836,10 @@ function logout() {
             :can-buy="canBuy && !showAuctionModal"
             :can-end-turn="canEndTurn && !showAuctionModal"
             :can-trade="canTrade && !showAuctionModal"
+            :can-mortgage="canMortgage && !showAuctionModal"
             :must-roll-again="mustRollAgain"
             @open-trade="onOpenTrade"
+            @open-mortgage="onOpenMortgage"
             @roll="onRoll"
             @buy="onBuy"
             @end-turn="onEndTurn"
@@ -797,13 +848,8 @@ function logout() {
         </aside>
       </div>
 
-      <!--
-        Backdrop + аукционная модалка рендерятся ВСЕГДА, когда
-        идёт аукцион. Backdrop не блокирует клики по модалке
-        (модалка вынесена наружу .app-locked и находится на
-        более высоком z-index).
-      -->
       <div v-if="showAuctionModal" class="app-backdrop" aria-hidden="true" />
+
       <Teleport v-if="showAuctionModal" to="body">
         <AuctionModal />
       </Teleport>
@@ -852,6 +898,8 @@ function logout() {
       />
 
       <TradeModal />
+
+      <MortgageModal />
 
       <CellTooltip :cell="hoveredCell" :owner="cellOwner" :x="tooltipPos.x" :y="tooltipPos.y" />
 

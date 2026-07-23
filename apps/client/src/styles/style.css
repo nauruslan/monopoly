@@ -511,7 +511,7 @@ body {
   right: 0;
   height: 6px;
   border-radius: var(--radius-xs) var(--radius-xs) 0 0;
-  box-shadow: 0 2px 8px currentColor;
+  box-shadow: none;
 }
 
 .cell .cell-name {
@@ -1703,7 +1703,7 @@ body {
   height: 4px;
   border-radius: 2px;
   margin-bottom: 8px;
-  box-shadow: 0 2px 8px currentColor;
+  box-shadow: none;
 }
 
 .tooltip-name {

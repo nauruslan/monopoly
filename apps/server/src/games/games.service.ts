@@ -29,6 +29,7 @@ import { BankruptcyService } from "./handlers/bankruptcy.service";
 import { BotService, type BotDecision } from "./bots/bot.service";
 import { AuctionService, type AuctionEvent } from "./handlers/auction.service";
 import { TradeService } from "./handlers/trade.service";
+import { MortgageService } from "./handlers/mortgage.service";
 import { canRollDice, canEndTurn, isCurrentPlayer } from "./turn-permissions";
 import type { GameEventKind } from "@monopoly/shared";
 import { randomUUID } from "crypto";
@@ -107,6 +108,8 @@ export class GamesService {
     private readonly auction: AuctionService,
     @Inject(forwardRef(() => TradeService))
     private readonly trade: TradeService,
+    @Inject(forwardRef(() => MortgageService))
+    private readonly mortgageSvc: MortgageService,
   ) {
     if (!this.rentCalc) console.error("[GamesService] RentCalculator не заинжектирован!");
     if (!this.jail) console.error("[GamesService] JailHandlerService не заинжектирован!");
@@ -492,10 +495,19 @@ export class GamesService {
     this.logger.log(
       `[dispatch] entered: action=${action.type} currentPhase=${state.phase} playerPos=${player.position}`,
     );
-    // Торговля и блокировка партнёра доступны на любом шаге хода текущего игрока
-    // (GDD §1.1). Обрабатываем их ДО выбора фазы, чтобы не отказывать игроку
-    // в фазе ROLLING, DICE_ANIMATION, MOVE_ANIMATION и т.п.
-    if (action.type === "TRADE_OFFER" || action.type === "TRADE_TOGGLE_BLOCK") {
+    // Действия, доступные на ЛЮБОМ шаге хода текущего игрока (кроме
+    // interrupt-фаз: аукцион, торг, банкротство, тюрьма, FINISHED, ...):
+    //  - TRADE_OFFER / TRADE_TOGGLE_BLOCK — торговля (GDD §1.1);
+    //  - MORTGAGE_PROPERTY / UNMORTGAGE_PROPERTY — залог/выкуп участка.
+    // Обрабатываем их ДО выбора фазы, чтобы не отказывать игроку
+    // в фазе ROLLING, DICE_ANIMATION, MOVE_ANIMATION и т.п. — он
+    // может, например, прикупить клетку после хода и сразу заложить.
+    if (
+      action.type === "TRADE_OFFER" ||
+      action.type === "TRADE_TOGGLE_BLOCK" ||
+      action.type === "MORTGAGE_PROPERTY" ||
+      action.type === "UNMORTGAGE_PROPERTY"
+    ) {
       return this.handleBuilding(state, player, action);
     }
     switch (state.phase) {
@@ -1638,28 +1650,33 @@ export class GamesService {
       }
 
       case "MORTGAGE_PROPERTY": {
-        const cell = state.board[action.cellId];
-        if (!cell) throw new NotFoundException("Клетка не найдена");
-        if (cell.ownerId !== player.id) throw new ForbiddenException("Это не ваша клетка");
-        if (cell.isMortgaged) throw new ForbiddenException("Уже заложена");
-        if (cell.houses > 0) throw new ForbiddenException("Сначала продайте дома");
-        if (cell.mortgageValue === undefined) throw new BadRequestException("Нельзя заложить");
-        player.money += cell.mortgageValue;
-        cell.isMortgaged = true;
-        return {};
+        // Используем MortgageService, который:
+        //  - проверяет правило "нет домов в цветовой группе" (canMortgage);
+        //  - зачисляет mortgageValue игроку;
+        //  - выставляет isMortgaged = true.
+        const mortgageAmount = this.mortgageSvc.mortgage(state, player, action.cellId);
+        return {
+          event: this.makeEvent("PROPERTY_MORTGAGED", player, {
+            message: `🏦 ${player.displayName} заложил(а) участок и получил(а) $${mortgageAmount}`,
+            type: "buy",
+            payload: { cellId: action.cellId, mortgageAmount },
+          }),
+        };
       }
 
       case "UNMORTGAGE_PROPERTY": {
-        const cell = state.board[action.cellId];
-        if (!cell) throw new NotFoundException("Клетка не найдена");
-        if (cell.ownerId !== player.id) throw new ForbiddenException("Это не ваша клетка");
-        if (!cell.isMortgaged) throw new ForbiddenException("Не заложена");
-        if (cell.mortgageValue === undefined) throw new BadRequestException("Нельзя выкупить");
-        const cost = Math.ceil(cell.mortgageValue * 1.1);
-        if (player.money < cost) throw new ForbiddenException("Недостаточно денег");
-        player.money -= cost;
-        cell.isMortgaged = false;
-        return {};
+        // Используем MortgageService, который:
+        //  - проверяет, что клетка в залоге и хватает денег;
+        //  - списывает mortgageValue * 1.1 (округлено вверх);
+        //  - выставляет isMortgaged = false.
+        const unmortgageAmount = this.mortgageSvc.unmortgage(state, player, action.cellId);
+        return {
+          event: this.makeEvent("PROPERTY_UNMORTGAGED", player, {
+            message: `💰 ${player.displayName} выкупил(а) участок за $${unmortgageAmount}`,
+            type: "buy",
+            payload: { cellId: action.cellId, mortgageAmount: unmortgageAmount },
+          }),
+        };
       }
 
       case "TRADE_OFFER": {

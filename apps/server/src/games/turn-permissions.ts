@@ -1,4 +1,4 @@
-import type { GameState, Player } from "@monopoly/shared";
+import type { GameState, Player, Phase } from "@monopoly/shared";
 
 /**
  * Утилиты проверки прав игрока на игровые действия.
@@ -244,4 +244,46 @@ export function mustRollDiceNow(state: GameState, player: Player): boolean {
   if (state.phase !== "ROLLING") return false;
   if (player.inJail) return false;
   return player.mustRollAgain === true;
+}
+
+/**
+ * Базовая проверка фазы для залога/выкупа.
+ *
+ * Залог и выкуп недвижимости по правилам Монополии возможны ТОЛЬКО
+ * в фазе `BUILDING` (когда ход игрока и он не обязан ничего делать,
+ * кроме строительства/торговли/залога/выкупа/завершения хода).
+ *
+ * Это согласовано с логикой `handleBuilding` в GamesService —
+ * в любой другой фазе действие MORTGAGE_PROPERTY/UNMORTGAGE_PROPERTY
+ * будет отклонено сервером.
+ */
+function isMortgagePhase(state: GameState, player: Player): boolean {
+  if (!baseChecksOk(state, player)) return false;
+  if (!isCurrentPlayer(state, player)) return false;
+  if (player.inJail) return false;
+  if (state.phase !== "BUILDING") return false;
+  return true;
+}
+
+/**
+ * Может ли `player` сейчас заложить/выкупить недвижимость (открыть модалку).
+ *
+ * Возвращает `true` если:
+ *  - базовые проверки пройдены (партия активна, не банкрот);
+ *  - это ход этого игрока;
+ *  - фаза = `BUILDING`;
+ *  - игрок не в тюрьме;
+ *  - у игрока есть хотя бы одна клетка, которую МОЖНО заложить ИЛИ выкупить.
+ *
+ * Используется UI (`ActionsPanel.vue`) для активности кнопки «Залог/Выкуп»,
+ * чтобы игрок не открывал пустую модалку.
+ */
+export function canManageMortgage(
+  state: GameState,
+  player: Player,
+  mortgageableCount: number,
+  unmortgageableCount: number,
+): boolean {
+  if (!isMortgagePhase(state, player)) return false;
+  return mortgageableCount + unmortgageableCount > 0;
 }

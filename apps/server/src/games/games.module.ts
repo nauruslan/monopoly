@@ -7,6 +7,7 @@ import { RentCalculator } from "./handlers/rent-calculator";
 import { BankruptcyService } from "./handlers/bankruptcy.service";
 import { AuctionService } from "./handlers/auction.service";
 import { TradeService } from "./handlers/trade.service";
+import { MortgageService } from "./handlers/mortgage.service";
 import { BotService } from "./bots/bot.service";
 import { GamesSaveController } from "./games-save.controller";
 import { GameGateway } from "../gateways/game.gateway";
@@ -41,6 +42,7 @@ import { AuthModule } from "../auth/auth.module";
     BankruptcyService,
     AuctionService,
     TradeService,
+    MortgageService,
     GameGateway,
   ],
   exports: [
@@ -55,6 +57,7 @@ import { AuthModule } from "../auth/auth.module";
     BankruptcyService,
     AuctionService,
     TradeService,
+    MortgageService,
   ],
 })
 export class GamesModule {}

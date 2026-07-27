@@ -1,13 +1,23 @@
 <script setup lang="ts">
 defineProps<{
   canRoll: boolean;
-  canBuy: boolean;
+  /**
+   * Можно ли сейчас открыть модалку «Строить».
+   * Объединяет в себе:
+   *  - покупку/улучшение домов и отелей;
+   *  - продажу домов;
+   *  - залог/выкуп недвижимости.
+   * Зависит от фазы BUILDING + наличия хотя бы одной клетки,
+   * к которой применима хотя бы одна операция.
+   */
+  canBuild: boolean;
   canEndTurn: boolean;
   canTrade: boolean;
   /**
-   * Можно ли сейчас открыть модалку «Залог/Выкуп».
-   * Зависит от фазы BUILDING + наличия хотя бы одной клетки,
-   * которую можно заложить или выкупить.
+   * Можно ли сейчас открыть модалку «Залог/Выкуп» (старая, отдельная модалка).
+   * Сохранена для совместимости: в новом UI модалка «Строить» уже включает
+   * залог/выкуп, но если BuildModal по какой-то причине недоступен,
+   * пользователь всё ещё может заложить/выкупить через MortgageModal.
    */
   canMortgage: boolean;
   // флаг «выпал дубль, бросьте ещё раз» (правило дубля).
@@ -16,7 +26,7 @@ defineProps<{
 
 const emit = defineEmits<{
   (e: "roll"): void;
-  (e: "buy"): void;
+  (e: "open-build"): void;
   (e: "end-turn"): void;
   (e: "open-trade"): void;
   (e: "open-mortgage"): void;
@@ -33,7 +43,18 @@ const emit = defineEmits<{
       <button class="action-btn btn-roll" :disabled="!canRoll" @click="emit('roll')">
         🎲 Бросить кубики
       </button>
-      <button class="action-btn btn-buy" :disabled="!canBuy" @click="emit('buy')">🏠 Купить</button>
+      <button
+        class="action-btn btn-build"
+        :disabled="!canBuild"
+        :title="
+          canBuild
+            ? 'Открыть модалку «Строить» (дома, отели, залог, выкуп)'
+            : 'Нет объектов для строительства/продажи/залога/выкупа'
+        "
+        @click="emit('open-build')"
+      >
+        🏗️ Строить
+      </button>
       <button class="action-btn btn-trade" :disabled="!canTrade" @click="emit('open-trade')">
         🤝 Торговля
       </button>
@@ -112,8 +133,8 @@ const emit = defineEmits<{
   font-size: 13px;
 }
 
-.btn-buy {
-  background: linear-gradient(135deg, var(--green), var(--accent));
+.btn-build {
+  background: linear-gradient(135deg, #2ecc71, #16a085);
   color: #fff;
 }
 

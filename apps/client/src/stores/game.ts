@@ -106,6 +106,22 @@ export const useGameStore = defineStore("game", () => {
       if (newState.phase !== "CARD_REVEAL" && newState.phase !== "CARD_EFFECT") {
         cardPendingConfirm.value = false;
       }
+      // UX-фаза BUILDING_PHASE: автооткрытие модалки «Строить» (только
+      // если мы — текущий игрок-человек, который её открыл). Делаем
+      // через lazy import, чтобы не было циклической зависимости.
+      if (newState.phase === "BUILDING_PHASE" && previousPhase !== "BUILDING_PHASE") {
+        import("./build").then((m) => {
+          const build = m.useBuildStore();
+          if (!build.isOpen) build.open();
+        });
+      }
+      // При выходе из фазы — закрываем модалку, если она ещё открыта.
+      if (previousPhase === "BUILDING_PHASE" && newState.phase !== "BUILDING_PHASE") {
+        import("./build").then((m) => {
+          const build = m.useBuildStore();
+          if (build.isOpen) build.close();
+        });
+      }
       // восстановление значений кубиков при reconnect/reload.
       // Сервер хранит «последний бросок» в `state.lastDice`. Если игрок
       // перезагрузил страницу прямо во время DICE_ANIMATION (или только

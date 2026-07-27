@@ -287,3 +287,67 @@ export function canManageMortgage(
   if (!isMortgagePhase(state, player)) return false;
   return mortgageableCount + unmortgageableCount > 0;
 }
+
+/**
+ * Может ли `player` сейчас открыть модалку строительства
+ * (фаза `OPEN_BUILDING_PHASE` → переход в `BUILDING_PHASE`).
+ *
+ * Правила Монополии разрешают строительство / снос в любой «своей»
+ * Turn-фазе — точно так же, как и торговлю. Игрок может сразу
+ * после приземления на новую клетку открыть меню и построить
+ * дом (если это его монополия), не ожидая фазы BUILDING.
+ *
+ * Сервер уже поддерживает эту логику: в `GamesService.dispatch`
+ * `OPEN_BUILDING_PHASE` маршрутизируется ДО switch по фазе
+ * (как и `TRADE_OFFER`), и `handleBuildingPhase` не делает проверки
+ * текущей фазы.
+ *
+ * ВАЖНО: залог/выкуп — это ОТДЕЛЬНАЯ операция с отдельной модалкой
+ * (`MortgageModal.vue`) и отдельной кнопкой в ActionsPanel. Здесь
+ * мы проверяем ТОЛЬКО build/sell. Залог/выкуп имеет свои
+ * `canManageMortgage` (см. выше).
+ *
+ * Условия — зеркалят `canTrade` (та же политика «в любой своей
+ * Turn-фазе» — см. {@link canTrade} и список `allowed` ниже),
+ * плюс требование «есть хотя бы один объект, на котором можно
+ * построить ИЛИ продать». `mustRollAgain` НЕ блокирует — точно
+ * так же, как и `canTrade` (GDD §1.1).
+ *
+ * Используется UI (`ActionsPanel.vue`) для активности кнопки
+ * «Строить». Список разрешённых фаз ДОЛЖЕН совпадать с `canTrade`,
+ * чтобы кнопки СТРОИТЬ и ТОРГОВЛЯ были активны в одни и те же
+ * моменты (GDD §1.1).
+ */
+export function canOpenBuildingPhase(
+  state: GameState,
+  player: Player,
+  buildableCount: number,
+  sellableCount: number,
+): boolean {
+  if (!baseChecksOk(state, player)) return false;
+  if (!isCurrentPlayer(state, player)) return false;
+  if (player.inJail) return false;
+  if (state.moveAnimation) return false;
+
+  // Те же «свои» Turn-фазы, что и в canTrade. Если партия сейчас
+  // в interrupt-фазе (аукцион, банкротство, BOT_THINKING, FINISHED,
+  // BUILDING_PHASE и т.п.) — кнопка неактивна.
+  const allowed: ReadonlyArray<GameState["phase"]> = [
+    "START_TURN",
+    "ROLLING",
+    "DICE_ANIMATION",
+    "RESOLVING_LANDING",
+    "PAY_RENT",
+    "TAX_PAYMENT",
+    "BUY_DECISION",
+    "CARD_REVEAL",
+    "CARD_EFFECT",
+    "BUILDING",
+    "JAIL_DECISION",
+    "END_TURN",
+  ];
+  if (!allowed.includes(state.phase)) return false;
+
+  // Нет смысла открывать пустую модалку — ни одной доступной операции.
+  return buildableCount + sellableCount > 0;
+}

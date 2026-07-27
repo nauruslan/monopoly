@@ -105,7 +105,7 @@ describe("BotService.decide", () => {
 
   // ─────────────────────── BUILDING ───────────────────────
   describe("BUILDING phase", () => {
-    it("строит дом, если есть монополия и деньги", () => {
+    it("OPEN_BUILDING_PHASE, если есть монополия и деньги (бот открывает фазу строительства)", () => {
       const board = makeMonopolyBoard(3);
       const player = makePlayer({ money: 1500, properties: [0, 1, 2] });
       board[0].ownerId = player.id;
@@ -116,11 +116,12 @@ describe("BotService.decide", () => {
         players: [player],
         board,
       });
-      const decision = bot.decide(player, state);
-      expect(decision).toMatchObject({ kind: "BUILD_HOUSE", cellId: expect.any(Number) });
+      // В фазе BUILDING бот сначала открывает под-фазу строительства,
+      // а конкретные действия (BUILD_HOUSE/UNMORTGAGE) выполняет уже в BUILDING_PHASE.
+      expect(bot.decide(player, state)).toBe("OPEN_BUILDING_PHASE");
     });
 
-    it("UNMORTGAGE, если монополия есть, но дома все по 5, и есть заложенное", () => {
+    it("OPEN_BUILDING_PHASE, если монополия есть, но дома все по 5, и есть заложенное", () => {
       const board = makeMonopolyBoard(3);
       const player = makePlayer({ money: 1500, properties: [0, 1, 2] });
       board[0].ownerId = player.id;
@@ -136,8 +137,7 @@ describe("BotService.decide", () => {
         players: [player],
         board,
       });
-      const decision = bot.decide(player, state);
-      expect(decision).toMatchObject({ kind: "UNMORTGAGE", cellId: expect.any(Number) });
+      expect(bot.decide(player, state)).toBe("OPEN_BUILDING_PHASE");
     });
 
     it("END_TURN, если строить нечего", () => {

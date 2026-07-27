@@ -16,6 +16,11 @@ import type { Card } from "../data/cards";
  * Эти 4 типа формируют ОСНОВНОЙ лог аукциона в боковой панели,
  * а полный лог (со всеми нюансами) рендерится в самой модалке аукциона
  * из `state.auction.actionLog`.
+ *
+ * Дополнительно для строительства (BUILD/SELL):
+ *  - `HOUSE_BUILT`  — игрок построил дом/отель;
+ *  - `HOUSE_SOLD`   — игрок продал дом/отель банку;
+ *  - `BUILDING_PHASE_OPENED` — игрок открыл модалку строительства/залога.
  */
 
 export type GameEventKind =
@@ -42,6 +47,9 @@ export type GameEventKind =
   | "TRADE_CANCELLED"
   | "PROPERTY_MORTGAGED"
   | "PROPERTY_UNMORTGAGED"
+  | "HOUSE_BUILT"
+  | "HOUSE_SOLD"
+  | "BUILDING_PHASE_OPENED"
   | "GAME_OVER";
 
 export interface GameEvent {
@@ -81,5 +89,15 @@ export interface GameEvent {
      *  - UNMORTGAGED  — сумма, списанная с игрока (mortgageValue × 1.1).
      */
     mortgageAmount?: number;
+    /**
+     * Для HOUSE_BUILT / HOUSE_SOLD — сколько домов сейчас на клетке
+     * (после операции). 5 = отель. -1 = снесли отель целиком
+     * (после операции 0).
+     */
+    housesAfter?: number;
+    /** Стоимость операции (для журнала). */
+    buildAmount?: number;
+    /** true, если операция — строительство/снос отеля (а не дома). */
+    isHotel?: boolean;
   };
 }

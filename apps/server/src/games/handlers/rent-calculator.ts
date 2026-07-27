@@ -45,17 +45,38 @@ export class RentCalculator {
   // --- внутренние помощники ----------------------------------------------
 
   private calculatePropertyRent(cell: Cell, owner: Player, game: GameState): number {
-    // Проверяем, что владелец имеет ВСЮ группу одного цвета (монополию).
-    // Только в этом случае базовая рента удваивается.
+    // Шкала ренты по числу построек (houses):
+    //   0  — пустой участок, без построек
+    //   1  — 1 дом
+    //   2  — 2 дома
+    //   3  — 3 дома
+    //   4  — 4 дома
+    //   5  — отель (представляется как «houses = 5»)
+    //
+    // Таблица `rentTable` индексируется по `houses` напрямую:
+    //   rentTable[0] — базовая рента (без домов и без монополии)
+    //   rentTable[1] — 1 дом
+    //   rentTable[2] — 2 дома
+    //   rentTable[3] — 3 дома
+    //   rentTable[4] — 4 дома
+    //   rentTable[5] — отель
+    //
+    // Если таблица задана — берём значение из неё.
+    if (cell.rentTable) {
+      const rentFromTable = cell.rentTable[cell.houses];
+      if (rentFromTable !== undefined) {
+        // Если домов нет и у владельца монополия — удваиваем базовую ренту
+        // (rentTable[0] хранит базовую, без надбавки за монополию).
+        if (cell.houses === 0 && this.ownsMonopoly(cell, owner, game)) {
+          return rentFromTable * 2;
+        }
+        return rentFromTable;
+      }
+    }
+    // Фоллбэк для клеток без rentTable: используем cell.rent × 2 при монополии.
     if (cell.houses === 0 && this.ownsMonopoly(cell, owner, game)) {
       return (cell.rent ?? 0) * 2;
     }
-    // Если есть дома/отель — берём значение из таблицы.
-    if (cell.houses > 0 && cell.rentTable) {
-      const rentFromTable = cell.rentTable[cell.houses];
-      if (rentFromTable !== undefined) return rentFromTable;
-    }
-    // Базовая рента (0 домов, нет монополии).
     return cell.rent ?? 0;
   }
 

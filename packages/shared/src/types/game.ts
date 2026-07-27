@@ -9,94 +9,26 @@ import type { Card } from "../data/cards";
  * 1. **Global** — `IDLE`, `LOBBY`, `FINISHED`
  * 2. **Turn** — `START_TURN`, `ROLLING`, `DICE_ANIMATION`, `MOVE_ANIMATION`,
  *              `RESOLVING_LANDING`, `PAY_RENT`, `TAX_PAYMENT`, `BUY_DECISION`,
- *              `CARD_REVEAL`, `CARD_EFFECT`, `BUILDING`, `END_TURN`
+ *              `CARD_REVEAL`, `CARD_EFFECT`, `BUILDING`, `BUILDING_PHASE`,
+ *              `END_TURN`
  * 3. **Special / Interrupt** — `JAIL_DECISION`,
  *              `AUCTION_AWAITING_START`, `AUCTION_ACTIVE`, `AUCTION_FINISHED`,
  *              `BANKRUPTCY_LIQUIDATE`, `BANKRUPTCY_TRANSFER`,
  *              `TRADING_NEGOTIATE`, `TRADING_CONFIRM`
  * 4. **UX-фаза** `BOT_THINKING` — декоратор, не часть FSM (просто визуальная пауза).
  *
- * ## Аукцион: три фазы (новая логика, v2)
+ * ## BUILDING_PHASE (новая UX-фаза)
  *
- * Аукцион — это СОБСТВЕННЫЙ мини-FSM, живущий параллельно основному ходу:
- *  - `AUCTION_AWAITING_START` — инициатор отказался покупать, аукцион СОЗДАН,
- *                               но сервер ещё не начал торги. Может длиться
- *                               один «тик», пока сервер не отправит всем
- *                               клиентам `AUCTION_START` (broadcast) и не
- *                               переведёт фазу в `AUCTION_ACTIVE`.
- *  - `AUCTION_ACTIVE`         — текущий «на часах» делает ход (ставка/пас).
- *                               Таймер 30 секунд. Сервер ждёт команды
- *                               `AUCTION_MAKE_BID` / `AUCTION_PASS` от
- *                               активного игрока или автоматически
- *                               засчитывает «пас» по таймауту.
- *  - `AUCTION_FINISHED`       — аукцион завершён (продан / ничья). Клиент
- *                               показывает финальный экран ~2 секунды, после
- *                               чего сервер сам переключает фазу на
- *                               `BUILDING` (или `ROLLING` при `mustRollAgain`).
+ * Выделенная фаза для модалки строительства/сноса/залога. Игрок попадает
+ * в неё по кнопке «СТРОИТЬ» в панели действий (action `OPEN_BUILDING_PHASE`).
+ * В этой фазе разрешены только:
+ *   - `BUILD_HOUSE` / `SELL_HOUSE` (строительство/снос);
+ *   - `MORTGAGE_PROPERTY` / `UNMORTGAGE_PROPERTY` (залог/выкуп);
+ *   - `CONFIRM_BUILDING_PHASE` (закрыть модалку → возврат в `BUILDING`).
  *
- * ## КРИТИЧНО: каждая фаза имеет ЧЁТКИЙ СОБЫТИЙНЫЙ КРИТЕРИЙ ЗАВЕРШЕНИЯ.
- *
- * ### Полный жизненный цикл одного хода
- *
- * ```
- *  START_TURN  (мгновенная: сброс флагов → ROLLING или JAIL_DECISION)
- *      ↓
- *  ROLLING
- *      │ триггер: игрок жмёт "Бросить кубики"
- *      │ сервер бросает кости, присылает game:dice
- *      │ событие завершения: клиент/бот-таймер прислал CONFIRM_DICE_ANIMATION
- *      ↓
- *  DICE_ANIMATION
- *      │ клиент 2 секунды крутит кубики
- *      │ событие завершения: клиент/бот-таймер прислал CONFIRM_DICE_ANIMATION
- *      ↓
- *  MOVE_ANIMATION
- *      │ фишка шагает по клеткам; на КАЖДОЙ промежуточной клетке
- *      │ НИЧЕГО НЕ ПРОИСХОДИТ (не срабатывают карточки, налоги и т.д.)
- *      │ событие завершения: клиент/бот-таймер прислал CONFIRM_MOVE_ANIMATION
- *      ↓
- *  RESOLVING_LANDING
- *      │ сервер: фишка остановилась на клетке X
- *      │ ВЫБИРАЕТ ветку по типу клетки
- *      │ мгновенная фаза → сразу переход
- *      ↓
- *  ┌─────────────────────┬─────────────────┬──────────────────┐
- *  ↓                     ↓                 ↓                  ↓
- *  PAY_RENT         BUY_DECISION     CARD_REVEAL      TAX_PAYMENT
- *  (списываем)      (модалка)       (модалка:         (Подоходный
- *                                    ПОКАЗ карточки,   налог:
- *                                    НО ЭФФЕКТ         «Заплатите
- *                                    НЕ ПРИМЕНЯЕТСЯ)    N₽», ОК)
- *  ↓                     ↓                 ↓                  ↓
- *  └──────────────────►  ↓            CARD_EFFECT             ↓
- *                        ↓            (применяем              ↓
- *                        ↓             эффект:               ↓
- *                        ↓             money/move/            ↓
- *                        ↓             goto-jail/             ↓
- *                        ↓             luxury-tax)            ↓
- *                        ↓                 ↓                  ↓
- *                        ↓     ┌───────────┴────────────┐     ↓
- *                        ↓     ↓                        ↓     ↓
- *                        ↓   END_TURN             → MOVE_  END_TURN
- *                        ↓   (новый ход)             ANIM.  (новый ход)
- *                        ↓     ↓                  (если
- *                        ↓     ↓                   карта
- *                        ↓     ↓                   телепорт.)
- *                        ↓     ↓                        ↓     ↓
- *                        └─────┴────────────────────────┴─────┘
- *                                            ↓
- *                                       END_TURN
- *                                            │
- *                                            ↓
- *                                       START_TURN (след. игрок)
- * ```
- *
- * ## Универсальность Human/Bot
- *
- * Фазы **одинаковы** для человека и бота. Разница только в том, КТО отправляет
- * `GameAction` (UI-человек vs `BotService.decide()`).
- * Для ботов сервер сам шлёт `CONFIRM_DICE_ANIMATION` и `CONFIRM_MOVE_ANIMATION`
- * по таймеру (согласованному с клиентом).
+ * Действия `END_TURN` / `TRADE_OFFER` / `ROLL_DICE` в `BUILDING_PHASE`
+ * отклоняются сервером. Игрок сначала закрывает модалку, а уже потом
+ * может торговать или завершить ход.
  */
 export type Phase =
   // Global
@@ -116,6 +48,8 @@ export type Phase =
   | "CARD_REVEAL"
   | "CARD_EFFECT"
   | "BUILDING"
+  /** UX-фаза «Строительство/Снос/Залог» — игрок открыл модалку. */
+  | "BUILDING_PHASE"
   | "END_TURN"
 
   // Special
@@ -164,6 +98,13 @@ export interface GameSettings {
    * чтобы игрок успел «увидеть», что бот думает. Дефолт: 1500 мс.
    */
   auctionBotThinkMs?: number;
+  /**
+   * Кастомное правило нашей версии: цена ОТЕЛЯ равна цене ДОМА.
+   * По умолчанию `true` (см. GDD §5). При `false` используется
+   * классическая Монополия: отель стоит 5 × цена дома, а при продаже
+   * возвращается как 4 дома (по 50%).
+   */
+  hotelPriceEqualsHousePrice?: boolean;
 }
 
 /**
@@ -297,7 +238,7 @@ export interface GameState {
      */
     status: "AWAITING_START" | "AUCTION_ACTIVE" | "FINISHED";
 
-    /** Текущая максимальная ставка (0 = ставок е��ё не было). */
+    /** Текущая максимальная ставка (0 = ставок ещё не было). */
     currentBid: number;
     /** ID лидирующего игрока (после первой ставки). */
     highestBidderId: string | null;
@@ -387,6 +328,19 @@ export interface GameState {
     preTradePhase?: Phase;
   };
   tradeInitiationLog?: Array<{ initiatorId: string; recipientId: string; at: number }>;
+  /**
+   * Фаза, в которой находилась партия ДО открытия модалки строительства
+   * (`OPEN_BUILDING_PHASE`). Нужно, чтобы корректно восстановить фазу
+   * после `CONFIRM_BUILDING_PHASE`:
+   *  - если игрок открыл меню из `ROLLING` (например, до броска кубиков),
+   *    после закрытия возвращаемся в `ROLLING`, чтобы игрок мог бросить;
+   *  - если из `BUILDING` (после покупки/события) — остаёмся в `BUILDING`.
+   *
+   * `undefined` оставлен для обратной совместимости со снапшотами,
+   * сохранёнными до введения этого поля (fallback = "BUILDING", что
+   * сохраняет прежнее поведение).
+   */
+  preBuildingPhase?: Phase;
   /**
    * Контекст банкротства (когда `phase ∈ {BANKRUPTCY_LIQUIDATE, BANKRUPTCY_TRANSFER}`).
    */
@@ -574,7 +528,7 @@ export interface TradeOffer {
 export const DEFAULT_SETTINGS: GameSettings = {
   startingMoney: 1500,
   goSalary: 200,
-  housingLimit: "limited",
+  housingLimit: "unlimited",
   auctionEnabled: true,
   turnTimeoutMs: 120000,
   freeParkingVariant: "classic",
@@ -585,4 +539,5 @@ export const DEFAULT_SETTINGS: GameSettings = {
   diceAnimationMs: 2000,
   moveStepMs: 450,
   auctionBotThinkMs: 1500,
+  hotelPriceEqualsHousePrice: true, // кастомное правило
 };

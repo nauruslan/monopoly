@@ -42,6 +42,8 @@ export type BotDecision =
   | "AUCTION_PASS"
   | "TRADE_ACCEPT"
   | "TRADE_REJECT"
+  | "OPEN_BUILDING_PHASE"
+  | "CONFIRM_BUILDING_PHASE"
   | { kind: "BUILD_HOUSE"; cellId: number }
   | { kind: "SELL_HOUSE"; cellId: number }
   | { kind: "MORTGAGE"; cellId: number }
@@ -106,9 +108,26 @@ export class BotService {
         // За ход бот может предложить обмен только одному игроку.
         const tradeInitiative = this.maybeInitiateTrade(player, state);
         if (tradeInitiative) return tradeInitiative;
-        // Иначе — стандартная стройка/выкуп.
-        return this.decideBuild(player, state);
+        // Иначе — есть ли у бота что построить/продать/заложить/выкупить?
+        // Если да, открываем фазу BUILDING_PHASE (это и есть эквивалент
+        // нажатия кнопки «Строить» у игрока-человека). В фазе
+        // BUILDING_PHASE бот будет вызываться повторно и применять
+        // decideBuild/продажу/залог/выкуп.
+        if (this.hasAnyBuildAction(player, state)) {
+          return "OPEN_BUILDING_PHASE";
+        }
+        // Нечего строить/продавать/закладывать — сразу завершаем ход.
+        return "END_TURN";
       }
+
+      // BUILDING_PHASE — «продвинутая» фаза стройки/залога. Бот
+      // здесь применяет ту же стратегию, что и в BUILDING, но
+      // возвращает CONFIRM_BUILDING_PHASE вместо END_TURN, когда
+      // делать больше нечего (это переводит фазу обратно в BUILDING,
+      // а бот в этой же точке вызовет END_TURN уже на следующем
+      // тике scheduler'а).
+      case "BUILDING_PHASE":
+        return this.decideBuild(player, state, /*confirmWhenDone*/ true);
 
       // Тюрьма
       case "JAIL_DECISION":
@@ -159,12 +178,127 @@ export class BotService {
     return "DECLINE_BUY";
   }
 
-  private decideBuild(player: Player, state: GameState): BotDecision {
+  /**
+   * Стратегия бота в фазе стройки/залога.
+   *
+   * Используется в двух контекстах:
+   *   - фаза BUILDING (без параметра confirmWhenDone) — финал
+   *     «нечего делать» приводит к END_TURN;
+   *   - фаза BUILDING_PHASE (confirmWhenDone=true) — финал
+   *     приводит к CONFIRM_BUILDING_PHASE, что переводит партию
+   *     обратно в BUILDING; бот в следующем тике scheduler'а
+   *     сам поймёт, что нечего строить, и отправит END_TURN.
+   *
+   * Порядок приоритетов:
+   *   1. Построить дом/отель (если есть монополия + деньги с запасом).
+   *   2. Выкупить заложенную клетку из монополии.
+   *   3. (опционально) Заложить клетку для пополнения кассы.
+   *   4. (опционально) Продать дом, если это поможет ликвидности.
+   *   5. Иначе — END_TURN / CONFIRM_BUILDING_PHASE.
+   */
+  private decideBuild(player: Player, state: GameState, confirmWhenDone = false): BotDecision {
     const houseId = this.findBuildHouseTarget(player, state);
     if (houseId !== null) return { kind: "BUILD_HOUSE", cellId: houseId };
     const unmortgageId = this.findUnmortgageTarget(player, state);
     if (unmortgageId !== null) return { kind: "UNMORTGAGE", cellId: unmortgageId };
-    return "END_TURN";
+    // Если денег мало и есть незаложенная недвижимость, бот может
+    // её заложить для пополнения кассы (осторожно: только если
+    // нет домов в её группе — этого требует правило Монополии).
+    const mortgageId = this.findMortgageTarget(player, state);
+    if (mortgageId !== null) return { kind: "MORTGAGE", cellId: mortgageId };
+    // ...и последнее средство — продать дом (только если денег
+    // категорически мало, иначе это плохая идея).
+    const sellId = this.findSellHouseTarget(player, state);
+    if (sellId !== null) return { kind: "SELL_HOUSE", cellId: sellId };
+    return confirmWhenDone ? "CONFIRM_BUILDING_PHASE" : "END_TURN";
+  }
+
+  /**
+   * Проверить, есть ли у бота хотя бы одна потенциально выполнимая
+   * операция build/sell/mortgage/unmortgage. Используется в фазе
+   * BUILDING, чтобы решить: открыть ли модальный режим
+   * (OPEN_BUILDING_PHASE), или сразу END_TURN.
+   *
+   * Реализация намеренно ЛЕНИВАЯ: мы не вызываем BuildService
+   * (это потребовало бы циркулярной зависимости bot→build и
+   * замедлило бы горячий путь принятия решений). Вместо этого —
+   * простые эвристики:
+   *   - build: монополия + деньги с запасом;
+   *   - unmortgage: заложенная клетка + деньги;
+   *   - mortgage: незаложенная клетка без домов в группе;
+   *   - sell: есть хоть один дом.
+   * Если хоть одна эвристика срабатывает — открываем фазу
+   * BUILDING_PHASE, а сервер сам применит правила лесенки/залога
+   * (если бот ошибётся — прилетит ошибка в state, бот на
+   * следующем тике вернёт CONFIRM_BUILDING_PHASE и не зациклится).
+   */
+  private hasAnyBuildAction(player: Player, state: GameState): boolean {
+    if (player.inJail) return false;
+    if (this.findBuildHouseTarget(player, state) !== null) return true;
+    if (this.findUnmortgageTarget(player, state) !== null) return true;
+    if (this.findMortgageTarget(player, state) !== null) return true;
+    if (this.findSellHouseTarget(player, state) !== null) return true;
+    return false;
+  }
+
+  /**
+   * Найти клетку, которую бот может заложить для пополнения кассы.
+   * Критерии:
+   *   - принадлежит боту;
+   *   - ещё НЕ в залоге;
+   *   - в её цветовой группе нет других клеток с домами
+   *     (правило Монополии);
+   *   - mortgageValue > 0.
+   * Бот не закладывает «просто так» — только если денег мало
+   * (порог — 100₽ после операции: держим минимальный резерв на аренду).
+   */
+  private findMortgageTarget(player: Player, state: GameState): number | null {
+    const candidates = state.board
+      .filter(
+        (c) =>
+          c.type === "PROPERTY" &&
+          c.ownerId === player.id &&
+          !c.isMortgaged &&
+          (c.mortgageValue ?? 0) > 0,
+      )
+      .map((c) => {
+        // Проверяем, что в группе нет клеток с домами.
+        const groupHasHouses = state.board.some(
+          (b) =>
+            b.type === "PROPERTY" && b.group === c.group && b.ownerId === player.id && b.houses > 0,
+        );
+        return { c, groupHasHouses };
+      })
+      .filter(({ groupHasHouses }) => !groupHasHouses);
+
+    if (candidates.length === 0) return null;
+    // Если денег пока хватает (с запасом 100₽), закладывать не нужно.
+    // Но если в кассе меньше 100₽ — стоит заложить клетку с самой
+    // большой суммой выкупа (максимальная ликвидность).
+    if (player.money >= 100) return null;
+    candidates.sort((a, b) => (b.c.mortgageValue ?? 0) - (a.c.mortgageValue ?? 0));
+    return candidates[0]!.c.id;
+  }
+
+  /**
+   * Найти клетку, на которой бот может продать дом/отель
+   * (правило лесенки: продаём с самой «нагруженной» клетки).
+   * Бот продаёт дома ТОЛЬКО если денег в кассе мало (порог 150₽).
+   */
+  private findSellHouseTarget(player: Player, state: GameState): number | null {
+    if (player.money >= 150) return null;
+    const candidates = state.board
+      .filter((c) => c.type === "PROPERTY" && c.ownerId === player.id && c.houses > 0)
+      .map((c) => {
+        const group = state.board.filter(
+          (b) => b.type === "PROPERTY" && b.group === c.group && b.ownerId === player.id,
+        );
+        const maxH = Math.max(...group.map((b) => b.houses));
+        return { c, isTop: c.houses === maxH };
+      })
+      .filter(({ isTop }) => isTop)
+      .sort((a, b) => b.c.houses - a.c.houses);
+    return candidates[0]?.c.id ?? null;
   }
 
   private findBuildHouseTarget(player: Player, state: GameState): number | null {

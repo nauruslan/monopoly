@@ -8,11 +8,31 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: "click", cell: Cell, event: MouseEvent): void;
+  /**
+   * Клик по клетке. Board.vue ловит это событие в v-for (знает
+   * саму Cell), поэтому здесь передаём только MouseEvent.
+   */
+  (e: "click", event: MouseEvent): void;
+  /**
+   * Наведение мыши на клетку. Используется для показа расширенного
+   * тултипа (см. `CellTooltip.vue`). На мобильных устройствах
+   * не сработает — там игрок использует click/tap.
+   */
+  (e: "hover", event: MouseEvent): void;
+  /**
+   * Уход курсора с клетки. Скрывает тултип.
+   */
+  (e: "leave", event: MouseEvent): void;
 }>();
 
 function onClick(e: MouseEvent) {
-  emit("click", props.cell, e);
+  emit("click", e);
+}
+function onMouseEnter(e: MouseEvent) {
+  emit("hover", e);
+}
+function onMouseLeave(e: MouseEvent) {
+  emit("leave", e);
 }
 </script>
 
@@ -36,6 +56,8 @@ function onClick(e: MouseEvent) {
       '--owner-color': ownerColor || 'transparent',
     }"
     @click="onClick"
+    @mouseenter="onMouseEnter"
+    @mouseleave="onMouseLeave"
   >
     <!-- Цветная полоска сверху (для клеток с группой) -->
     <div v-if="cell.color" class="color-bar" :style="{ background: cell.color }"></div>

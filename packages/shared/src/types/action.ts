@@ -15,7 +15,7 @@ import type { TradeOffer } from "./game";
  * 3. **Interrupt: Auction Actions** — AUCTION_ACTIVE (ход игрока)
  * 4. **Interrupt: Trade Actions** — TRADING_NEGOTIATE → TRADING_CONFIRM
  * 5. **Interrupt: Bankruptcy Actions** — автоматические, не от клиента
- * 6. **Property Actions** — застройка/ипотека (BUILDING)
+ * 6. **Property Actions** — застройка/ипотека (BUILDING / BUILDING_PHASE)
  *
  * ## Новые actions для синхронизации анимаций
  *
@@ -25,6 +25,8 @@ import type { TradeOffer } from "./game";
  * - `CONFIRM_TAX`           — клиент подтвердил оплату фиксированного налога (фаза `TAX_PAYMENT`).
  * - `CONFIRM_LANDING`       — клиент подтвердил, что фишка приземлилась (фаза `LANDING` — пауза).
  * - `CONFIRM_END_TURN`      — клиент подтвердил, что ход передан (фаза `END_TURN` — пауза).
+ * - `OPEN_BUILDING_PHASE`   — игрок нажал «СТРОИТЬ» в панели действий (BUILDING → BUILDING_PHASE).
+ * - `CONFIRM_BUILDING_PHASE`— игрок закрыл модалку строительства (BUILDING_PHASE → BUILDING).
  */
 export type GameAction =
   // Turn Actions
@@ -57,6 +59,13 @@ export type GameAction =
   | { type: "SELL_HOUSE"; cellId: number } // продажа дома банку за 50% стоимости
   | { type: "MORTGAGE_PROPERTY"; cellId: number } // залог
   | { type: "UNMORTGAGE_PROPERTY"; cellId: number } // выкуп из залога (+10%)
+
+  // Фаза строительства (новая UX-фаза)
+  /** Игрок нажал кнопку «СТРОИТЬ» — открыть модалку строительства/сноса/залога.
+   *  Допустимо только в фазе BUILDING. Сервер переключает фазу на BUILDING_PHASE. */
+  | { type: "OPEN_BUILDING_PHASE" }
+  /** Игрок закрыл модалку строительства. Сервер возвращается в BUILDING. */
+  | { type: "CONFIRM_BUILDING_PHASE" }
 
   // Interrupt: Auction (новая логика, v2)
   /**

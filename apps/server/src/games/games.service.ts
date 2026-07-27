@@ -30,6 +30,7 @@ import { BotService, type BotDecision } from "./bots/bot.service";
 import { AuctionService, type AuctionEvent } from "./handlers/auction.service";
 import { TradeService } from "./handlers/trade.service";
 import { MortgageService } from "./handlers/mortgage.service";
+import { BuildService } from "./handlers/build.service";
 import { canRollDice, canEndTurn, isCurrentPlayer } from "./turn-permissions";
 import type { GameEventKind } from "@monopoly/shared";
 import { randomUUID } from "crypto";
@@ -110,6 +111,8 @@ export class GamesService {
     private readonly trade: TradeService,
     @Inject(forwardRef(() => MortgageService))
     private readonly mortgageSvc: MortgageService,
+    @Inject(forwardRef(() => BuildService))
+    private readonly buildSvc: BuildService,
   ) {
     if (!this.rentCalc) console.error("[GamesService] RentCalculator не заинжектирован!");
     if (!this.jail) console.error("[GamesService] JailHandlerService не заинжектирован!");
@@ -118,6 +121,7 @@ export class GamesService {
     if (!this.bot) console.error("[GamesService] BotService не заинжектирован!");
     if (!this.auction) console.error("[GamesService] AuctionService не заинжектирован!");
     if (!this.trade) console.error("[GamesService] TradeService не заинжектирован!");
+    if (!this.buildSvc) console.error("[GamesService] BuildService не заинжектирован!");
     if (!this.onStateChanged) {
       console.error(
         "[GamesService] onStateChanged не зарегистрирован (GameGateway не подключился?)",
@@ -510,6 +514,16 @@ export class GamesService {
     ) {
       return this.handleBuilding(state, player, action);
     }
+    // OPEN_BUILDING_PHASE — UX-фаза «Строительство/Снос/Залог».
+    // Игрок открывает модалку из любой «своей» Turn-фазы. Обрабатываем
+    // ДО выбора фазы, чтобы не отклонять запрос только потому, что
+    // игрок, например, ещё не бросал кубики (фаза ROLLING).
+    if (action.type === "OPEN_BUILDING_PHASE") {
+      return this.handleBuildingPhase(state, player, action);
+    }
+    if (action.type === "CONFIRM_BUILDING_PHASE") {
+      return this.handleBuildingPhase(state, player, action);
+    }
     switch (state.phase) {
       // Global
       case "IDLE":
@@ -541,6 +555,8 @@ export class GamesService {
         return this.handleCardEffect(state, player, action);
       case "BUILDING":
         return this.handleBuilding(state, player, action);
+      case "BUILDING_PHASE":
+        return this.handleBuildingPhase(state, player, action);
       case "END_TURN":
         return this.handleEndTurn(state, player, action);
 
@@ -583,7 +599,7 @@ export class GamesService {
         throw new ForbiddenException("Бот думает, действия не принимаются");
 
       default: {
-        const _exhaustive: never = state.phase;
+        const _exhaustive: never = state.phase as never;
         throw new BadRequestException(`Unknown phase: ${JSON.stringify(_exhaustive)}`);
       }
     }
@@ -607,6 +623,12 @@ export class GamesService {
     // игрок снова может бросать/действовать в обычном режиме).
     state.justEnteredJail = false;
     state.justArrivedAtParking = false;
+    // Сбрасываем "запомненную" фазу до открытия модалки строительства,
+    // чтобы она не протекла в следующий ход (turn boundary). В нормальном
+    // потоке поле очищается в CONFIRM_BUILDING_PHASE, но если ход
+    // оборвался раньше (дисконнект, реконнект, перезагрузка состояния),
+    // мы не хотим восстанавливать фазу вчерашнего хода.
+    state.preBuildingPhase = undefined;
     // Сбрасываем outcome последнего TRY_DOUBLE — если он каким-то
     // образом остался заполненным (например, на реконнекте), это
     // гарантирует, что в новом ходу мы не «провалимся» в ветку
@@ -1597,9 +1619,22 @@ export class GamesService {
   }
 
   /**
-   * BUILDING — игрок может строить/ипотечить/торговать.
-   * Допустимые: BUILD_HOUSE, SELL_HOUSE, MORTGAGE_PROPERTY,
-   * UNMORTGAGE_PROPERTY, TRADE_OFFER, END_TURN.
+   * BUILDING — игрок может строить/сносить/закладывать/выкупать/торговать.
+   *
+   * Допустимые actions:
+   *  - BUILD_HOUSE, SELL_HOUSE         — через BuildService
+   *                                       (правила лесенки, монополия, лимит).
+   *  - MORTGAGE_PROPERTY, UNMORTGAGE_PROPERTY — через MortgageService.
+   *  - TRADE_OFFER, TRADE_TOGGLE_BLOCK — торги.
+   *  - END_TURN                         — завершить ход.
+   *  - OPEN_BUILDING_PHASE              — UX-фаза: открыть модалку строительства
+   *                                        (включая залог/выкуп). Сервер переключит
+   *                                        фазу на BUILDING_PHASE; модалка появится
+   *                                        у клиента автоматически.
+   *
+   * Все правила строительства/сноса централизованы в `BuildService`,
+   * все правила залога — в `MortgageService`. Этот метод — только
+   * диспетчер + формирование событий для UI-журнала.
    */
   private async handleBuilding(
     state: GameState,
@@ -1608,45 +1643,42 @@ export class GamesService {
   ): Promise<{ card?: unknown; event?: GameEvent }> {
     switch (action.type) {
       case "BUILD_HOUSE": {
+        const result = this.buildSvc.build(state, player, action.cellId);
         const cell = state.board[action.cellId];
-        if (!cell) throw new NotFoundException("Клетка не найдена");
-        if (cell.ownerId !== player.id) throw new ForbiddenException("Это не ваша клетка");
-        if (cell.type !== "PROPERTY")
-          throw new BadRequestException("На этой клетке нельзя строить");
-        if (!this.rentCalc.ownsMonopoly(cell, player, state)) {
-          throw new ForbiddenException("Нет монополии");
-        }
-        if (cell.houses >= 5) throw new ForbiddenException("Уже отель");
-        if (cell.housePrice === undefined) throw new BadRequestException("Нет цены дома");
-        if (player.money < cell.housePrice) throw new ForbiddenException("Недостаточно денег");
-        if (cell.group) {
-          const groupCells = state.board.filter((c) => c.group === cell.group);
-          const minHouses = Math.min(...groupCells.map((c) => c.houses));
-          if (cell.houses > minHouses) {
-            throw new ForbiddenException("Сначала постройте дома на других клетках группы");
-          }
-        }
-        player.money -= cell.housePrice;
-        cell.houses = (cell.houses + 1) as 0 | 1 | 2 | 3 | 4 | 5;
-        return {};
+        const isHotel = result.isHotel;
+        const emoji = isHotel ? "🏨" : "🏠";
+        const noun = isHotel ? "отель" : result.newHousesCount === 1 ? "дом" : "дома";
+        return {
+          event: this.makeEvent("HOUSE_BUILT", player, {
+            message: `${emoji} ${player.displayName} построил(а) ${noun} на «${cell.name}» за $${result.cost}`,
+            type: "buy",
+            payload: {
+              cellId: action.cellId,
+              housesAfter: result.newHousesCount,
+              buildAmount: result.cost,
+              isHotel,
+            },
+          }),
+        };
       }
 
       case "SELL_HOUSE": {
+        const result = this.buildSvc.sell(state, player, action.cellId);
         const cell = state.board[action.cellId];
-        if (!cell) throw new NotFoundException("Клетка не найдена");
-        if (cell.ownerId !== player.id) throw new ForbiddenException("Это не ваша клетка");
-        if (cell.houses === 0) throw new ForbiddenException("Нет домов для продажи");
-        if (cell.housePrice === undefined) throw new BadRequestException("Нет цены дома");
-        if (cell.group) {
-          const groupCells = state.board.filter((c) => c.group === cell.group);
-          const maxHouses = Math.max(...groupCells.map((c) => c.houses));
-          if (cell.houses < maxHouses) {
-            throw new ForbiddenException("Сначала продайте дома на других клетках группы");
-          }
-        }
-        player.money += cell.housePrice / 2;
-        cell.houses = (cell.houses - 1) as 0 | 1 | 2 | 3 | 4 | 5;
-        return {};
+        const emoji = result.isHotelSale ? "🏨" : "🏠";
+        const noun = result.isHotelSale ? "отель" : "дом";
+        return {
+          event: this.makeEvent("HOUSE_SOLD", player, {
+            message: `💸 ${player.displayName} продал(а) ${emoji} ${noun} на «${cell.name}» за $${result.refund}`,
+            type: "buy",
+            payload: {
+              cellId: action.cellId,
+              housesAfter: result.newHousesCount,
+              buildAmount: result.refund,
+              isHotel: result.isHotelSale,
+            },
+          }),
+        };
       }
 
       case "MORTGAGE_PROPERTY": {
@@ -1722,6 +1754,26 @@ export class GamesService {
         return {};
       }
 
+      case "OPEN_BUILDING_PHASE": {
+        // UX-фаза: открыть модалку строительства/сноса/залога/выкупа.
+        // Допустимо ТОЛЬКО если у игрока есть хоть один объект, к которому
+        // применима хотя бы одна из операций. Иначе — кнопка должна быть
+        // неактивна, но на сервере всё равно валидируем.
+        if (player.inJail) {
+          throw new ForbiddenException("В тюрьме нельзя строить");
+        }
+        if (player.mustRollAgain) {
+          throw new ForbiddenException("Сначала бросьте кубики ещё раз");
+        }
+        state.phase = "BUILDING_PHASE";
+        return {
+          event: this.makeEvent("BUILDING_PHASE_OPENED", player, {
+            message: `🛠️ ${player.displayName} открыл(а) меню строительства`,
+            type: "buy",
+          }),
+        };
+      }
+
       case "END_TURN": {
         if (player.mustRollAgain) {
           player.mustRollAgain = false;
@@ -1735,6 +1787,151 @@ export class GamesService {
 
       default:
         throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе BUILDING`);
+    }
+  }
+
+  /**
+   * BUILDING_PHASE — UX-фаза «модалка строительства открыта».
+   *
+   * Допустимые actions:
+   *  - BUILD_HOUSE, SELL_HOUSE                — через BuildService.
+   *  - MORTGAGE_PROPERTY, UNMORTGAGE_PROPERTY — через MortgageService.
+   *  - CONFIRM_BUILDING_PHASE                 — закрыть модалку и вернуться в BUILDING.
+   *
+   * ЗАПРЕЩЕНЫ:
+   *  - END_TURN              — сначала закрой модалку.
+   *  - TRADE_OFFER           — открой обмен отдельной кнопкой (это задел на будущее,
+   *                            сейчас через модалку торговли).
+   *  - ROLL_DICE             — нельзя бросать, пока открыта модалка строительства.
+   *
+   * Действия внутри модалки (BUILD_HOUSE и т.д.) валидируются так же,
+   * как и в фазе BUILDING. После операции фаза НЕ меняется — игрок
+   * остаётся в модалке, чтобы совершить несколько действий подряд.
+   */
+  private async handleBuildingPhase(
+    state: GameState,
+    player: Player,
+    action: GameAction,
+  ): Promise<{ card?: unknown; event?: GameEvent }> {
+    if (!isCurrentPlayer(state, player)) {
+      throw new ForbiddenException("Сейчас не ваш ход");
+    }
+    if (player.inJail) {
+      throw new ForbiddenException("В тюрьме нельзя строить");
+    }
+    // `mustRollAgain` НЕ блокирует открытие строительной модалки —
+    // это согласовано с `canTrade` (GDD §1.1: «в любой момент хода»).
+    // Игрок может открыть модалку, посмотреть варианты и, если ничего
+    // не хочет делать, просто закрыть её и бросить кубики.
+
+    switch (action.type) {
+      case "BUILD_HOUSE": {
+        const result = this.buildSvc.build(state, player, action.cellId);
+        const cell = state.board[action.cellId];
+        const isHotel = result.isHotel;
+        const emoji = isHotel ? "🏨" : "🏠";
+        const noun = isHotel ? "отель" : result.newHousesCount === 1 ? "дом" : "дома";
+        return {
+          event: this.makeEvent("HOUSE_BUILT", player, {
+            message: `${emoji} ${player.displayName} построил(а) ${noun} на «${cell.name}» за $${result.cost}`,
+            type: "buy",
+            payload: {
+              cellId: action.cellId,
+              housesAfter: result.newHousesCount,
+              buildAmount: result.cost,
+              isHotel,
+            },
+          }),
+        };
+      }
+
+      case "SELL_HOUSE": {
+        const result = this.buildSvc.sell(state, player, action.cellId);
+        const cell = state.board[action.cellId];
+        const emoji = result.isHotelSale ? "🏨" : "🏠";
+        const noun = result.isHotelSale ? "отель" : "дом";
+        return {
+          event: this.makeEvent("HOUSE_SOLD", player, {
+            message: `💸 ${player.displayName} продал(а) ${emoji} ${noun} на «${cell.name}» за $${result.refund}`,
+            type: "buy",
+            payload: {
+              cellId: action.cellId,
+              housesAfter: result.newHousesCount,
+              buildAmount: result.refund,
+              isHotel: result.isHotelSale,
+            },
+          }),
+        };
+      }
+
+      case "MORTGAGE_PROPERTY": {
+        const mortgageAmount = this.mortgageSvc.mortgage(state, player, action.cellId);
+        return {
+          event: this.makeEvent("PROPERTY_MORTGAGED", player, {
+            message: `🏦 ${player.displayName} заложил(а) участок и получил(а) $${mortgageAmount}`,
+            type: "buy",
+            payload: { cellId: action.cellId, mortgageAmount },
+          }),
+        };
+      }
+
+      case "UNMORTGAGE_PROPERTY": {
+        const unmortgageAmount = this.mortgageSvc.unmortgage(state, player, action.cellId);
+        return {
+          event: this.makeEvent("PROPERTY_UNMORTGAGED", player, {
+            message: `💰 ${player.displayName} выкупил(а) участок за $${unmortgageAmount}`,
+            type: "buy",
+            payload: { cellId: action.cellId, mortgageAmount: unmortgageAmount },
+          }),
+        };
+      }
+
+      case "CONFIRM_BUILDING_PHASE": {
+        // Закрыть модалку и вернуться в фазу, из которой открыли.
+        // БЕЗ `preBuildingPhase` (старые снапшоты) — fallback в BUILDING.
+        // С `preBuildingPhase` — возвращаемся в исходную фазу:
+        //  - ROLLING — если игрок открыл меню до броска (например, чтобы
+        //    ознакомиться со списком и тут же закрыть). Без этого кнопка
+        //    «Бросить кубики» оставалась бы неактивной, т.к. canRoll
+        //    требует phase === "ROLLING".
+        //  - BUILDING — после покупки/события (классический случай).
+        //  - PAY_RENT, TAX_PAYMENT и т.п. — крайне редкий случай
+        //    (если игрок нажал «Строить» прямо во время фазы оплаты,
+        //    что допустимо по GDD §1.1: «в любой момент хода»).
+        const restoreTo = state.preBuildingPhase ?? "BUILDING";
+        state.phase = restoreTo;
+        // Сбрасываем сохранённую фазу, чтобы случайно не «прилипла»
+        // к следующему циклу, если игрок переоткроет модалку.
+        state.preBuildingPhase = undefined;
+        return {};
+      }
+
+      case "OPEN_BUILDING_PHASE": {
+        // Игрок нажал «Строить». Маршрутизация в `dispatch` идёт
+        // ВСЕГДА в `handleBuildingPhase` (даже если фаза ещё BUILDING),
+        // поэтому переключение фазы на BUILDING_PHASE делаем здесь.
+        // Если уже в BUILDING_PHASE (повторный клик при открытой модалке)
+        // — no-op.
+        if (state.phase !== "BUILDING_PHASE") {
+          // Запоминаем фазу, из которой открыли модалку, чтобы
+          // CONFIRM_BUILDING_PHASE мог корректно вернуться именно в неё.
+          state.preBuildingPhase = state.phase;
+          state.phase = "BUILDING_PHASE";
+          return {
+            event: this.makeEvent("BUILDING_PHASE_OPENED", player, {
+              message: `🏗️ ${player.displayName} открыл(а) меню строительства`,
+              type: "buy",
+              payload: {},
+            }),
+          };
+        }
+        return {};
+      }
+
+      default:
+        throw new ForbiddenException(
+          `Недопустимое действие ${action.type} в фазе BUILDING_PHASE. Сначала закройте меню строительства.`,
+        );
     }
   }
 
@@ -2641,6 +2838,10 @@ export class GamesService {
           return { type: "TRADE_ACCEPT" };
         case "TRADE_REJECT":
           return { type: "TRADE_REJECT" };
+        case "OPEN_BUILDING_PHASE":
+          return { type: "OPEN_BUILDING_PHASE" };
+        case "CONFIRM_BUILDING_PHASE":
+          return { type: "CONFIRM_BUILDING_PHASE" };
         case "DECLARE_BANKRUPTCY":
           return { type: "BANKRUPTCY_DECLARE" };
         default:

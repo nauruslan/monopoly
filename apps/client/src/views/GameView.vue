@@ -15,16 +15,19 @@ import GameOverModal from "../components/modals/GameOverModal.vue";
 import AuctionModal from "../components/modals/AuctionModal.vue";
 import TradeModal from "../components/modals/TradeModal.vue";
 import MortgageModal from "../components/modals/MortgageModal.vue";
+import BuildModal from "../components/modals/BuildModal.vue";
 import SettingsPanel from "../components/SettingsPanel.vue";
 import LogPanel from "../components/LogPanel.vue";
 import { useAuthStore } from "../stores/auth";
 import { useGameStore } from "../stores/game";
 import { useTradeStore } from "../stores/trade";
 import { useMortgageStore } from "../stores/mortgage";
+import { useBuildStore } from "../stores/build";
 import { useAuctionStore } from "../stores/auction";
 import { useSettingsStore } from "../stores/settings";
 import { useSocket, disconnectSocket } from "../composables/useSocket";
-import type { Cell, GameAction, TradeOffer, Phase } from "@monopoly/shared";
+import type { Cell, GameAction, TradeOffer, Phase, BoardSide } from "@monopoly/shared";
+import { getCellSide } from "@monopoly/shared";
 
 const route = useRoute();
 const router = useRouter();
@@ -124,9 +127,52 @@ const canRoll = computed(() => {
   if (diceRolling.value) return false;
   return true;
 });
-const canBuy = computed(
-  () => isMyTurn.value && state.value.phase === "BUY_DECISION" && !currentPlayer.value?.inJail,
-);
+/**
+ * Можно ли сейчас открыть модалку «Строить» (GDD §1.1 — build/sell).
+ *
+ * Правила Монополии разрешают строительство / снос в любой «своей»
+ * Turn-фазе — точно так же, как и торговлю (см. `canTrade` ниже).
+ * Игрок может сразу после приземления на новую клетку открыть меню
+ * и построить дом (если это его монополия), не ожидая фазы BUILDING.
+ * Сервер уже поддерживает эту логику: в `GamesService.dispatch`
+ * `OPEN_BUILDING_PHASE` маршрутизируется ДО switch по фазе.
+ *
+ * Условия (идентичны `canTrade`, чтобы кнопки СТРОИТЬ и ТОРГОВЛЯ были
+ * активны в ОДНИ И ТЕ ЖЕ моменты — по требованию GDD §1.1):
+ *  1. Это ход игрока-человека.
+ *  2. Игрок не в тюрьме.
+ *  3. НЕТ анимации броска/движения.
+ *  4. Нет активной другой interrupt-модалки.
+ *  5. У игрока есть хотя бы одна клетка, на которой можно построить
+ *     или продать дом/отель.
+ *
+ * ВАЖНО: `mustRollAgain` НЕ блокирует открытие строительной модалки
+ * (в отличие от END_TURN). Это согласовано с `canTrade`: после дубля
+ * игрок может в любой момент открыть торговлю/строительство, не
+ * дожидаясь повторного броска. Если сервер отклонит действие — это
+ * уже не его забота, а сервера.
+ *
+ * ВАЖНО: `useBuildStore()` инстанцируется ВНУТРИ computed, иначе
+ * Pinia active-Pinia-проверка при SSR/тестах ругается на
+ * «getActivePinia was called with no active Pinia».
+ */
+const canBuild = computed(() => {
+  // ВАЖНО: валидация кнопки «Строить» ПОЛНОСТЬЮ наследует логику
+  // кнопки «Торговля» (требование GDD §1.1: кнопки активны в одни
+  // и те же моменты). В отличие от старой реализации, мы НЕ
+  // требуем, чтобы у игрока уже были клетки для строительства
+  // или продажи — модалка может открыться и в начале партии, и
+  // покажет дружелюбный empty-state «У вас нет участков под
+  // застройку» (см. BuildModal.vue). Это симметрично поведению
+  // кнопки «Торговля», которая тоже не проверяет наличие
+  // объектов обмена.
+  if (!canTrade.value) return false;
+  // Дополнительно блокируем, если открыта другая interrupt-модалка
+  // (уже зашито в canTrade, но дублируем явно для самодокументации).
+  if (showAuctionModal.value) return false;
+  if (showTradeModal.value) return false;
+  return true;
+});
 const canEndTurn = computed(() => {
   if (!isMyTurn.value) return false;
   // В тюрьме (JAIL_DECISION) единственный способ продолжить — END_TURN.
@@ -223,8 +269,23 @@ const showJailModal = ref(false);
 const showAuctionModal = ref(false);
 const showTradeModal = ref(false);
 
+// ===== Тултип (GDD §1.1 — hover) =====
 const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
+const tooltipSide = ref<BoardSide>("bottom");
+
+/**
+ * Реф на компонент `<Board>`. Нужен, чтобы достать `boardEl`
+ * (корневой DOM-элемент доски) и рассчитывать координаты тултипа
+ * относительно реальных размеров доски, а не окна браузера.
+ */
+const boardRef = ref<InstanceType<typeof Board> | null>(null);
+
+/**
+ * Смещение (в пикселях) между «родительской» клеткой и углом тултипа.
+ * Используется, чтобы тултип не «лип» вплотную к клетке.
+ */
+const TOOLTIP_GAP = 8;
 
 const currentCell = computed<Cell | null>(() => game.currentCell);
 const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
@@ -253,12 +314,139 @@ onBeforeUnmount(() => {
   stopBlink();
 });
 
+/**
+ * Клик по клетке: показываем тултип в «правильном» месте —
+ * см. `computeTooltipPosition` ниже.
+ */
 function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
   hoveredCell.value = payload.cell;
-  tooltipPos.value = {
-    x: payload.event.clientX + 12,
-    y: payload.event.clientY + 12,
-  };
+  computeTooltipPosition(payload.cell, payload.event);
+}
+
+/**
+ * Наведение курсора на клетку (GDD §1.1 — hover-тултип).
+ * Показываем тултип с учётом того, в каком «секторе» (top/bottom/left/right)
+ * находится клетка: тултип ВСЕГДА появляется ВНУТРИ игровой доски,
+ * чтобы его нижний край для нижнего ряда касался верхней грани
+ * board-center, и т.д. по симметрии для остальных секторов.
+ */
+function onCellHover(payload: { cell: Cell; event: MouseEvent }) {
+  hoveredCell.value = payload.cell;
+  computeTooltipPosition(payload.cell, payload.event);
+}
+
+/**
+ * Уход курсора с клетки. Скрываем тултип, чтобы он не «висел» в
+ * пустоте, пока игрок водит мышью по столу / панели.
+ */
+function onCellLeave() {
+  hoveredCell.value = null;
+}
+
+/**
+ * Рассчитать координаты (x, y) для тултипа с учётом:
+ *  1. Стороны клетки (`getCellSide`) — тултип ВСЕГДА внутри доски.
+ *  2. Реальных размеров доски (`boardEl.getBoundingClientRect()`),
+ *     чтобы тултип не «вылезал» за границы, если у клетки рядом
+ *     с углом не хватает места.
+ *  3. События мыши (mouse position) — используем как «запасной»
+ *     fallback, если DOM-элемент клетки ещё не найден.
+ *
+ * Логика по секторам (по требованию GDD §1.1):
+ *  - bottom (id 0..10): тултип ВЫШЕ клетки (низ тултипа у верхней
+ *                      грани клетки, у края board-center снизу).
+ *  - top    (id 20..30): тултип НИЖЕ клетки.
+ *  - left   (id 11..19): тултип СПРАВА от клетки.
+ *  - right  (id 31..39): тултип СЛЕВА от клетки.
+ *
+ * Реальные размеры тултипа берём ПОСЛЕ рендера (через `nextTick`
+ * + чтение `tooltipEl.getBoundingClientRect()`) — см. `nextTick`
+ * в вызывающем коде, либо пересчитываем при ресайзе окна.
+ */
+function computeTooltipPosition(cell: Cell, event: MouseEvent) {
+  tooltipSide.value = getCellSide(cell.id);
+
+  const boardEl = boardRef.value?.boardEl ?? null;
+  if (!boardEl) {
+    // Страховка: если Board ещё не смонтирован, возвращаемся
+    // к поведению «за курсором» — это лучше, чем тултип
+    // в (0, 0) или невидимость.
+    tooltipPos.value = {
+      x: event.clientX + 12,
+      y: event.clientY + 12,
+    };
+    return;
+  }
+
+  const cellEl = boardEl.querySelector<HTMLElement>(`[data-cell-id="${cell.id}"]`);
+  if (!cellEl) {
+    tooltipPos.value = {
+      x: event.clientX + 12,
+      y: event.clientY + 12,
+    };
+    return;
+  }
+
+  const cellRect = cellEl.getBoundingClientRect();
+  const boardRect = boardEl.getBoundingClientRect();
+  // Примерный размер тултипа — он фиксирован в CSS (max-width 280,
+  // min-width 200, padding 12). Этого хватает для clamp'а —
+  // после рендера Vue обновит координаты уже по реальным размерам
+  // (см. recompute ниже).
+  const estW = 240;
+  const estH = 220;
+  const gap = TOOLTIP_GAP;
+
+  let x = 0;
+  let y = 0;
+  switch (tooltipSide.value) {
+    case "bottom": {
+      // Тултип ВЫШЕ клетки: низ тултипа у верха клетки.
+      x = cellRect.left + cellRect.width / 2 - estW / 2;
+      y = cellRect.top - estH - gap;
+      break;
+    }
+    case "top": {
+      // Тултип НИЖЕ клетки: верх тултипа у низа клетки.
+      x = cellRect.left + cellRect.width / 2 - estW / 2;
+      y = cellRect.bottom + gap;
+      break;
+    }
+    case "left": {
+      // Тултип СПРАВА от клетки: левый край тултипа у правой
+      // грани клетки.
+      x = cellRect.right + gap;
+      y = cellRect.top + cellRect.height / 2 - estH / 2;
+      break;
+    }
+    case "right": {
+      // Тултип СЛЕВА от клетки: правый край тултипа у левой
+      // грани клетки.
+      x = cellRect.left - estW - gap;
+      y = cellRect.top + cellRect.height / 2 - estH / 2;
+      break;
+    }
+    default: {
+      // corner (id 20, парковка) — для неё мы попросили
+      // getCellSide вернуть "top" (см. board-layout.ts).
+      x = cellRect.left + cellRect.width / 2 - estW / 2;
+      y = cellRect.bottom + gap;
+    }
+  }
+
+  // Clamp по границам доски: тултип должен остаться внутри
+  // `boardEl` (с учётом padding'а доски 8px, оставим 6px запаса).
+  const PADDING = 6;
+  const minX = boardRect.left + PADDING;
+  const maxX = boardRect.right - estW - PADDING;
+  const minY = boardRect.top + PADDING;
+  const maxY = boardRect.bottom - estH - PADDING;
+  if (x < minX) x = minX;
+  if (x > maxX) x = maxX;
+  if (y < minY) y = minY;
+  if (y > maxY) y = maxY;
+
+  tooltipPos.value = { x, y };
 }
 
 function dispatchAction(action: GameAction) {
@@ -412,7 +600,7 @@ watch(
     // reconnect'а или повторного mount), и модалка появлялась повторно.
     if (newPhase === "CARD_REVEAL" && isCurrentPlayerActive.value) {
       if (state.value.cardContext?.card) {
-        // Свежая карта с сервера — синхронизируем UI и показываем модалку.
+        // Свежая карта с сервера — синхронизируем UI и ��оказываем модалку.
         lastDrawnCard.value = state.value.cardContext.card;
         cardText.value = state.value.cardContext.card.text;
         cardDeck.value =
@@ -762,10 +950,6 @@ function onCloseRent() {
   sendConfirmForCurrentPhase("PAY_RENT", { type: "CONFIRM_RENT_PAYMENT" });
 }
 
-function onBuy() {
-  if (!canBuy.value) return;
-  showBuyModal.value = true;
-}
 function onOpenTrade() {
   if (!canTrade.value) return;
   // Открываем локальный store-экран (экран 1 — выбор партнёра).
@@ -776,6 +960,27 @@ function onOpenTrade() {
 function onOpenMortgage() {
   if (!canMortgage.value) return;
   useMortgageStore().open();
+}
+
+/**
+ * Открыть модалку «Строить».
+ *
+ * По нажатию кнопки 🏗️ «Строить» в ActionsPanel клиент посылает
+ * `OPEN_BUILDING_PHASE` — это переключает сервер в фазу
+ * `BUILDING_PHASE` (новая «UX»-фаза, в которой разрешены
+ * `BUILD_HOUSE` / `SELL_HOUSE` / `MORTGAGE_PROPERTY` /
+ * `UNMORTGAGE_PROPERTY` / `CONFIRM_BUILDING_PHASE`).
+ *
+ * Модалка открывается АВТОМАТИЧЕСКИ по phase-watcher'у в
+ * `stores/game.ts` (как только приходит `state.phase ===
+ * "BUILDING_PHASE"`, стор `useBuildStore.open()` вызывается из
+ * `socket.on("game:state")`). Это исключает гонку между локальным
+ * `open()` и серверным переходом фазы — UI всегда синхронизирован
+ * с истиной на сервере.
+ */
+function onOpenBuild() {
+  if (!canBuild.value) return;
+  dispatchAction({ type: "OPEN_BUILDING_PHASE" });
 }
 
 function onConfirmBuy() {
@@ -805,7 +1010,7 @@ function logout() {
 <template>
   <div class="game-container">
     <div v-if="!game.isConnected" class="connecting">
-      <p>🔄 Подкл��чение к серверу...</p>
+      <p>🔄 Подключение к серверу...</p>
     </div>
 
     <template v-else>
@@ -819,12 +1024,15 @@ function logout() {
         <div class="board-area">
           <SettingsPanel />
           <Board
+            ref="boardRef"
             :cells="cells"
             :players="players"
             :display-positions="displayPositions"
             :dice-values="diceValues"
             :dice-rolling="diceRolling"
             @cell-click="onCellClick"
+            @cell-hover="onCellHover"
+            @cell-leave="onCellLeave"
             @dice-roll-done="onDiceRollDone"
           />
         </div>
@@ -833,15 +1041,15 @@ function logout() {
           <PlayersPanel :players="players" :current-player-id="currentPlayerId" />
           <ActionsPanel
             :can-roll="canRoll && !showAuctionModal"
-            :can-buy="canBuy && !showAuctionModal"
+            :can-build="canBuild && !showAuctionModal"
             :can-end-turn="canEndTurn && !showAuctionModal"
             :can-trade="canTrade && !showAuctionModal"
             :can-mortgage="canMortgage && !showAuctionModal"
             :must-roll-again="mustRollAgain"
             @open-trade="onOpenTrade"
             @open-mortgage="onOpenMortgage"
+            @open-build="onOpenBuild"
             @roll="onRoll"
-            @buy="onBuy"
             @end-turn="onEndTurn"
           />
           <LogPanel />
@@ -901,7 +1109,25 @@ function logout() {
 
       <MortgageModal />
 
-      <CellTooltip :cell="hoveredCell" :owner="cellOwner" :x="tooltipPos.x" :y="tooltipPos.y" />
+      <!--
+        Унифицированная модалка «Строить»: build/sell/mortgage/unmortgage.
+        Открывается АВТОМАТИЧЕСКИ по phase-watcher'у в `stores/game.ts`
+        при `state.phase === "BUILDING_PHASE"`. Закрывается
+        (с отправкой `CONFIRM_BUILDING_PHASE` на сервер) по кнопке
+        «ПРИНЯТЬ» внутри модалки — см. `BuildModal.vue` и
+        `useBuildStore.confirmAndClose()`. Это исключает гонку
+        между локальным и серверным состоянием.
+      -->
+      <BuildModal />
+
+      <CellTooltip
+        :cell="hoveredCell"
+        :owner="cellOwner"
+        :state="state"
+        :x="tooltipPos.x"
+        :y="tooltipPos.y"
+        :side="tooltipSide"
+      />
 
       <GameOverModal />
     </template>

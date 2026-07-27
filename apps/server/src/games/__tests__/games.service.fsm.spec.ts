@@ -733,4 +733,83 @@ describe("GamesService.applyAction (FSM)", () => {
       expect(p.mustRollAgain).toBe(false);
     });
   });
+
+  // ------------------------------------------------------------------
+  // Регрессионные тесты: `preBuildingPhase`
+  // ------------------------------------------------------------------
+  // Баг был такой: если в фазе ROLLING (кнопка «Бросить кубики» активна)
+  // игрок открывал меню строительства и тут же нажимал «Принять» —
+  // сервер принудительно ставил state.phase = "BUILDING", из-за чего
+  // canRollDice() возвращал false и кнопка Бросить отключалась до конца
+  // хода. Фикс: при OPEN_BUILDING_PHASE запоминаем state.phase в
+  // `preBuildingPhase`, а при CONFIRM_BUILDING_PHASE восстанавливаем.
+  describe("preBuildingPhase (regression: открыть и закрыть меню строительства)", () => {
+    it("в ROLLING: OPEN_BUILDING_PHASE → CONFIRM_BUILDING_PHASE → остаёмся в ROLLING, preBuildingPhase сброшен", async () => {
+      expect(activeState.phase).toBe("ROLLING");
+      // Игрок кликнул «Строить» (до броска кубиков).
+      await act({ type: "OPEN_BUILDING_PHASE" });
+      expect(activeState.phase).toBe("BUILDING_PHASE");
+      expect(activeState.preBuildingPhase).toBe("ROLLING");
+      // Игрок передумал строить — кликнул «Принять» (закрыть).
+      await act({ type: "CONFIRM_BUILDING_PHASE" });
+      // ФАЗА ВОССТАНОВЛЕНА → кнопка «Бросить кубики» снова активна.
+      expect(activeState.phase).toBe("ROLLING");
+      // preBuildingPhase очищен, иначе при следующем OPEN_BUILDING_PHASE
+      // восстановили бы неправильную фазу.
+      expect(activeState.preBuildingPhase).toBeUndefined();
+    });
+
+    it("в BUILDING: OPEN_BUILDING_PHASE → CONFIRM_BUILDING_PHASE → остаёмся в BUILDING (классический кейс)", async () => {
+      activeState.phase = "BUILDING";
+      await act({ type: "OPEN_BUILDING_PHASE" });
+      expect(activeState.phase).toBe("BUILDING_PHASE");
+      expect(activeState.preBuildingPhase).toBe("BUILDING");
+      await act({ type: "CONFIRM_BUILDING_PHASE" });
+      expect(activeState.phase).toBe("BUILDING");
+      expect(activeState.preBuildingPhase).toBeUndefined();
+    });
+
+    it("повторный цикл open → confirm → open → confirm работает корректно", async () => {
+      expect(activeState.phase).toBe("ROLLING");
+      // цикл 1
+      await act({ type: "OPEN_BUILDING_PHASE" });
+      expect(activeState.preBuildingPhase).toBe("ROLLING");
+      await act({ type: "CONFIRM_BUILDING_PHASE" });
+      expect(activeState.phase).toBe("ROLLING");
+      expect(activeState.preBuildingPhase).toBeUndefined();
+      // цикл 2 — не должно «прилипнуть» старое значение.
+      await act({ type: "OPEN_BUILDING_PHASE" });
+      expect(activeState.preBuildingPhase).toBe("ROLLING");
+      await act({ type: "CONFIRM_BUILDING_PHASE" });
+      expect(activeState.phase).toBe("ROLLING");
+      expect(activeState.preBuildingPhase).toBeUndefined();
+    });
+
+    it("повторный OPEN_BUILDING_PHASE в BUILDING_PHASE — no-op (preBuildingPhase не перезаписывается)", async () => {
+      activeState.phase = "BUILDING";
+      await act({ type: "OPEN_BUILDING_PHASE" });
+      expect(activeState.phase).toBe("BUILDING_PHASE");
+      expect(activeState.preBuildingPhase).toBe("BUILDING");
+      // Повторный клик (например, при побочных эффектах UI).
+      await act({ type: "OPEN_BUILDING_PHASE" });
+      // Должны остаться в BUILDING_PHASE, фаза-источник не перезаписана.
+      expect(activeState.phase).toBe("BUILDING_PHASE");
+      expect(activeState.preBuildingPhase).toBe("BUILDING");
+      // Корректное закрытие.
+      await act({ type: "CONFIRM_BUILDING_PHASE" });
+      expect(activeState.phase).toBe("BUILDING");
+    });
+
+    it("preBuildingPhase не переносится между ходами (handleStartTurn сбрасывает поле)", async () => {
+      // Имитируем полу-открытое состояние: preBuildingPhase заполнено,
+      // а phase=RESTING/END_TURN (например, реконнект клиента).
+      activeState.phase = "ROLLING";
+      activeState.preBuildingPhase = "ROLLING";
+      // Следующий ход: handleStartTurn обязан сбросить поле.
+      await act({ type: "ROLL_DICE" });
+      // После броска предыдущая «грязная» фаза не должна восстановиться.
+      // (handleStartTurn сбрасывает preBuildingPhase в undefined.)
+      expect(activeState.preBuildingPhase).toBeUndefined();
+    });
+  });
 });

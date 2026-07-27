@@ -35,7 +35,26 @@ function onOverlayClick() {
       </button>
       <div v-if="title" class="modal-title">{{ title }}</div>
       <div v-if="subtitle" class="modal-subtitle">{{ subtitle }}</div>
-      <slot />
+      <div class="modal-body">
+        <slot />
+      </div>
+      <div v-if="$slots.footer" class="modal-footer">
+        <slot name="footer" />
+      </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.modal-footer {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(149, 114, 218, 0.2);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.modal-footer:empty {
+  display: none;
+}
+</style>

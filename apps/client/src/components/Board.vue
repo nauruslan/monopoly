@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import CellComp from "./Cell.vue";
 import Dice from "./Dice.vue";
+import { getCellGridPos } from "@monopoly/shared";
 import type { Cell as CellType } from "@monopoly/shared";
 
 const props = defineProps<{
@@ -25,8 +26,27 @@ const props = defineProps<{
   diceRolling?: boolean;
 }>();
 
+/**
+ * Ссылка на корневой DOM-элемент доски. Используется `GameView`
+ * для расчёта координат всплывающих подсказок (`CellTooltip`) с
+ * учётом реальных размеров и положения доски на экране — тултип
+ * позиционируется ВНУТРИ игровой доски в зависимости от того, в
+ * каком «секторе» (top/bottom/left/right) находится клетка.
+ */
+const boardEl = ref<HTMLDivElement | null>(null);
+defineExpose({ boardEl });
+
 const emit = defineEmits<{
   (e: "cell-click", payload: { cell: CellType; event: MouseEvent }): void;
+  /**
+   * Hover на клетку (наведение мышью). Используется для показа
+   * расширенного тултипа в `GameView` (см. `CellTooltip.vue`).
+   */
+  (e: "cell-hover", payload: { cell: CellType; event: MouseEvent }): void;
+  /**
+   * Уход курсора с клетки. Используется для скрытия тултипа.
+   */
+  (e: "cell-leave", payload: { cell: CellType; event: MouseEvent }): void;
   /**
    * Прокидывается из `<Dice>` наверх, в GameView, чтобы тот
    * погасил `diceRolling` ровно по окончании 2-секундной анимации.
@@ -37,6 +57,26 @@ const emit = defineEmits<{
 function onCellClick(cell: CellType, event: MouseEvent) {
   emit("cell-click", { cell, event });
 }
+function onCellHover(cell: CellType, event: MouseEvent) {
+  emit("cell-hover", { cell, event });
+}
+function onCellLeave(cell: CellType, event: MouseEvent) {
+  emit("cell-leave", { cell, event });
+}
+
+// Обёртки для шаблона: Cell.vue эмитит только MouseEvent (а не
+// (cell, event) — Board.vue знает Cell из v-for). Чтобы не дублировать
+// логику в анонимных стрелках и не путать ts-plugin, делаем явные
+// функции-хендлеры.
+function onCellClickHandler(cell: CellType, event: MouseEvent) {
+  onCellClick(cell, event);
+}
+function onCellHoverHandler(cell: CellType, event: MouseEvent) {
+  onCellHover(cell, event);
+}
+function onCellLeaveHandler(cell: CellType, event: MouseEvent) {
+  onCellLeave(cell, event);
+}
 
 function onDiceRollDone() {
   emit("dice-roll-done");
@@ -46,23 +86,6 @@ function onDiceRollDone() {
 // иначе берём `player.position` из пропсов.
 function displayPos(p: { id: string; position: number }): number {
   return props.displayPositions?.[p.id] ?? p.position;
-}
-
-/**
- * Определяет позицию клетки на сетке 11x11
- *
- * Расположение клеток в Монополии:
- * - id 0-10:  нижняя строка, справа налево (id 0 в правом нижнем углу)
- * - id 11-19: левая колонка, снизу вверх
- * - id 21-30: верхняя строка, слева направо
- * - id 31-39: правая колонка, сверху вниз
- * - id 20:    не входит в «рамку» — это «Бесплатная стоянка» в углу
- */
-function getGridPos(i: number) {
-  if (i <= 10) return { row: 11, col: 11 - i };
-  if (i <= 19) return { row: 11 - (i - 10), col: 1 };
-  if (i <= 30) return { row: 1, col: i - 19 };
-  return { row: i - 29, col: 11 };
 }
 
 // Группируем игроков по клеткам, на которых они стоят (с учётом анимации).
@@ -85,16 +108,19 @@ function ownerColor(cell: CellType): string | undefined {
 
 <template>
   <div class="board-wrapper">
-    <div class="board">
+    <div ref="boardEl" class="board">
       <template v-for="(cell, i) in cells" :key="cell.id">
         <CellComp
           :cell="cell"
           :owner-color="ownerColor(cell)"
+          :data-cell-id="cell.id"
           :style="{
-            gridColumn: getGridPos(i).col,
-            gridRow: getGridPos(i).row,
+            gridColumn: getCellGridPos(i).col,
+            gridRow: getCellGridPos(i).row,
           }"
-          @click="onCellClick(cell, $event)"
+          @click="onCellClickHandler(cell, $event)"
+          @hover="onCellHoverHandler(cell, $event)"
+          @leave="onCellLeaveHandler(cell, $event)"
         >
           <div
             v-for="p in playersOnCell.get(cell.id) || []"

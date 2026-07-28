@@ -21,6 +21,8 @@ import {
   isCurrentPlayer,
   canBuyProperty,
   canTrade,
+  canManageMortgage,
+  canOpenBuildingPhase,
 } from "../turn-permissions";
 import type { GameState, Player } from "@monopoly/shared";
 import { BOARD, DEFAULT_SETTINGS } from "@monopoly/shared";
@@ -255,10 +257,18 @@ describe("turn-permissions", () => {
       expect(canTrade(s, s.players[0]!)).toBe(false);
     });
 
-    it("false в фазе BUILDING, если игрок В тюрьме (правила Монополии)", () => {
+    it("true в фазе BUILDING, даже если игрок В тюрьме (правила Hasbro)", () => {
+      // Торговля в тюрьме РАЗРЕШЕНА по правилам Монополии: заключённый
+      // волен управлять своей недвижимостью, пока отбывает срок.
       const s = makeState({ phase: "BUILDING" });
       const p = { ...s.players[0]!, inJail: true };
-      expect(canTrade(s, p)).toBe(false);
+      expect(canTrade(s, p)).toBe(true);
+    });
+
+    it("true в фазе ROLLING, даже если игрок В тюрьме (правила Hasbro)", () => {
+      const s = makeState({ phase: "ROLLING" });
+      const p = { ...s.players[0]!, inJail: true };
+      expect(canTrade(s, p)).toBe(true);
     });
 
     it("false если moveAnimation заполнен (анимация идёт)", () => {
@@ -388,6 +398,60 @@ describe("turn-permissions", () => {
         players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
       });
       expect(canRollDice(s2, s2.players[0]!)).toBe(true);
+    });
+  });
+
+  // ─────────────────── Тюрьма: торги/залог/стройка РАЗРЕШЕНЫ (Hasbro) ───────────────────
+  //
+  // По правилам Монополии (Hasbro) заключённый может управлять своей
+  // недвижимостью: торговать, закладывать/выкупать клетки, покупать дома
+  // и продавать их. Запрещены только бросок кубиков и покупка клетки при
+  // приземлении. Эти тесты фиксируют, что turn-permissions больше не
+  // блокирует canTrade/canManageMortgage/canOpenBuildingPhase по inJail.
+  describe("тюрьма: торги/залог/стройка РАЗРЕШЕНЫ (правила Hasbro)", () => {
+    it("canManageMortgage: true в BUILDING, даже если игрок В тюрьме", () => {
+      const s = makeState({ phase: "BUILDING" });
+      const p = { ...s.players[0]!, inJail: true };
+      // Даже если ни одной клетки нет — игрок В тюрьме не должен
+      // являться причиной блокировки. Проверяем, что inJail не даёт
+      // отрицательный ответ сам по себе: при наличии клетки = true.
+      expect(canManageMortgage(s, p, 1, 0)).toBe(true);
+    });
+
+    it("canOpenBuildingPhase: true в BUILDING, даже если игрок В тюрьме", () => {
+      const s = makeState({ phase: "BUILDING" });
+      const p = { ...s.players[0]!, inJail: true };
+      expect(canOpenBuildingPhase(s, p, 1, 0)).toBe(true);
+    });
+
+    it("canManageMortgage: false в ROLLING (фаза не BUILDING) — НЕ зависит от inJail", () => {
+      const s = makeState({ phase: "ROLLING" });
+      const p = { ...s.players[0]!, inJail: true };
+      expect(canManageMortgage(s, p, 1, 0)).toBe(false);
+    });
+
+    it("canOpenBuildingPhase: true в ROLLING (как canTrade) — НЕ зависит от inJail", () => {
+      // По GDD §1.1 строительство разрешено и в фазе ROLLING,
+      // точно так же, как и торговля (canTrade тоже true в ROLLING).
+      const s = makeState({ phase: "ROLLING" });
+      const p = { ...s.players[0]!, inJail: true };
+      expect(canOpenBuildingPhase(s, p, 1, 0)).toBe(true);
+    });
+
+    it("canOpenBuildingPhase: false в AUCTION_ACTIVE (interrupt-фаза)", () => {
+      // AUCTION_ACTIVE не входит в список разрешённых фаз.
+      const s = makeState({ phase: "AUCTION_ACTIVE" });
+      expect(canOpenBuildingPhase(s, s.players[0]!, 1, 0)).toBe(false);
+    });
+
+    it("canManageMortgage: false если mortgageable+unmortgageable=0 (модалка была бы пустой)", () => {
+      const s = makeState({ phase: "BUILDING" });
+      expect(canManageMortgage(s, s.players[0]!, 0, 0)).toBe(false);
+    });
+
+    it("canOpenBuildingPhase: false если buildable+sellable=0 (модалка была бы пустой)", () => {
+      const s = makeState({ phase: "BUILDING" });
+      expect(canOpenBuildingPhase(s, s.players[0]!, 0, 0)).toBe(false);
     });
   });
 });

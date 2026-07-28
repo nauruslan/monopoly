@@ -196,13 +196,16 @@ export function canBuyProperty(state: GameState, player: Player): boolean {
  *  - фаза партии — одна из «своих» Turn FSM (разрешено ТОРГОВАТЬ как ДО броска,
  *    так и ПОСЛЕ — на этапе строительства, передвижения фишки и т.п.);
  *  - ЗАПРЕЩЕНО во время анимации движения (`MOVE_ANIMATION`) и в interrupt-фазах
- *    (аукцион, банкротство, чужая торговля, FINISHED, BOT_THINKING и т.п.);
- *  - игрок НЕ в тюрьме (правилами Монополии торговля в тюрьме запрещена).
+ *    (аукцион, банкротство, чужая торговля, FINISHED, BOT_THINKING и т.п.).
+ *
+ * ВАЖНО: по правилам Hasbro торговать в тюрьме РАЗРЕШЕНО — заключённый
+ * волен управлять своей недвижимостью. Аналогично разрешены залог/выкуп
+ * и строительство. Бросок кубиков и покупка клетки по-прежнему запрещены
+ * (см. {@link canRollDice} и {@link canBuyProperty}).
  */
 export function canTrade(state: GameState, player: Player): boolean {
   if (!baseChecksOk(state, player)) return false;
   if (!isCurrentPlayer(state, player)) return false;
-  if (player.inJail) return false;
 
   // Разрешённые фазы — все «свои» фазы хода, плюс финальные/глобальные
   // терминальные фазы явно запрещены.
@@ -256,11 +259,14 @@ export function mustRollDiceNow(state: GameState, player: Player): boolean {
  * Это согласовано с логикой `handleBuilding` в GamesService —
  * в любой другой фазе действие MORTGAGE_PROPERTY/UNMORTGAGE_PROPERTY
  * будет отклонено сервером.
+ *
+ * В тюрьме залог/выкуп РАЗРЕШЕНЫ (правила Hasbro): `inJail` явно
+ * НЕ блокируется здесь — модалка «Залог/Выкуп» доступна в фазе
+ * `BUILDING` даже заключённому.
  */
 function isMortgagePhase(state: GameState, player: Player): boolean {
   if (!baseChecksOk(state, player)) return false;
   if (!isCurrentPlayer(state, player)) return false;
-  if (player.inJail) return false;
   if (state.phase !== "BUILDING") return false;
   return true;
 }
@@ -272,8 +278,9 @@ function isMortgagePhase(state: GameState, player: Player): boolean {
  *  - базовые проверки пройдены (партия активна, не банкрот);
  *  - это ход этого игрока;
  *  - фаза = `BUILDING`;
- *  - игрок не в тюрьме;
  *  - у игрока есть хотя бы одна клетка, которую МОЖНО заложить ИЛИ выкупить.
+ *
+ * В тюрьме залог/выкуп РАЗРЕШЕНЫ (правила Hasbro).
  *
  * Используется UI (`ActionsPanel.vue`) для активности кнопки «Залог/Выкуп»,
  * чтобы игрок не открывал пустую модалку.
@@ -326,7 +333,7 @@ export function canOpenBuildingPhase(
 ): boolean {
   if (!baseChecksOk(state, player)) return false;
   if (!isCurrentPlayer(state, player)) return false;
-  if (player.inJail) return false;
+  // Тюрьма НЕ блокирует строительство/продажу (правила Hasbro).
   if (state.moveAnimation) return false;
 
   // Те же «свои» Turn-фазы, что и в canTrade. Если партия сейчас

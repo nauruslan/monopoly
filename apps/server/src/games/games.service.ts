@@ -292,14 +292,7 @@ export class GamesService {
       throw new ForbiddenException("Нельзя покупать, находясь в тюрьме");
     }
 
-    // 2.3) Ранняя защита «торговли в тюрьме».
-    // Правила Монополии запрещают торговлю в тюрьме. В текущем ходу
-    // игрок может только завершить ход.
-    if (action.type === "TRADE_OFFER" && player.inJail) {
-      throw new ForbiddenException("Нельзя торговать, находясь в тюрьме");
-    }
-
-    // 2.4) Ранняя защита блокировки торговли: TRADE_OFFER получателю,
+    // 2.3) Ранняя защита блокировки торговли: TRADE_OFFER получателю,
     // который добавил инициатора в `blocked_players`, отклоняется.
     if (action.type === "TRADE_OFFER") {
       const recipient = state.players.find((p) => p.id === action.recipientId);
@@ -1807,9 +1800,9 @@ export class GamesService {
         // Допустимо ТОЛЬКО если у игрока есть хоть один объект, к которому
         // применима хотя бы одна из операций. Иначе — кнопка должна быть
         // неактивна, но на сервере всё равно валидируем.
-        if (player.inJail) {
-          throw new ForbiddenException("В тюрьме нельзя строить");
-        }
+        //
+        // В тюрьме строительство/залог/выкуп РАЗРЕШЕНЫ (правила Hasbro):
+        // заключённый волен управлять своей недвижимостью.
         if (player.mustRollAgain) {
           throw new ForbiddenException("Сначала бросьте кубики ещё раз");
         }
@@ -1875,9 +1868,8 @@ export class GamesService {
     if (!isCurrentPlayer(state, player)) {
       throw new ForbiddenException("Сейчас не ваш ход");
     }
-    if (player.inJail) {
-      throw new ForbiddenException("В тюрьме нельзя строить");
-    }
+    // В тюрьме строительство/залог/выкуп РАЗРЕШЕНЫ (правила Hasbro):
+    // заключённый волен управлять своей недвижимостью.
     // `mustRollAgain` НЕ блокирует открытие строительной модалки —
     // это согласовано с `canTrade` (GDD §1.1: «в любой момент хода»).
     // Игрок может открыть модалку, посмотреть варианты и, если ничего

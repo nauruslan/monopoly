@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute, useRouter } from "vue-router";
@@ -203,10 +203,11 @@ const canEndTurn = computed(() => {
 });
 
 // Торговля доступна в любой момент хода активного игрока (GDD §1.1).
-// Запрещаем только во время interrupt-фаз, анимации броска/движения и в тюрьме.
+// Запрещаем только во время interrupt-фаз и анимации броска/движения.
+// В тюрьме торговля РАЗРЕШЕНА по правилам Монополии (Hasbro):
+// игрок может управлять своей недвижимостью, пока отбывает срок.
 const canTrade = computed(() => {
   if (!isMyTurn.value) return false;
-  if (currentPlayer.value?.inJail) return false;
   // Идёт анимация кубиков/движения — нельзя прерывать.
   if (diceRolling.value) return false;
   if (state.value.moveAnimation) return false;
@@ -222,9 +223,11 @@ const mustRollAgain = computed(() => currentPlayer.value?.mustRollAgain === true
 // игрок только что приземлился на новую клетку и хочет сразу её
 // заложить — он не обязан ждать фазы BUILDING.
 //
+// ВАЖНО: залог/выкуп РАЗРЕШЕНЫ даже в тюрьме (правила Hasbro):
+// заключённый волен управлять своей недвижимостью.
+//
 // Запрещаем только:
 //   - чужой ход;
-//   - тюрьму (правилами запрещены любые операции с недвижимостью);
 //   - interrupt-фазы (аукцион, торговля, банкротство, FINISHED, ...);
 //   - анимации (бросок, движение фишки).
 //
@@ -232,7 +235,6 @@ const mustRollAgain = computed(() => currentPlayer.value?.mustRollAgain === true
 // для операции — иначе модалка будет пустой, и кнопка бесполезна.
 const canMortgage = computed(() => {
   if (!isMyTurn.value) return false;
-  if (currentPlayer.value?.inJail) return false;
   if (diceRolling.value) return false;
   if (state.value.moveAnimation) return false;
   if (showAuctionModal.value) return false;
@@ -293,7 +295,7 @@ function closeBankruptNotice() {
   showBankruptNotice.value = false;
 }
 
-// ===== Тултип (GDD §1.1 — hover) =====
+// ===== Тултип  =====
 const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
 const tooltipSide = ref<BoardSide>("bottom");

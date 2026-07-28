@@ -251,7 +251,9 @@ export class BotService {
    * следующем тике вернёт CONFIRM_BUILDING_PHASE и не зациклится).
    */
   private hasAnyBuildAction(player: Player, state: GameState): boolean {
-    if (player.inJail) return false;
+    // В тюрьме строительство/залог/выкуп РАЗРЕШЕНЫ (правила Hasbro).
+    // Бот, как и человек, может управлять своей недвижимостью,
+    // пока отбывает срок.
     if (this.findBuildHouseTarget(player, state) !== null) return true;
     if (this.findUnmortgageTarget(player, state) !== null) return true;
     if (this.findMortgageTarget(player, state) !== null) return true;

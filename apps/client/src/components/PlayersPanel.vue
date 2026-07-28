@@ -26,8 +26,9 @@ const thinkingPlayerId = computed(() => state.value.botThinking?.playerId ?? nul
         :key="p.id"
         class="player-card"
         :class="{
-          active: p.id === currentPlayerId,
+          active: p.id === currentPlayerId && !p.isBankrupt,
           thinking: p.id === thinkingPlayerId,
+          bankrupt: p.isBankrupt,
         }"
         :style="{ '--player-color': p.color }"
       >
@@ -39,6 +40,9 @@ const thinkingPlayerId = computed(() => state.value.botThinking?.playerId ?? nul
             {{ p.displayName }}
             <span v-if="p.inJail" class="jail-badge">🔒</span>
             <span v-if="p.kind === 'bot'" class="bot-badge">🤖</span>
+            <span v-if="p.isBankrupt" class="bankrupt-badge" title="Игрок обанкротился и выбыл">
+              💀 БАНКРОТ
+            </span>
           </div>
         </div>
         <div class="player-money">₽{{ p.money.toLocaleString() }}</div>
@@ -48,9 +52,16 @@ const thinkingPlayerId = computed(() => state.value.botThinking?.playerId ?? nul
             :style="{ width: Math.min((p.money / 5000) * 100, 100) + '%' }"
           ></div>
         </div>
-        <div class="player-props">Собственность: {{ p.properties.length }}</div>
+        <div class="player-props">
+          <template v-if="p.isBankrupt">Выбыл из игры</template>
+          <template v-else>Собственность: {{ p.properties.length }}</template>
+        </div>
         <!-- индикатор «Думает…» для бота в фазе BOT_THINKING. -->
-        <div v-if="p.id === thinkingPlayerId" class="thinking-indicator" aria-live="polite">
+        <div
+          v-if="p.id === thinkingPlayerId && !p.isBankrupt"
+          class="thinking-indicator"
+          aria-live="polite"
+        >
           <span class="thinking-dots"> <span>.</span><span>.</span><span>.</span> </span>
           <span class="thinking-text">Думает</span>
         </div>
@@ -61,10 +72,44 @@ const thinkingPlayerId = computed(() => state.value.botThinking?.playerId ?? nul
 
 <style scoped>
 .jail-badge,
-.bot-badge {
+.bot-badge,
+.bankrupt-badge {
   font-size: 11px;
   margin-left: 4px;
   opacity: 0.8;
+}
+.bankrupt-badge {
+  display: inline-block;
+  background: linear-gradient(135deg, #c33, #ff5e5e);
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  margin-left: 6px;
+  opacity: 1;
+  box-shadow: 0 1px 4px rgba(204, 51, 51, 0.4);
+}
+.player-card.bankrupt {
+  filter: grayscale(0.85) brightness(0.75);
+  opacity: 0.75;
+  position: relative;
+}
+.player-card.bankrupt::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px dashed rgba(204, 51, 51, 0.55);
+  border-radius: inherit;
+  pointer-events: none;
+}
+.player-card.bankrupt .player-money {
+  color: #c33;
+  text-decoration: line-through;
+}
+.player-card.bankrupt .player-money-bar {
+  display: none;
 }
 /* подсветка карточки + анимированный индикатор «Думает…». */
 .player-card.thinking {

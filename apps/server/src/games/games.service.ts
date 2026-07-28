@@ -636,6 +636,14 @@ export class GamesService {
     state.jailRollOutcome = undefined;
     // Новый ход — сбрасываем журнал попыток инициации торговли.
     state.tradeInitiationLog = [];
+    // ВАЖНО: если у игрока отрицательный баланс к началу хода (например,
+    // остался с прошлого хода, или деньги списали недавно) — принудительно
+    // запускаем процедуру банкротства. Игрок НЕ может бросать кубики
+    // или действовать в тюрьме, пока не ликвидирует имущество.
+    if (player.money < 0 && !player.isBankrupt) {
+      this.startBankruptcyProcedure(state, player, null, -player.money);
+      return {};
+    }
     if (player.inJail) {
       state.phase = "JAIL_DECISION";
     } else {
@@ -747,13 +755,13 @@ export class GamesService {
       player.mustRollAgain = false;
 
       if (outcome === "pay") {
-        // 3-й промах: принудительная оплата 50₽. `Math.max(0, ...)` —
-        // защита от отрицательного баланса; в реальной логике после
-        // этого должен сработать `BankruptcyService`. Здесь НЕ бросаем
-        // ForbiddenException при нехватке денег — по правилам Монополии
-        // штраф всё равно применяется (долг может привести к банкротству
-        // в handleResolvingLanding).
-        player.money = Math.max(0, player.money - 50);
+        // 3-й промах: принудительная оплата 50₽. Списываем ПОЛНУЮ сумму
+        // (без `Math.max(0, ...)`) — если денег не хватило, баланс
+        // уйдёт в минус и сработает триггер банкротства.
+        player.money -= 50;
+        if (this.shouldStartBankruptcy(state, player, null, 50)) {
+          return {};
+        }
       }
       // Для "escape" (дубль) деньги НЕ списываются — игрок выходит
       // бесплатно, даже на 3-й попытке. Это правильный ход Монополии.
@@ -1173,11 +1181,16 @@ export class GamesService {
       const ownerId = ctx?.ownerId ?? cell.ownerId;
       const owner = state.players.find((p) => p.id === ownerId);
       if (owner && rent > 0) {
-        player.money = Math.max(0, player.money - rent);
+        // ВАЖНО: НЕ используем `Math.max(0, ...)` — пусть баланс
+        // уйдёт в минус. Это сигнал для триггера банкротства.
+        // По правилам Монополии рента списывается полностью, а
+        // отрицательный остаток — это именно «нечем платить».
+        player.money -= rent;
         owner.money += rent;
         state.rentContext = undefined;
-        if (player.money === 0) {
-          this.startBankruptcyProcedure(state, player, owner, rent);
+        // Триггер банкротства: проверяем, что у игрока
+        // реально нет ликвидности (или её не хватает на покрытие).
+        if (this.shouldStartBankruptcy(state, player, owner, rent)) {
           return {};
         }
       } else {
@@ -1189,10 +1202,11 @@ export class GamesService {
 
     // Legacy-fallback: TAX без taxVariant (старые данные).
     if (cell.type === "TAX" && cell.taxAmount) {
-      player.money = Math.max(0, player.money - cell.taxAmount);
+      // ВАЖНО: НЕ клампим в 0 — пусть баланс уйдёт в минус и
+      // сработает триггер банкротства.
+      player.money -= cell.taxAmount;
       state.rentContext = undefined;
-      if (player.money === 0) {
-        this.startBankruptcyProcedure(state, player, null, cell.taxAmount);
+      if (this.shouldStartBankruptcy(state, player, null, cell.taxAmount)) {
         return {};
       }
       this.afterRentOrTax(state, player);
@@ -1224,9 +1238,10 @@ export class GamesService {
       this.afterRentOrTax(state, player);
       return {};
     }
-    player.money = Math.max(0, player.money - cell.taxAmount);
-    if (player.money === 0) {
-      this.startBankruptcyProcedure(state, player, null, cell.taxAmount);
+    // ВАЖНО: НЕ клампим в 0 — пусть баланс уйдёт в минус,
+    // сработает триггер банкротства.
+    player.money -= cell.taxAmount;
+    if (this.shouldStartBankruptcy(state, player, null, cell.taxAmount)) {
       return {};
     }
     this.afterRentOrTax(state, player);
@@ -1282,9 +1297,17 @@ export class GamesService {
       if (cell.ownerId) throw new ForbiddenException("Клетка уже куплена");
       if (cell.price === undefined) throw new BadRequestException("Клетка не продаётся");
       if (player.money < cell.price) throw new ForbiddenException("Недостаточно денег");
+      // Покупка идёт по полной стоимости. Если у игрока ровно хватает
+      // (player.money === cell.price) — баланс уходит в 0, но это НЕ
+      // банкротство (правильно: долга нет, имущество приобретено). Если
+      // покупка привела к отрицательному балансу (например, баг/гонка)
+      // — списываем как есть и проверяем триггер банкротства.
       player.money -= cell.price;
       player.properties.push(cell.id);
       cell.ownerId = player.id;
+      if (this.shouldStartBankruptcy(state, player, null, cell.price)) {
+        return {};
+      }
       state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
       return {};
     }
@@ -1596,6 +1619,20 @@ export class GamesService {
     }
 
     // stay: money / jail-free / luxury-tax-house
+    //
+    // ВАЖНО: после списания (особенно luxury-tax-house) баланс может
+    // уйти в минус. Триггер банкротства должен сработать ДО перехода
+    // в BUILDING/ROLLING — иначе игрок просто продолжит ход с
+    // отрицательным балансом.
+    //
+    // Спецслучай: `money` с положительным amount (карточка «получите N₽»)
+    // не может привести к минусу, но мы всё равно вызываем проверку —
+    // она no-op, если `player.money >= 0`.
+    if (this.shouldStartBankruptcy(state, player, null, 0)) {
+      // shouldStartBankruptcy уже изменил фазу на BANKRUPTCY_LIQUIDATE
+      // (или объявил банкрота) — возвращаемся, дальнейшие шаги не нужны.
+      return { card };
+    }
     this.afterRentOrTax(state, player);
     state.cardContext = undefined;
     return { card };
@@ -1645,6 +1682,17 @@ export class GamesService {
       case "BUILD_HOUSE": {
         const result = this.buildSvc.build(state, player, action.cellId);
         const cell = state.board[action.cellId];
+        // Проверяем триггер банкротства: BuildService мог списать
+        // больше, чем у игрока есть (теоретически — если housePrice
+        // выставлен криво). В нормальной игре BuildService валидирует
+        // наличие денег и кидает ошибку, но для устойчивости —
+        // проверяем.
+        if (this.shouldStartBankruptcy(state, player, null, result.cost)) {
+          // Возвращаем пустой результат — событие постройки НЕ
+          // формируем (банкротство перебило событие). Событие
+          // банкротства будет сформировано в startBankruptcyProcedure.
+          return {};
+        }
         const isHotel = result.isHotel;
         const emoji = isHotel ? "🏨" : "🏠";
         const noun = isHotel ? "отель" : result.newHousesCount === 1 ? "дом" : "дома";
@@ -1775,6 +1823,17 @@ export class GamesService {
       }
 
       case "END_TURN": {
+        // ВАЖНО: по правилам Монополии игрок НЕ может завершить ход с
+        // отрицательным балансом — он обязан сначала ликвидировать
+        // имущество (продать дома, заложить клетки) и выйти в 0+.
+        // Если баланс >= 0 — обычный переход.
+        if (player.money < 0) {
+          // Запускаем процедуру банкротства: переводим фазу в
+          // BANKRUPTCY_LIQUIDATE. Кредитор = null (никто конкретный,
+          // это «нечем крыть» в целом).
+          this.startBankruptcyProcedure(state, player, null, -player.money);
+          return {};
+        }
         if (player.mustRollAgain) {
           player.mustRollAgain = false;
           player.consecutiveDoubles = 0;
@@ -1948,6 +2007,14 @@ export class GamesService {
     if (action.type !== "CONFIRM_END_TURN" && action.type !== "END_TURN") {
       throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе END_TURN`);
     }
+    // ВАЖНО: финальная защита от «завершения с минусом». Если баланс
+    // ушёл в минус по любой причине (не поймали в handleBuilding /
+    // handlePayRent / handleTaxPayment) — принудительно запускаем
+    // банкротство. Игрок НЕ может закончить ход с минусом.
+    if (player.money < 0 && !player.isBankrupt) {
+      this.startBankruptcyProcedure(state, player, null, -player.money);
+      return {};
+    }
     if (player.mustRollAgain) {
       player.mustRollAgain = false;
       player.consecutiveDoubles = 0;
@@ -1961,7 +2028,13 @@ export class GamesService {
       const next = state.players[state.currentPlayerIndex];
       if (next) {
         state.phase = "ROLLING"; // сразу, чтобы dispatch не ругался
-        await this.handleStartTurn(state, next, action);
+        // Защита: если у следующего игрока минус (например, остался
+        // с прошлого хода) — принудительно запускаем банкротство.
+        if (next.money < 0 && !next.isBankrupt) {
+          this.startBankruptcyProcedure(state, next, null, -next.money);
+        } else {
+          await this.handleStartTurn(state, next, action);
+        }
       } else {
         state.phase = "ROLLING";
       }
@@ -2046,9 +2119,16 @@ export class GamesService {
 
     if (action.type === "PAY_JAIL_FINE") {
       if (player.money < 50) throw new ForbiddenException("Недостаточно денег");
+      // Списываем полную сумму. Если у игрока ровно 50₽ — баланс
+      // уйдёт в 0, и это НЕ банкротство (долга нет, штраф оплачен).
+      // Если по какой-то причине игрок в минусе (например, с
+      // прошлого хода) — триггер банкротства сработает.
       player.money -= 50;
       player.inJail = false;
       player.jailTurns = 0;
+      if (this.shouldStartBankruptcy(state, player, null, 50)) {
+        return {};
+      }
       state.phase = "ROLLING";
       return {};
     }
@@ -2223,6 +2303,54 @@ export class GamesService {
 
   // Interrupt: Bankruptcy
 
+  /**
+   * Единая точка входа в логику банкротства.
+   *
+   * Правила:
+   *  1. Если `player.money >= 0` — банкротства нет, возвращаем `false`.
+   *  2. Если `player.money < 0` и при этом игрок способен покрыть долг
+   *     (полной ликвидацией — продажа всех домов + залог всех клеток)
+   *     → переходим в фазу `BANKRUPTCY_LIQUIDATE` с актуальным долгом
+   *     (сколько нужно, чтобы выйти в плюс или хотя бы в ноль).
+   *  3. Если покрыть невозможно (или `debt === 0`) — сразу объявляем
+   *     банкротство через `bankruptcy.handle(...)` и переключаем фазу.
+   *
+   * @returns `true` если банкротство сработало (фаза уже изменена, дальше
+   *          обрабатывать текущее действие нельзя); `false` если игрок
+   *          продолжает обычную игру.
+   */
+  private shouldStartBankruptcy(
+    state: GameState,
+    player: Player,
+    creditor: Player | null,
+    debt: number,
+  ): boolean {
+    if (player.money >= 0) {
+      return false;
+    }
+
+    // debt здесь — это сколько игрок должен был заплатить (например, рента).
+    // Актуальный долг для ликвидации: max(0, -player.money). Если creditor-а
+    // нет (налог/штраф), долг равен просто -money; если есть — нужно ещё
+    // учесть, что рента может уходить частично кредитору, но для ликвидации
+    // нас интересует абсолютная сумма, которой игроку не хватает.
+    const need = -player.money;
+
+    // Можно ли покрыть? Если да — даём шанс продать/заложить. Иначе —
+    // немедленное банкротство.
+    if (this.bankruptcy.canCoverDebt(state, player, need)) {
+      this.startBankruptcyProcedure(state, player, creditor, need);
+      return true;
+    }
+
+    // Нет возможности покрыть — сразу банкрот.
+    this.bankruptcy.handle(state, player, creditor);
+    state.phase = "BUILDING";
+    this.checkGameOver(state);
+    this.advanceToNextPlayer(state);
+    return true;
+  }
+
   private startBankruptcyProcedure(
     state: GameState,
     player: Player,
@@ -2274,21 +2402,39 @@ export class GamesService {
       return {};
     }
 
+    if (action.type === "BANKRUPTCY_SELL_PROPERTY") {
+      // Продажа клетки Банку за 100% номинала (правило ТЗ).
+      // Делегируем в BankruptcyService.sellPropertyToBank — там вся
+      // валидация (нет домов, не заложена, в группе нет домов) и
+      // сброс состояния клетки (ownerId = undefined, isMortgaged = false,
+      // houses = 0).
+      this.bankruptcy.sellPropertyToBank(state, player, action.cellId);
+      return {};
+    }
+
     if (action.type === "BANKRUPTCY_CONFIRM" || action.type === "BANKRUPTCY_DECLARE") {
-      if (player.money >= state.bankruptcy.debt) {
+      // Перед подтверждением/объявлением пересчитываем долг исходя из
+      // ТЕКУЩЕГО баланса. После ликвидации игрок мог выйти в плюс — тогда
+      // долг становится 0, и мы просто закрываем процедуру.
+      const remainingDebt = Math.max(0, -player.money);
+      state.bankruptcy.debt = remainingDebt;
+
+      if (player.money >= 0 && remainingDebt === 0) {
+        // Игрок успешно восстановил ликвидность. Долг погашен (включая
+        // случай, когда creditor-у уйдёт то, что мы только что получили
+        // от ликвидации — для этого оставляем долг = max(0, -money) = 0).
         const creditor = state.bankruptcy.creditorId
           ? (state.players.find((p) => p.id === state.bankruptcy!.creditorId) ?? null)
           : null;
         if (creditor) {
-          player.money -= state.bankruptcy.debt;
-          creditor.money += state.bankruptcy.debt;
-        } else {
-          player.money -= state.bankruptcy.debt;
+          creditor.money += 0; // ничего не переводим — баланс и так >= 0
         }
         state.bankruptcy = undefined;
         this.afterRentOrTax(state, player);
         return {};
       }
+
+      // Денег всё ещё не хватает — банкрот.
       const creditor = state.bankruptcy.creditorId
         ? (state.players.find((p) => p.id === state.bankruptcy!.creditorId) ?? null)
         : null;
@@ -2634,7 +2780,20 @@ export class GamesService {
       this.botTimers.delete(gameId);
     }
     if (state.status !== "active") return;
-    if (this.isInterruptPhase(state.phase)) return;
+
+    // BANKRUPTCY_LIQUIDATE — это interrupt-фаза для торговли/аукциона
+    // (там ждут решения живых людей), но ДЛЯ БОТА она не interrupt:
+    // серверный обработчик (`handleBankruptcyLiquidate`) применяет
+    // BANKRUPTCY_LIQUIDATE_HOUSES / BANKRUPTCY_MORTGAGE, и после
+    // каждого такого действия мы должны вызвать бота снова, чтобы он
+    // продолжил ликвидацию (продать ещё дома, заложить ещё клетки) или
+    // подтвердил оплату. Без этого бот зависает после первого же шага
+    // и партия «замерзает» в фазе BANKRUPTCY_LIQUIDATE.
+    if (state.phase === "BANKRUPTCY_LIQUIDATE") {
+      // См. ниже — бот-ликвидатор вызывается отдельной веткой.
+    } else if (this.isInterruptPhase(state.phase)) {
+      return;
+    }
 
     const current = state.players[state.currentPlayerIndex];
     if (!current || current.kind !== "bot" || current.isBankrupt) return;
@@ -2653,8 +2812,53 @@ export class GamesService {
     ]);
     if (waitingPhases.has(state.phase)) return;
 
+    // Специальная ветка: бот в фазе BANKRUPTCY_LIQUIDATE. Поскольку
+    // `isInterruptPhase` включает эту фазу (и не даёт пройти дальше
+    // через основную логику scheduler'а), мы обрабатываем её явно
+    // здесь — вызываем `decide` (он вернёт `decideBankruptcy`) и
+    // планируем бот-тик с задержкой.
+    if (state.phase === "BANKRUPTCY_LIQUIDATE") {
+      const proc = state.bankruptcy;
+      if (proc && proc.playerId === current.id) {
+        const decision = this.bot.decide(current, state);
+        if (!decision) return;
+        const delay = 600 + Math.random() * 400;
+        const timer = setTimeout(() => {
+          this.botTimers.delete(gameId);
+          void this.runBotTurn(gameId, decision);
+        }, delay);
+        this.botTimers.set(gameId, timer);
+        return;
+      }
+      // BANKRUPTCY_LIQUIDATE, но это не наш бот — не вмешиваемся.
+      return;
+    }
+
     const decision = this.bot.decide(current, state);
-    if (!decision) return;
+
+    // Защита от зависания: если бот в фазе BUILDING (или BUILDING_PHASE)
+    // оказался с отрицательным балансом, `decide()` вернёт `null`. Не
+    // ждём «END_TURN» и не открываем стройку — это только усугубит
+    // ситуацию. Принудительно запускаем процедуру банкротства.
+    if (!decision) {
+      if (current.money < 0 && (state.phase === "BUILDING" || state.phase === "BUILDING_PHASE")) {
+        const triggerTimer = setTimeout(
+          () => {
+            this.botTimers.delete(gameId);
+            const live = this.activeGames.get(gameId);
+            if (!live) return;
+            if (live.status !== "active") return;
+            const cur = live.players[live.currentPlayerIndex];
+            if (!cur || cur.isBankrupt || cur.money >= 0) return;
+            this.shouldStartBankruptcy(live, cur, null, -cur.money);
+            this.enqueueSnapshot(gameId, live);
+          },
+          400 + Math.random() * 400,
+        );
+        this.botTimers.set(gameId, triggerTimer);
+      }
+      return;
+    }
 
     const delay = 800 + Math.random() * 700;
     const timer = setTimeout(() => {
@@ -2844,6 +3048,8 @@ export class GamesService {
           return { type: "CONFIRM_BUILDING_PHASE" };
         case "DECLARE_BANKRUPTCY":
           return { type: "BANKRUPTCY_DECLARE" };
+        case "CONFIRM_BANKRUPTCY":
+          return { type: "BANKRUPTCY_CONFIRM" };
         default:
           return null;
       }
@@ -2865,6 +3071,8 @@ export class GamesService {
         return { type: "BANKRUPTCY_LIQUIDATE_HOUSES", cellId: d.cellId };
       case "MORTGAGE_FOR_BANKRUPTCY":
         return { type: "BANKRUPTCY_MORTGAGE", cellId: d.cellId };
+      case "SELL_PROPERTY_FOR_BANKRUPTCY":
+        return { type: "BANKRUPTCY_SELL_PROPERTY", cellId: d.cellId };
       case "TRADE_OFFER":
         return { type: "TRADE_OFFER", recipientId: d.recipientId, offer: d.offer };
       case "TRADE_COUNTER":

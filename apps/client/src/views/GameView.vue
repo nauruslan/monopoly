@@ -16,6 +16,8 @@ import AuctionModal from "../components/modals/AuctionModal.vue";
 import TradeModal from "../components/modals/TradeModal.vue";
 import MortgageModal from "../components/modals/MortgageModal.vue";
 import BuildModal from "../components/modals/BuildModal.vue";
+import BankruptcyModal from "../components/modals/BankruptcyModal.vue";
+import PlayerBankruptNoticeModal from "../components/modals/PlayerBankruptNoticeModal.vue";
 import SettingsPanel from "../components/SettingsPanel.vue";
 import LogPanel from "../components/LogPanel.vue";
 import { useAuthStore } from "../stores/auth";
@@ -36,6 +38,13 @@ const game = useGameStore();
 const settings = useSettingsStore();
 
 const players = computed(() => state.value.players);
+// На доске показываем только живых игроков. Банкроты (`isBankrupt`)
+// сохраняются в `state.players` для истории и для PlayersPanel
+// (где выводится бейдж «БАНКРОТ»), но их фишка не должна торчать
+// на игровом поле. ВАЖНО: сервер сам не очищает `player.position` —
+// если этого не сделать здесь, маркер банкрота так и останется
+// висеть на клетке, на которой он «умер».
+const boardPlayers = computed(() => players.value.filter((p) => !p.isBankrupt));
 const cells = computed(() => state.value.board);
 const currentPlayerId = computed(() => currentPlayer.value?.id || "");
 
@@ -269,6 +278,21 @@ const showJailModal = ref(false);
 const showAuctionModal = ref(false);
 const showTradeModal = ref(false);
 
+// BANKRUPTCY: модалка ликвидации (фаза BANKRUPTCY_LIQUIDATE).
+const showBankruptcyModal = ref(false);
+const bankruptcyDebt = ref(0);
+const bankruptcyCreditorName = ref<string | null>(null);
+
+// Глобальное уведомление о новом банкротстве (видит ВСЕ клиенты).
+const showBankruptNotice = ref(false);
+const bankruptNoticePlayer = ref<string | null>(null);
+const bankruptNoticeCreditor = ref<string | null>(null);
+const seenBankruptIds = ref<Set<string>>(new Set());
+
+function closeBankruptNotice() {
+  showBankruptNotice.value = false;
+}
+
 // ===== Тултип (GDD §1.1 — hover) =====
 const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
@@ -289,6 +313,65 @@ const TOOLTIP_GAP = 8;
 
 const currentCell = computed<Cell | null>(() => game.currentCell);
 const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
+
+// ===== BANKRUPTCY: вычисляемые данные для модалки ликвидации =====
+const bankruptcyPlayer = computed(
+  () => state.value.players.find((p) => p.id === state.value.bankruptcy?.playerId) ?? null,
+);
+const bankruptcyMyProperties = computed<Cell[]>(() => {
+  const me = bankruptcyPlayer.value;
+  if (!me) return [];
+  return state.value.board.filter((c) => c.ownerId === me.id);
+});
+/** Сколько максимум можно выручить, продав ВСЕ дома + заложив ВСЕ клетки. */
+const bankruptcyMaxLiquidity = computed<number>(() => {
+  const me = bankruptcyPlayer.value;
+  if (!me) return 0;
+  let total = 0;
+  for (const c of state.value.board) {
+    if (c.ownerId !== me.id) continue;
+    if ((c.houses ?? 0) > 0 && c.housePrice) {
+      total += (c.houses ?? 0) * Math.floor(c.housePrice / 2);
+    }
+    // Клетка: для «потолка ликвидности» берём максимум из залога (50%)
+    // и продажи Банку (100%) — пользователь увидит наилучший сценарий.
+    let cellLiq = 0;
+    if (!c.isMortgaged && (c.mortgageValue ?? 0) > 0) {
+      cellLiq = Math.max(cellLiq, c.mortgageValue ?? 0);
+    }
+    if (!c.isMortgaged && (c.price ?? 0) > 0) {
+      cellLiq = Math.max(cellLiq, c.price ?? 0);
+    }
+    total += cellLiq;
+  }
+  return total;
+});
+
+// ===== Watcher: глобальное уведомление о НОВЫХ банкротах =====
+// Отслеживаем изменение `players` и при появлении нового игрока с
+// `isBankrupt = true` (которого мы ещё не видели) показываем модалку.
+watch(
+  () => state.value.players.map((p) => ({ id: p.id, isBankrupt: p.isBankrupt })),
+  (current) => {
+    for (const p of current) {
+      if (p.isBankrupt && !seenBankruptIds.value.has(p.id)) {
+        seenBankruptIds.value.add(p.id);
+        const player = state.value.players.find((x) => x.id === p.id);
+        if (!player) continue;
+        // Находим, кто был кредитором в bankruptcy-контексте,
+        // если он там указан (но к моменту срабатывания state.bankruptcy
+        // уже очищен, поэтому берём из последней процедуры).
+        bankruptNoticePlayer.value = player.displayName ?? player.id;
+        bankruptNoticeCreditor.value = null;
+        // Ищем creditorId в логе через текущий snapshot: если у других
+        // игроков появились НОВЫЕ клетки — значит это был кредитор.
+        // Для простоты пока оставляем creditor = null (Банк).
+        showBankruptNotice.value = true;
+      }
+    }
+  },
+  { deep: false },
+);
 
 let diceBlinkInterval: number | null = null;
 function stopBlink() {
@@ -664,6 +747,27 @@ watch(
         }
       }, 500);
     }
+    // BANKRUPTCY_LIQUIDATE: открываем модалку ликвидации ТОЛЬКО для
+    // текущего игрока-человека. Бот сам решает через BANKRUPTCY_*
+    // actions. Сервер присылает state.bankruptcy со всей нужной
+    // информацией (debt, creditorId).
+    if (newPhase === "BANKRUPTCY_LIQUIDATE" && isCurrentPlayerActive.value) {
+      const proc = state.value.bankruptcy;
+      if (proc && proc.playerId === myPlayerId.value) {
+        // Текущий долг для отображения: берём max(0, -money), чтобы
+        // кнопка «Подтвердить» корректно стала активной после ликвидации.
+        const me = state.value.players.find((p) => p.id === proc.playerId);
+        bankruptcyDebt.value = me ? Math.max(0, -me.money) : proc.debt;
+        const creditor = proc.creditorId
+          ? state.value.players.find((p) => p.id === proc.creditorId)
+          : null;
+        bankruptcyCreditorName.value = creditor?.displayName ?? null;
+        showBankruptcyModal.value = true;
+      }
+    }
+    if (newPhase !== "BANKRUPTCY_LIQUIDATE") {
+      showBankruptcyModal.value = false;
+    }
   },
 );
 
@@ -1026,7 +1130,7 @@ function logout() {
           <Board
             ref="boardRef"
             :cells="cells"
-            :players="players"
+            :players="boardPlayers"
             :display-positions="displayPositions"
             :dice-values="diceValues"
             :dice-rolling="diceRolling"
@@ -1119,6 +1223,24 @@ function logout() {
         между локальным и серверным состоянием.
       -->
       <BuildModal />
+
+      <BankruptcyModal
+        :show="showBankruptcyModal"
+        :my-player-id="myPlayerId"
+        :debt="bankruptcyDebt"
+        :money="bankruptcyPlayer?.money ?? 0"
+        :my-properties="bankruptcyMyProperties"
+        :creditor-name="bankruptcyCreditorName"
+        :max-liquidity="bankruptcyMaxLiquidity"
+      />
+
+      <!-- Глобальное уведомление о банкротстве (видит ВСЕ клиенты) -->
+      <PlayerBankruptNoticeModal
+        :show="showBankruptNotice"
+        :player-name="bankruptNoticePlayer ?? ''"
+        :creditor-name="bankruptNoticeCreditor"
+        @close="closeBankruptNotice"
+      />
 
       <CellTooltip
         :cell="hoveredCell"

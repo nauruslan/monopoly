@@ -32,6 +32,9 @@ import { RentCalculator } from "../handlers/rent-calculator";
 import { JailHandlerService } from "../handlers/jail-handler.service";
 import { CardHandlerService } from "../handlers/card-handler.service";
 import { BankruptcyService } from "../handlers/bankruptcy.service";
+import { BankService } from "../handlers/bank.service";
+import { MortgageService } from "../handlers/mortgage.service";
+import { BuildService } from "../handlers/build.service";
 import { BotService } from "../bots/bot.service";
 import { AuctionService } from "../handlers/auction.service";
 import { TradeService } from "../handlers/trade.service";
@@ -124,6 +127,9 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
         JailHandlerService,
         CardHandlerService,
         BankruptcyService,
+        BankService,
+        MortgageService,
+        BuildService,
         BotService,
         AuctionService,
         TradeService,

@@ -103,9 +103,21 @@ export type GameAction =
   | { type: "TRADE_TOGGLE_BLOCK"; targetId: string }
 
   // Interrupt: Bankruptcy (client-driven)
-  /** На этапе BANKRUPTCY_LIQUIDATE: игрок решает, продавать ли дома/закладывать. */
+  /**
+   * На этапе BANKRUPTCY_LIQUIDATE: игрок решает, как ликвидировать имущество.
+   * Используется и для игрока-человека, и для бота.
+   *
+   * Согласно ТЗ:
+   *  - `BANKRUPTCY_LIQUIDATE_HOUSES` — продать дом/отель Банку за 50% стоимости.
+   *  - `BANKRUPTCY_MORTGAGE`         — заложить клетку Банку за 50% (mortgageValue).
+   *  - `BANKRUPTCY_SELL_PROPERTY`    — продать клетку Банку за 100% номинала
+   *                                    (`cell.price`). Клетка становится
+   *                                    UNOWNED, деньги сразу зачисляются игроку.
+   *  - `BANKRUPTCY_CONFIRM`          — подтвердить, что деньги собраны.
+   *  - `BANKRUPTCY_DECLARE`          — признать себя банкротом.
+   */
   | { type: "BANKRUPTCY_LIQUIDATE_HOUSES"; cellId: number }
   | { type: "BANKRUPTCY_MORTGAGE"; cellId: number }
-  /** На этапе BANKRUPTCY_LIQUIDATE: подтвердить, что деньги собраны (или что их нет). */
+  | { type: "BANKRUPTCY_SELL_PROPERTY"; cellId: number }
   | { type: "BANKRUPTCY_CONFIRM" }
   | { type: "BANKRUPTCY_DECLARE" }; // признать себя банкротом (сдаться)

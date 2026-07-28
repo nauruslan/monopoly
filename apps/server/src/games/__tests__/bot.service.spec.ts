@@ -392,20 +392,42 @@ describe("BotService.decide", () => {
       };
     }
 
-    it("LIQUIDATE_HOUSES, если денег < долга и есть дома", () => {
-      const { state, player } = makeBkState({ debt: 1000, money: 100, propsWithHouses: [0] });
+    // Контракт нового `decideBankruptcy`:
+    //   1. money >= 0  → CONFIRM_BANKRUPTCY (ликвидация завершена).
+    //   2. money <  0  → сначала продать дома с самой дорогой клетки;
+    //                    если домов нет — заложить клетку с max
+    //                    mortgageValue (без домов в её группе);
+    //                    если нечего — DECLARE_BANKRUPTCY.
+    it("CONFIRM_BANKRUPTCY, если баланс уже неотрицательный (ликвидация завершена)", () => {
+      const { state, player } = makeBkState({ debt: 1000, money: 0, propsWithHouses: [0] });
+      expect(bot.decide(player, state)).toBe("CONFIRM_BANKRUPTCY");
+    });
+
+    it("LIQUIDATE_HOUSES, если деньги < 0 и есть дома", () => {
+      const { state, player } = makeBkState({ debt: 1000, money: -100, propsWithHouses: [0] });
       const d = bot.decide(player, state);
       expect(d).toMatchObject({ kind: "LIQUIDATE_HOUSES", cellId: 0 });
     });
 
-    it("MORTGAGE_FOR_BANKRUPTCY, если домов нет, но есть закладываемая собственность", () => {
-      const { state, player } = makeBkState({ debt: 1000, money: 100, propsToMortgage: [1] });
+    it("LIQUIDATE_HOUSES приоритетнее MORTGAGE: сначала дома, потом залог", () => {
+      const { state, player } = makeBkState({
+        debt: 1000,
+        money: -100,
+        propsWithHouses: [0],
+        propsToMortgage: [1],
+      });
+      const d = bot.decide(player, state);
+      expect(d).toMatchObject({ kind: "LIQUIDATE_HOUSES", cellId: 0 });
+    });
+
+    it("MORTGAGE_FOR_BANKRUPTCY, если денег < 0, домов нет, но есть закладываемая собственность", () => {
+      const { state, player } = makeBkState({ debt: 1000, money: -100, propsToMortgage: [1] });
       const d = bot.decide(player, state);
       expect(d).toMatchObject({ kind: "MORTGAGE_FOR_BANKRUPTCY", cellId: 1 });
     });
 
-    it("DECLARE_BANKRUPTCY, если нечего продавать/закладывать", () => {
-      const { state, player } = makeBkState({ debt: 1000, money: 0 });
+    it("DECLARE_BANKRUPTCY, если деньги < 0 и нечего продавать/закладывать", () => {
+      const { state, player } = makeBkState({ debt: 1000, money: -100 });
       expect(bot.decide(player, state)).toBe("DECLARE_BANKRUPTCY");
     });
   });

@@ -214,9 +214,11 @@ export class CardHandlerService {
           else if (cell.houses === 5) hotels += 1;
         }
         const total = perHouse * houses + perHotel * hotels + perProperty * properties;
-        // Списываем; баланс НЕ уходит в минус (защита от двойного банкротства —
-        // банкротство запускается в games.service).
-        player.money = Math.max(0, player.money - total);
+        // Списываем ПОЛНОСТЬЮ. Если у игрока не хватает денег — баланс
+        // уходит в минус, и триггер банкротства должен сработать в
+        // `applyCardEffectAndAdvance` (после возврата в `games.service`).
+        // НЕ клампим в 0 — это скрывает долг и ломает правила.
+        player.money -= total;
         return { kind: "stay" };
       }
     }

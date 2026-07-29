@@ -1,6 +1,7 @@
 ﻿import { Injectable } from "@nestjs/common";
 import type { Cell, GameState, Player, TradeOffer } from "@monopoly/shared";
 import { BOARD } from "@monopoly/shared";
+import { BankruptcyService } from "../handlers/bankruptcy.service";
 
 /**
  * Решения бота.
@@ -96,6 +97,12 @@ interface CellValuation {
  */
 @Injectable()
 export class BotService {
+  /**
+   * `BankruptcyService` нужен для проверки правила «лесенки» при
+   * выборе клетки для ликвидации дома в фазе BANKRUPTCY_LIQUIDATE.
+   */
+  constructor(private readonly bankruptcy: BankruptcyService) {}
+
   /**
    * Решить, что делать боту в текущей фазе.
    * Возвращает `null`, если бот не должен действовать.
@@ -957,9 +964,10 @@ export class BotService {
    *     а) Продать дом с самой дорогой клетки (`housePrice` desc).
    *        Сервер (`handleBankruptcyLiquidate.BANKRUPTCY_LIQUIDATE_HOUSES`)
    *        уменьшает `houses` на 1 и зачисляет `housePrice / 2`.
-   *        Правило «лесенки» здесь не применяется — это ликвидация,
-   *        не добровольная продажа: можно снести отели/дома с любой
-   *        клетки группы.
+   *        Правило «лесенки» применяется и при ликвидации: нельзя
+   *        асимметрично продавать дома в одной цветовой группе.
+   *        Поэтому выбираем из `listHousesSellableForLiquidation`
+   *        (он уже учитывает «лесенку»).
    *     б) Заложить клетку с максимальным `mortgageValue`. НО! Сервер
    *        (`MortgageService.canMortgage`) отклоняет залог клетки, если
    *        в её цветовой группе есть дома. Поэтому мы заранее фильтруем
@@ -981,12 +989,18 @@ export class BotService {
     }
 
     // 2а) Продажа дома с самой дорогой клетки.
-    const withHouses = state.board
-      .filter((c) => c.type === "PROPERTY" && c.ownerId === player.id && (c.houses ?? 0) > 0)
-      // Сначала самые дорогие дома (максимальный возврат за один шаг).
-      .sort((a, b) => (b.housePrice ?? 0) - (a.housePrice ?? 0));
-    if (withHouses.length > 0) {
-      return { kind: "LIQUIDATE_HOUSES", cellId: withHouses[0]!.id };
+    //     Сервер (`handleBankruptcyLiquidate`) применяет правило
+    //     «лесенки» — поэтому бот ДОЛЖЕН выбирать клетку из списка,
+    //     который это правило учитывает. Иначе сервер отклонит действие
+    //     и бот зациклится. Сортируем по убыванию housePrice — максимум
+    //     возврата за один шаг.
+    const sellableHouses = this.bankruptcy.listHousesSellableForLiquidation(state, player);
+    if (sellableHouses.length > 0) {
+      // Sort: самые дорогие дома — первыми
+      const best = [...sellableHouses].sort(
+        (a, b) => (b.housePrice ?? 0) - (a.housePrice ?? 0),
+      )[0]!;
+      return { kind: "LIQUIDATE_HOUSES", cellId: best.id };
     }
 
     // 2б) Залог клетки с максимальной ликвидностью, при условии что

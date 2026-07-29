@@ -11,6 +11,7 @@
 import { BadRequestException, ForbiddenException } from "@nestjs/common";
 import { BankruptcyService } from "../handlers/bankruptcy.service";
 import { makeCell, makePlayer, makeState, resetCounters } from "./factories";
+import type { Cell } from "@monopoly/shared";
 
 describe("BankruptcyService — продажа заложенных клеток (BANKRUPTCY_SELL_MORTGAGED_PROPERTY)", () => {
   let service: BankruptcyService;
@@ -354,6 +355,216 @@ describe("BankruptcyService — продажа заложенных клеток
 
       expect(state.status).toBe("finished");
       expect(state.winnerId).toBe("p1");
+    });
+  });
+});
+
+/**
+ * Тесты правила «лесенки» при продаже домов во время фазы
+ * BANKRUPTCY_LIQUIDATE. Без этого правила игрок мог бы слить все
+ * дома с одной клетки, оставив остальные клетки группы застроенными.
+ * Правило требует, чтобы перед продажей N-го дома на одной клетке
+ * было продано не менее N-1 дома на КАЖДОЙ другой клетке группы.
+ */
+describe("BankruptcyService — правило лесенки при ликвидации (BANKRUPTCY_LIQUIDATE_HOUSES)", () => {
+  let service: BankruptcyService;
+
+  beforeEach(() => {
+    resetCounters();
+    service = new BankruptcyService();
+  });
+
+  describe("canSellHouseForLiquidation", () => {
+    it("возвращает false, если клетки не существует", () => {
+      const player = makePlayer({ id: "p0" });
+      const state = makeState({ board: [makeCell({ id: 0, ownerId: "p0", houses: 1 })] });
+      expect(service.canSellHouseForLiquidation(state, player, 999)).toBe(false);
+    });
+
+    it("возвращает false, если клетка принадлежит другому игроку", () => {
+      const player = makePlayer({ id: "p0" });
+      const state = makeState({
+        board: [makeCell({ id: 0, ownerId: "p1", houses: 1 })],
+      });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
+    });
+
+    it("возвращает false, если клетка не PROPERTY (RAILROAD/UTILITY)", () => {
+      const player = makePlayer({ id: "p0" });
+      const state = makeState({
+        board: [makeCell({ id: 0, type: "RAILROAD", ownerId: "p0", houses: 0 })],
+      });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
+    });
+
+    it("возвращает false, если клетка заложена", () => {
+      const player = makePlayer({ id: "p0" });
+      const state = makeState({
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 2, isMortgaged: true })],
+      });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
+    });
+
+    it("возвращает false, если на клетке 0 домов", () => {
+      const player = makePlayer({ id: "p0" });
+      const state = makeState({
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 0 })],
+      });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
+    });
+
+    it("возвращает false, если у клетки не задан housePrice", () => {
+      const player = makePlayer({ id: "p0" });
+      const cell: Cell = { ...makeCell({ id: 0, ownerId: "p0", houses: 1 }) };
+      delete (cell as { housePrice?: number }).housePrice;
+      const state = makeState({ board: [cell] });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
+    });
+
+    it("возвращает true для одиночной клетки с домами (нет группы)", () => {
+      const player = makePlayer({ id: "p0" });
+      const state = makeState({
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 3 })],
+      });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(true);
+    });
+
+    it("возвращает true для ВСЕХ клеток, если у них равное число домов [3,3,3]", () => {
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 3 }),
+        makeCell({ id: 1, ownerId: "p0", group: "brown", houses: 3 }),
+        makeCell({ id: 2, ownerId: "p0", group: "brown", houses: 3 }),
+      ];
+      const state = makeState({ board });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 1)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 2)).toBe(true);
+    });
+
+    it("возвращает false для клетки с МЕНЬШИМ числом домов [3,3,1] (правило лесенки)", () => {
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 3 }),
+        makeCell({ id: 1, ownerId: "p0", group: "brown", houses: 3 }),
+        makeCell({ id: 2, ownerId: "p0", group: "brown", houses: 1 }),
+      ];
+      const state = makeState({ board });
+      // Клетка 2 (1 дом) — нельзя, т.к. у других клеток по 3.
+      expect(service.canSellHouseForLiquidation(state, player, 2)).toBe(false);
+      // Клетки 0 и 1 (по 3 дома) — можно.
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 1)).toBe(true);
+    });
+
+    it("возвращает false для клетки с МЕНЬШИМ числом домов [3,2,3] (правило лесенки)", () => {
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 3 }),
+        makeCell({ id: 1, ownerId: "p0", group: "brown", houses: 2 }),
+        makeCell({ id: 2, ownerId: "p0", group: "brown", houses: 3 }),
+      ];
+      const state = makeState({ board });
+      expect(service.canSellHouseForLiquidation(state, player, 1)).toBe(false);
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 2)).toBe(true);
+    });
+
+    it("работает и для отелей [5,5,5] — все три доступны", () => {
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 5 }),
+        makeCell({ id: 1, ownerId: "p0", group: "brown", houses: 5 }),
+        makeCell({ id: 2, ownerId: "p0", group: "brown", houses: 5 }),
+      ];
+      const state = makeState({ board });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 1)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 2)).toBe(true);
+    });
+
+    it("после снятия одного отеля [4,5,5] — снова доступны все три", () => {
+      // Это ключевой тест: важно, что не было дедлока.
+      // [5,5,5] -> продаём 1 отель -> [4,5,5]
+      // Теперь максимум = 5, и клетки 1 и 2 доступны (5 == 5).
+      // Продаём 1 дом с клетки 1 -> [4,4,5]
+      // Теперь максимум = 5, клетка 2 доступна.
+      // Продаём 1 дом с клетки 2 -> [4,4,4]
+      // Теперь максимум = 4, ВСЕ доступны.
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 4 }),
+        makeCell({ id: 1, ownerId: "p0", group: "brown", houses: 4 }),
+        makeCell({ id: 2, ownerId: "p0", group: "brown", houses: 4 }),
+      ];
+      const state = makeState({ board });
+      expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 1)).toBe(true);
+      expect(service.canSellHouseForLiquidation(state, player, 2)).toBe(true);
+    });
+
+    it("НЕ учитывает клетки группы, принадлежащие ДРУГОМУ игроку", () => {
+      // Клетки группы brown — у p0 и p1. Правило лесенки работает
+      // только в пределах владельца. Клетка p0 с 1 домом доступна,
+      // даже если у клетки p1 в той же группе 5 домов.
+      const p0 = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 1 }),
+        makeCell({ id: 1, ownerId: "p1", group: "brown", houses: 5 }),
+        makeCell({ id: 2, ownerId: "p1", group: "brown", houses: 5 }),
+      ];
+      const state = makeState({ board, players: [p0] });
+      expect(service.canSellHouseForLiquidation(state, p0, 0)).toBe(true);
+    });
+  });
+
+  describe("listHousesSellableForLiquidation", () => {
+    it("возвращает только клетки, для которых canSellHouseForLiquidation === true", () => {
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 3, housePrice: 50 }),
+        makeCell({ id: 1, ownerId: "p0", group: "brown", houses: 3, housePrice: 50 }),
+        makeCell({ id: 2, ownerId: "p0", group: "brown", houses: 1, housePrice: 50 }),
+      ];
+      const state = makeState({ board });
+      const result = service.listHousesSellableForLiquidation(state, player);
+      // Клетка 2 с 1 домом НЕ доступна.
+      expect(result.map((c) => c.id).sort()).toEqual([0, 1]);
+    });
+
+    it("сортирует по убыванию housePrice (сначала самые дорогие)", () => {
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "lightblue", houses: 1, housePrice: 50 }),
+        makeCell({ id: 1, ownerId: "p0", group: "lightblue", houses: 1, housePrice: 200 }),
+        makeCell({ id: 2, ownerId: "p0", group: "lightblue", houses: 1, housePrice: 100 }),
+      ];
+      const state = makeState({ board });
+      const result = service.listHousesSellableForLiquidation(state, player);
+      // [200, 100, 50] — по убыванию housePrice.
+      expect(result.map((c) => c.id)).toEqual([1, 2, 0]);
+    });
+
+    it("возвращает пустой массив, если домов нет", () => {
+      const player = makePlayer({ id: "p0" });
+      const state = makeState({
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 0 })],
+      });
+      expect(service.listHousesSellableForLiquidation(state, player)).toEqual([]);
+    });
+
+    it("исключает клетки с нарушением лесенки", () => {
+      // 3 клетки: [2, 2, 1] — третья недоступна.
+      const player = makePlayer({ id: "p0" });
+      const board = [
+        makeCell({ id: 0, ownerId: "p0", group: "brown", houses: 2 }),
+        makeCell({ id: 1, ownerId: "p0", group: "brown", houses: 2 }),
+        makeCell({ id: 2, ownerId: "p0", group: "brown", houses: 1 }),
+      ];
+      const state = makeState({ board });
+      const result = service.listHousesSellableForLiquidation(state, player);
+      expect(result).toHaveLength(2);
+      expect(result.find((c) => c.id === 2)).toBeUndefined();
     });
   });
 });

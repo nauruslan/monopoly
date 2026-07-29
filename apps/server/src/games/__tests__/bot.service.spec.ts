@@ -1,5 +1,6 @@
 import { Test } from "@nestjs/testing";
 import { BotService, type BotDecision } from "../bots/bot.service";
+import { BankruptcyService } from "../handlers/bankruptcy.service";
 import { makeCell, makeMonopolyBoard, makePlayer, makeState, resetCounters } from "./factories";
 import type { GameState, Player } from "@monopoly/shared";
 
@@ -9,7 +10,7 @@ describe("BotService.decide", () => {
   beforeEach(async () => {
     resetCounters();
     const moduleRef = await Test.createTestingModule({
-      providers: [BotService],
+      providers: [BotService, BankruptcyService],
     }).compile();
     bot = moduleRef.get(BotService);
   });

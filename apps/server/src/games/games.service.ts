@@ -2375,13 +2375,24 @@ export class GamesService {
     }
 
     if (action.type === "BANKRUPTCY_LIQUIDATE_HOUSES") {
+      // Правило «лесенки» при ликвидации: нельзя асимметрично продавать дома
+      // внутри одной цветовой группы. Сначала продаём по 1 дому на каждом
+      // участке группы, затем ещё по одному, и т.д.
+      if (!this.bankruptcy.canSellHouseForLiquidation(state, player, action.cellId)) {
+        throw new ForbiddenException(
+          "Сначала продайте дома на других участках группы (правило лесенки)",
+        );
+      }
       const cell = state.board[action.cellId];
       if (!cell) throw new NotFoundException("Клетка не найдена");
       if (cell.ownerId !== player.id) throw new ForbiddenException("Это не ваша клетка");
-      if (cell.houses === 0) throw new ForbiddenException("Нет домов");
+      if ((cell.houses ?? 0) === 0) throw new ForbiddenException("Нет домов");
       if (cell.housePrice === undefined) throw new BadRequestException("Нет цены дома");
+      // Отель (houses === 5) продаётся за 5 housePrice, но превращается в 4 дома.
+      // Списываем 1 юнит (дом) с клетки; для отеля это даёт 4 дома.
+      const newHouses = cell.houses === 5 ? 4 : cell.houses - 1;
       player.money += cell.housePrice / 2;
-      cell.houses = (cell.houses - 1) as 0 | 1 | 2 | 3 | 4 | 5;
+      cell.houses = newHouses as 0 | 1 | 2 | 3 | 4 | 5;
       return {};
     }
 

@@ -44,10 +44,28 @@ const props = defineProps<{
 
 const game = useGameStore();
 
-/** Дом можно продать, только если он есть и клетка не заложена. */
+/**
+ * Клетки, на которых можно продать дом (правило «лесенки»):
+ *  - есть хотя бы 1 дом;
+ *  - клетка не заложена;
+ *  - в цветовой группе эта клетка имеет МАКСИМУМ домов среди
+ *    ВСЕХ клеток группы игрока — иначе сервер отклонит действие.
+ *
+ * Сортируем по убыванию `housePrice` — выгоднее сначала снести
+ * самые дорогие дома.
+ */
 const housesForSale = computed<Cell[]>(() =>
   props.myProperties
     .filter((c) => (c.houses ?? 0) > 0 && !c.isMortgaged)
+    .filter((c) => {
+      if (!c.group) return true;
+      const groupMax = Math.max(
+        ...props.myProperties
+          .filter((other) => other.type === c.type && other.group === c.group)
+          .map((other) => other.houses ?? 0),
+      );
+      return (c.houses ?? 0) >= groupMax;
+    })
     .sort((a, b) => (b.housePrice ?? 0) - (a.housePrice ?? 0)),
 );
 
@@ -76,7 +94,7 @@ const mortgageable = computed<Cell[]>(() => {
 });
 
 /**
- * Клетки, которые можно ПРОДАТЬ Банку за 100% номинала (правило ТЗ).
+ * Клетки, которые можно ПРОДАТЬ Банку за 100% номинала.
  *  - принадлежат игроку;
  *  - не заложены;
  *  - без построек на самой клетке;
@@ -118,12 +136,7 @@ const mortgagedSellable = computed<Cell[]>(() => {
   const myId = props.myPlayerId;
   if (!myId) return [];
   return props.myProperties
-    .filter(
-      (c) =>
-        c.isMortgaged === true &&
-        (c.houses ?? 0) === 0 &&
-        (c.mortgageValue ?? 0) > 0,
-    )
+    .filter((c) => c.isMortgaged === true && (c.houses ?? 0) === 0 && (c.mortgageValue ?? 0) > 0)
     .sort((a, b) => (b.mortgageValue ?? 0) - (a.mortgageValue ?? 0));
 });
 
@@ -150,7 +163,7 @@ function onMortgage(cellId: number): void {
 }
 
 /**
- * Продать клетку Банку за 100% номинала (правило ТЗ).
+ * Продать клетку Банку за 100% номинала.
  * Клетка становится UNOWNED, деньги сразу зачисляются игроку.
  */
 function onSellToBank(cellId: number): void {
@@ -311,9 +324,7 @@ function onDeclare(): void {
     <!-- Ничего нельзя ликвидировать -->
     <p
       v-if="
-        housesForSale.length === 0 &&
-        mortgageable.length === 0 &&
-        mortgagedSellable.length === 0
+        housesForSale.length === 0 && mortgageable.length === 0 && mortgagedSellable.length === 0
       "
       class="empty"
     >

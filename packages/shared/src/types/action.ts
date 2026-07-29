@@ -107,17 +107,24 @@ export type GameAction =
    * На этапе BANKRUPTCY_LIQUIDATE: игрок решает, как ликвидировать имущество.
    * Используется и для игрока-человека, и для бота.
    *
-   * Согласно ТЗ:
-   *  - `BANKRUPTCY_LIQUIDATE_HOUSES` — продать дом/отель Банку за 50% стоимости.
-   *  - `BANKRUPTCY_MORTGAGE`         — заложить клетку Банку за 50% (mortgageValue).
-   *  - `BANKRUPTCY_SELL_PROPERTY`    — продать клетку Банку за 100% номинала
-   *                                    (`cell.price`). Клетка становится
-   *                                    UNOWNED, деньги сразу зачисляются игроку.
-   *  - `BANKRUPTCY_CONFIRM`          — подтвердить, что деньги собраны.
-   *  - `BANKRUPTCY_DECLARE`          — признать себя банкротом.
+   *  - `BANKRUPTCY_LIQUIDATE_HOUSES`        — продать дом/отель Банку за 50% стоимости.
+   *  - `BANKRUPTCY_MORTGAGE`                — заложить клетку Банку за 50% (mortgageValue).
+   *  - `BANKRUPTCY_SELL_PROPERTY`           — продать клетку Банку за 100% номинала
+   *                                          (`cell.price`). Клетка становится
+   *                                          UNOWNED, деньги сразу зачисляются игроку.
+   *  - `BANKRUPTCY_SELL_MORTGAGED_PROPERTY` — продать уже заложенную клетку Банку
+   *                                          за дополнительные 50% (mortgageValue).
+   *                                          В сумме с предыдущим залогом
+   *                                          (50% номинала) игрок получает 100%
+   *                                          номинала. Клетка уходит в банк
+   *                                          (ownerId = undefined, isMortgaged = false,
+   *                                          houses = 0).
+   *  - `BANKRUPTCY_CONFIRM`                 — подтвердить, что деньги собраны.
+   *  - `BANKRUPTCY_DECLARE`                 — признать себя банкротом.
    */
   | { type: "BANKRUPTCY_LIQUIDATE_HOUSES"; cellId: number }
   | { type: "BANKRUPTCY_MORTGAGE"; cellId: number }
   | { type: "BANKRUPTCY_SELL_PROPERTY"; cellId: number }
+  | { type: "BANKRUPTCY_SELL_MORTGAGED_PROPERTY"; cellId: number }
   | { type: "BANKRUPTCY_CONFIRM" }
   | { type: "BANKRUPTCY_DECLARE" }; // признать себя банкротом (сдаться)

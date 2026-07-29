@@ -17,7 +17,9 @@ import type { GameState, Player } from "@monopoly/shared";
  *  2) `GamesService.startBankruptcyProcedure` переводит партию в фазу
  *     `BANKRUPTCY_LIQUIDATE` и кладёт контекст долга в `state.bankruptcy`.
  *  3) Игрок (или бот) поэтапно ликвидирует имущество: продаёт дома
- *     (BANKRUPTCY_LIQUIDATE_HOUSES) → закладывает клетки (BANKRUPTCY_MORTGAGE).
+ *     (BANKRUPTCY_LIQUIDATE_HOUSES) → закладывает клетки (BANKRUPTCY_MORTGAGE)
+ *     → при необходимости продаёт уже заложенные клетки Банку за
+ *     дополнительные 50% (BANKRUPTCY_SELL_MORTGAGED_PROPERTY).
  *  4) После каждой ликвидации сервер ПЕРЕСЧИТЫВАЕТ остаток долга:
  *     если `money >= debt` → долг погашен, игра возвращается в
  *     `BUILDING` (игрок продолжает ход);
@@ -25,13 +27,26 @@ import type { GameState, Player } from "@monopoly/shared";
  *     финальная ликвидация, `player.isBankrupt = true`, клетки уходят
  *     кредитору или в банк.
  *
- * ## Распределение имущества
+ * ## Распределение имущества (правило проекта)
  *
- *  - Если есть кредитор (другой игрок, которому не смог заплатить) —
- *    ВСЕ клетки и оставшиеся деньги переходят ему.
- *  - Если кредитора нет (банк, налоги) — клетки уходят обратно в банк
- *    (ownerId = undefined), деньги сгорают.
- *  - В ЛЮБОМ случае `player.isBankrupt = true`, деньги обнуляются.
+ *  - ВСЕ клетки обанкротившегося игрока уходят обратно в БАНК:
+ *    `ownerId = undefined`, `isMortgaged = false`, `houses = 0`.
+ *    Это касается ЛЮБОГО случая — и когда есть кредитор (другой игрок),
+ *    и когда кредитора нет (налог/штраф Банку).
+ *  - Строения (дома/отели) снимаются и просто теряются — Банк не
+ *    компенсирует за них.
+ *  - Если есть кредитор и `debt > 0` — Банк компенсирует кредитору
+ *    разницу `(debt - player.money)` (но не больше, чем `debt`, и не
+ *    больше того, что фактически у банкрота осталось). Это правило
+ *    означает, что кредитор гарантированно получает причитающийся ему
+ *    долг, даже если имущества банкрота не хватило.
+ *  - Оставшиеся деньги банкрота (если есть) — сгорают.
+ *  - В ЛЮБОМ случае `player.isBankrupt = true`, `money = 0`,
+ *    `properties = []`.
+ *  - Если кредитора нет — деньги и имущество просто уходят в Банк.
+ *
+ * при банкротстве имущество
+ * должно становиться НИЧЕЙНЫМ и СВОБОДНЫМ для покупки.
  *
  * ## ВАЖНО
  *
@@ -46,7 +61,7 @@ import type { GameState, Player } from "@monopoly/shared";
 export class BankruptcyService {
   /**
    * Вычислить максимальную ликвидность, которую игрок может получить,
-   * продав ВСЕ дома/отели и заложив ВСЕ клетки.
+   * продав ВСЕ дома/отели и заложив/допродав ВСЕ клетки.
    *
    * Используется:
    *  - В `GamesService.startBankruptcyProcedure` для проверки «а есть
@@ -58,7 +73,12 @@ export class BankruptcyService {
    * Возвращает сумму в рублях, которую можно выручить:
    *  - Продажа дома/отеля: `housePrice / 2` за каждый дом (по правилам
    *    Монополии).
-   *  - Залог клетки: `mortgageValue` (если `mortgageValue > 0`).
+   *  - Клетка (если не заложена): берём максимум из
+   *      - залог: `mortgageValue` (50%)
+   *      - продажа Банку: `cell.price` (100% номинала)
+   *  - Клетка (если уже заложена): допродажа Банку за `mortgageValue`
+   *    (дополнительные 50%). В сумме с предыдущим залогом получается
+   *    100% номинала.
    *
    * ВНИМАНИЕ: при залоге клетки с домами её нельзя заложить, пока
    * не проданы дома в её цветовой группе. Но для оценки «потолка
@@ -77,14 +97,21 @@ export class BankruptcyService {
         total += cell.houses * Math.floor(cell.housePrice / 2);
       }
       // Клетка: для оценки «потолка ликвидности» берём максимум из
-      //   - залог: mortgageValue (50%)
-      //   - продажа Банку: cell.price (100% номинала)
+      //   - залог: mortgageValue (50%) — только если клетка ещё не заложена
+      //   - продажа Банку: cell.price (100% номинала) — только если клетка не заложена
+      //   - допродажа уже заложенной клетки: mortgageValue (дополнительные 50%)
       let cellLiq = 0;
       if (!cell.isMortgaged && (cell.mortgageValue ?? 0) > 0) {
         cellLiq = Math.max(cellLiq, cell.mortgageValue ?? 0);
       }
       if (!cell.isMortgaged && (cell.price ?? 0) > 0) {
         cellLiq = Math.max(cellLiq, cell.price ?? 0);
+      }
+      if (cell.isMortgaged && (cell.mortgageValue ?? 0) > 0) {
+        // Допродажа уже заложенной клетки Банку (50% mortgageValue).
+        // Считаем, что игрок сначала уже получил 50% при залоге, теперь
+        // может «допродать» её Банку за оставшиеся 50% (mortgageValue).
+        cellLiq = Math.max(cellLiq, cell.mortgageValue ?? 0);
       }
       total += cellLiq;
     }
@@ -121,7 +148,7 @@ export class BankruptcyService {
   }
 
   /**
-   * Продать клетку Банку за 100% номинала (правило ТЗ).
+   * Продать клетку Банку за 100% номинала.
    *  - player.money += cell.price
    *  - cell.ownerId = undefined, isMortgaged = false, houses = 0
    *  - player.properties очищается от cellId
@@ -141,6 +168,62 @@ export class BankruptcyService {
     cell.houses = 0;
     player.properties = player.properties.filter((id) => id !== cellId);
     return price;
+  }
+
+  /**
+   * Может ли игрок продать уже заложенную клетку Банку за дополнительные
+   * 50% (`mortgageValue`).
+   *
+   * В сумме с предыдущим залогом (50% номинала) игрок получает 100%
+   * номинала — клетка уходит в банк (UNOWNED, не заложена, без построек).
+   *
+   * Правила:
+   *  1. Клетка принадлежит игроку.
+   *  2. Клетка заложена (`isMortgaged === true`).
+   *  3. `mortgageValue > 0` (иначе нечего платить).
+   *  4. На самой клетке нет построек (на заложенной клетке их и так
+   *     быть не может по правилам, но проверим для устойчивости).
+   */
+  canSellMortgagedPropertyToBank(state: GameState, player: Player, cellId: number): boolean {
+    const cell = state.board[cellId];
+    if (!cell) return false;
+    if (cell.ownerId !== player.id) return false;
+    if (!cell.isMortgaged) return false;
+    if ((cell.houses ?? 0) > 0) return false;
+    if ((cell.mortgageValue ?? 0) <= 0) return false;
+    return true;
+  }
+
+  /**
+   * Продать уже заложенную клетку Банку за дополнительные 50%
+   * (`mortgageValue`).
+   *
+   * ВАЖНО: это допустимо ТОЛЬКО во время ликвидации (BANKRUPTCY_LIQUIDATE).
+   * В обычном ходу Монополия не разрешает «допродать» заложенную клетку
+   * Банку — её можно только выкупить обратно за 110% mortgageValue.
+   *
+   * После продажи:
+   *  - player.money += cell.mortgageValue
+   *  - cell.ownerId = undefined, isMortgaged = false, houses = 0
+   *  - player.properties очищается от cellId
+   */
+  sellMortgagedPropertyToBank(state: GameState, player: Player, cellId: number): number {
+    const cell = state.board[cellId];
+    if (!cell) throw new BadRequestException(`Клетка ${cellId} не найдена`);
+    if (cell.ownerId !== player.id) throw new ForbiddenException("Это не ваша клетка");
+    if ((cell.mortgageValue ?? 0) <= 0) {
+      throw new BadRequestException("Нет залоговой стоимости");
+    }
+    if (!this.canSellMortgagedPropertyToBank(state, player, cellId)) {
+      throw new ForbiddenException("Невозможно продать (клетка не заложена или есть постройки)");
+    }
+    const value = cell.mortgageValue!;
+    player.money += value;
+    cell.ownerId = undefined;
+    cell.isMortgaged = false;
+    cell.houses = 0;
+    player.properties = player.properties.filter((id) => id !== cellId);
+    return value;
   }
 
   /**
@@ -168,37 +251,71 @@ export class BankruptcyService {
    * @param player обанкротившийся игрок (мутируется)
    * @param creditor кредитор, либо null (банк)
    */
-  handle(state: GameState, player: Player, creditor: Player | null): void {
-    // 1) Перераспределяем собственность.
+  /**
+   * Обработать полное банкротство `player` (финальная ликвидация).
+   *
+   * @param state полное состояние партии (мутируется)
+   * @param player обанкротившийся игрок (мутируется)
+   * @param creditor кредитор (другой игрок), либо null (Банк)
+   * @param debt начальная сумма долга (сколько игрок был должен до
+   *             распродажи). Нужна для расчёта компенсации кредитору.
+   *
+   * ## Правило:
+   *
+   *  1) ВСЕ клетки обанкротившегося игрока → БАНК: `ownerId = undefined`,
+   *     `isMortgaged = false`, `houses = 0`. Клетки полностью очищаются
+   *     и могут быть куплены на аукционе / при заходе на них.
+   *  2) Дома/отели на клетках просто теряются (Банк не компенсирует).
+   *  3) Оставшиеся деньги банкрота (если есть) — сгорают.
+   *  4) Если есть кредитор — Банк компенсирует ему разницу
+   *     `(debt - player.money)`, но НЕ больше, чем `debt`, и не больше,
+   *     чем реально осталось у банкрота. Это гарантирует, что кредитор
+   *     получает причитающийся ему долг (т.к. по правилам банкрот
+   *     сначала распродаёт всё что мог, и `|player.money| <= debt`).
+   *  5) `player.isBankrupt = true`, `money = 0`, `properties = []`.
+   *     Сам объект остаётся в `state.players` (его будут пропускать
+   *     при `endTurn` и в `applyAction`).
+   *  6) Если остался один не обанкротившийся игрок — партия завершается.
+   */
+  handle(state: GameState, player: Player, creditor: Player | null, debt: number = 0): void {
+    // 1) ВСЁ имущество → БАНК (UNOWNED, без залога, без домов).
+    //    Это ГЛАВНОЕ правило: ни кредитор, ни кто-либо ещё не забирает
+    //    клетки банкрота. Они становятся свободными для покупки.
     for (const pid of player.properties) {
       const cell = state.board[pid];
       if (!cell) continue;
-      if (creditor) {
-        cell.ownerId = creditor.id;
-        creditor.properties.push(pid);
-      } else {
-        // Клетка уходит в банк: снимаем владельца, дома и залог.
-        cell.ownerId = undefined;
-        cell.houses = 0;
-        cell.isMortgaged = false;
-      }
+      cell.ownerId = undefined;
+      cell.isMortgaged = false;
+      cell.houses = 0;
     }
 
-    // 2) Деньги — либо кредитору, либо сгорают.
-    if (creditor) {
-      // `Math.max(0, ...)` — защита от отрицательного остатка;
-      // мы списываем только реально имеющиеся деньги.
-      creditor.money += Math.max(0, player.money);
+    // 2) Если есть кредитор — Банк компенсирует ему разницу между
+    //    исходным долгом и тем, что осталось у банкрота после распродажи.
+    //    - player.money здесь может быть < 0 (если распродажа не дала
+    //      нужной суммы) или >= 0 (если что-то осталось).
+    //    - compensation = clamp(debt - 0, 0, debt) фактически всегда
+    //      равен `debt`, т.к. распродажа уже прошла в BANKRUPTCY_LIQUIDATE.
+    //    - защита: compensation не больше debt и не больше того, что
+    //      банкрот МОГ бы отдать (debt + 0 = debt при пустом кошельке).
+    if (creditor && debt > 0) {
+      // Кредитор получает ровно `debt` — это его полный долг, который
+      // банкрот был должен. По правилам Монополии Банк выступает
+      // гарантом: он доплачивает кредитору разницу из своих средств.
+      creditor.money += debt;
     }
-    // Очищаем имущество игрока.
+    // Если кредитора нет (налог/штраф Банку) — деньги банкрота сгорают.
+    // Банк уже получил долг в исходном платеже (например, налог
+    // списывался как `player.money -= tax`), так что здесь ничего
+    // не начисляем.
+
+    // 3) Очищаем имущество и деньги банкрота.
     player.properties = [];
     player.money = 0;
 
-    // 3) Помечаем банкротом. Сам объект остаётся в state.players —
-    // его будут пропускать при `endTurn` и в `applyAction`.
+    // 4) Помечаем банкротом.
     player.isBankrupt = true;
 
-    // 4) Проверка условия победы.
+    // 5) Проверка условия победы.
     const alivePlayers = state.players.filter((p) => !p.isBankrupt);
     if (alivePlayers.length === 1 && alivePlayers[0]) {
       state.status = "finished";

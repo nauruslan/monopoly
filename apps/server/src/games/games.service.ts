@@ -1,4 +1,4 @@
-import {
+﻿import {
   Injectable,
   Logger,
   ForbiddenException,
@@ -2336,7 +2336,9 @@ export class GamesService {
     }
 
     // Нет возможности покрыть — сразу банкрот.
-    this.bankruptcy.handle(state, player, creditor);
+    // По правилу: всё имущество → БАНК, кредитор получает
+    // компенсацию `debt` от Банка.
+    this.bankruptcy.handle(state, player, creditor, need);
     state.phase = "BUILDING";
     this.checkGameOver(state);
     this.advanceToNextPlayer(state);
@@ -2395,7 +2397,7 @@ export class GamesService {
     }
 
     if (action.type === "BANKRUPTCY_SELL_PROPERTY") {
-      // Продажа клетки Банку за 100% номинала (правило ТЗ).
+      // Продажа клетки Банку за 100% номинала.
       // Делегируем в BankruptcyService.sellPropertyToBank — там вся
       // валидация (нет домов, не заложена, в группе нет домов) и
       // сброс состояния клетки (ownerId = undefined, isMortgaged = false,
@@ -2404,6 +2406,14 @@ export class GamesService {
       return {};
     }
 
+    if (action.type === "BANKRUPTCY_SELL_MORTGAGED_PROPERTY") {
+      // Продажа уже заложенной клетки Банку за дополнительные 50% (mortgageValue).
+      // В сумме с предыдущим залогом игрок получает 100% номинала. Клетка уходит
+      // в банк (UNOWNED, isMortgaged=false, houses=0). Делегируем в
+      // BankruptcyService.sellMortgagedPropertyToBank.
+      this.bankruptcy.sellMortgagedPropertyToBank(state, player, action.cellId);
+      return {};
+    }
     if (action.type === "BANKRUPTCY_CONFIRM" || action.type === "BANKRUPTCY_DECLARE") {
       // Перед подтверждением/объявлением пересчитываем долг исходя из
       // ТЕКУЩЕГО баланса. После ликвидации игрок мог выйти в плюс — тогда
@@ -2412,14 +2422,17 @@ export class GamesService {
       state.bankruptcy.debt = remainingDebt;
 
       if (player.money >= 0 && remainingDebt === 0) {
-        // Игрок успешно восстановил ликвидность. Долг погашен (включая
-        // случай, когда creditor-у уйдёт то, что мы только что получили
-        // от ликвидации — для этого оставляем долг = max(0, -money) = 0).
+        // Игрок успешно восстановил ликвидность. Долг погашен.
+        // Если был кредитор — переводим остаток денег игрока ему
+        // (это переплата, но логично: банкрот должен отдать ВСЁ что
+        // нажил сверх нуля). Если кредитора нет — деньги остаются
+        // игроку (он их честно отвоевал распродажей).
         const creditor = state.bankruptcy.creditorId
           ? (state.players.find((p) => p.id === state.bankruptcy!.creditorId) ?? null)
           : null;
         if (creditor) {
-          creditor.money += 0; // ничего не переводим — баланс и так >= 0
+          creditor.money += player.money;
+          player.money = 0;
         }
         state.bankruptcy = undefined;
         this.afterRentOrTax(state, player);
@@ -2427,10 +2440,14 @@ export class GamesService {
       }
 
       // Денег всё ещё не хватает — банкрот.
+      // По правилу: всё имущество → БАНК, кредитор получает
+      // компенсацию `(debt)` от Банка.
       const creditor = state.bankruptcy.creditorId
         ? (state.players.find((p) => p.id === state.bankruptcy!.creditorId) ?? null)
         : null;
-      this.bankruptcy.handle(state, player, creditor);
+      // `debt` — это ИСХОДНЫЙ долг (state.bankruptcy.debt до пересчёта
+      // в remainingDebt) или используем remainingDebt, что то же самое.
+      this.bankruptcy.handle(state, player, creditor, remainingDebt);
       state.bankruptcy = undefined;
       this.checkGameOver(state);
       state.phase = "BUILDING";
@@ -3065,6 +3082,8 @@ export class GamesService {
         return { type: "BANKRUPTCY_MORTGAGE", cellId: d.cellId };
       case "SELL_PROPERTY_FOR_BANKRUPTCY":
         return { type: "BANKRUPTCY_SELL_PROPERTY", cellId: d.cellId };
+      case "SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY":
+        return { type: "BANKRUPTCY_SELL_MORTGAGED_PROPERTY", cellId: d.cellId };
       case "TRADE_OFFER":
         return { type: "TRADE_OFFER", recipientId: d.recipientId, offer: d.offer };
       case "TRADE_COUNTER":

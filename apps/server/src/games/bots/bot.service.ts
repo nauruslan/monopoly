@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+﻿import { Injectable } from "@nestjs/common";
 import type { Cell, GameState, Player, TradeOffer } from "@monopoly/shared";
 import { BOARD } from "@monopoly/shared";
 
@@ -58,6 +58,12 @@ export type BotDecision =
    * (фаза BANKRUPTCY_LIQUIDATE).
    */
   | { kind: "SELL_PROPERTY_FOR_BANKRUPTCY"; cellId: number }
+  /**
+   * Продать уже заложенную клетку Банку за дополнительные 50% (mortgageValue)
+   * во время ликвидации (фаза BANKRUPTCY_LIQUIDATE). В сумме с предыдущим
+   * залогом игрок получает 100% номинала.
+   */
+  | { kind: "SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY"; cellId: number }
   | { kind: "TRADE_OFFER"; recipientId: string; offer: TradeOffer }
   | { kind: "TRADE_COUNTER"; offer: TradeOffer };
 
@@ -1017,7 +1023,7 @@ export class BotService {
       })
       .sort((a, b) => (b.mortgageValue ?? 0) - (a.mortgageValue ?? 0));
 
-    // 2в) Продажа клетки Банку за 100% номинала (ТЗ). Это крайняя
+    // 2в) Продажа клетки Банку за 100% номинала. Это крайняя
     //     мера: используем только если залог не покрывает долг.
     //     Клетка БЕЗ домов, БЕЗ залога, с price > 0.
     const sellable = state.board
@@ -1055,6 +1061,24 @@ export class BotService {
     // Залога не хватит — прибегаем к продаже (100%).
     if (sellable.length > 0) {
       return { kind: "SELL_PROPERTY_FOR_BANKRUPTCY", cellId: sellable[0]!.id };
+    }
+
+    // 2г) Продажа уже заложенных клеток Банку за дополнительные 50%
+    //     (mortgageValue). Суммарно с предыдущим залогом — 100% номинала.
+    //     Это последний шанс перед объявлением банкротства: клетка уходит
+    //     в банк чистой (UNOWNED, не заложена, без построек).
+    const mortgagedSellable = state.board
+      .filter(
+        (c) =>
+          (c.type === "PROPERTY" || c.type === "RAILROAD" || c.type === "UTILITY") &&
+          c.ownerId === player.id &&
+          c.isMortgaged === true &&
+          (c.houses ?? 0) === 0 &&
+          (c.mortgageValue ?? 0) > 0,
+      )
+      .sort((a, b) => (b.mortgageValue ?? 0) - (a.mortgageValue ?? 0));
+    if (mortgagedSellable.length > 0) {
+      return { kind: "SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY", cellId: mortgagedSellable[0]!.id };
     }
     // Если только залог и его хватает по сумме, но мы уже проверили —
     // залог как последний шанс, если больше ничего нет.

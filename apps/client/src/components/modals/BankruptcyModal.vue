@@ -9,6 +9,10 @@
  *  - Игрок может продать дома/отели (BANKRUPTCY_LIQUIDATE_HOUSES) — за
  *    половину стоимости дома.
  *  - Может заложить незаложенные клетки без домов (BANKRUPTCY_MORTGAGE).
+ *  - Может продать уже заложенную клетку Банку за дополнительные 50%
+ *    (mortgageValue) — в сумме с предыдущим залогом это 100% номинала.
+ *    Клетка уходит в банк (BANKRUPTCY_SELL_MORTGAGED_PROPERTY).
+ *  - Может продать клетку Банку за 100% номинала (BANKRUPTCY_SELL_PROPERTY).
  *  - Когда денег хватает — нажимает «Подтвердить оплату» (BANKRUPTCY_CONFIRM).
  *  - Если нечего продать/заложить — кнопка «Объявить банкротство»
  *    (BANKRUPTCY_DECLARE) удаляет игрока из партии.
@@ -97,6 +101,32 @@ const sellableToBank = computed<Cell[]>(() => {
     .sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
 });
 
+/**
+ * Клетки, которые можно ПРОДАТЬ Банку как уже заложенные.
+ * Это клетки, находящиеся в залоге, которые игрок может "допродать"
+ * Банку за дополнительные 50% (mortgageValue). В сумме с предыдущим
+ * залогом (50% номинала) игрок получает 100% номинала. Клетка уходит
+ * в банк (UNOWNED, не заложена, без построек).
+ *
+ * Допустимо ТОЛЬКО во время ликвидации (фаза BANKRUPTCY_LIQUIDATE).
+ *  - принадлежат игроку;
+ *  - заложены (isMortgaged === true);
+ *  - без построек на самой клетке;
+ *  - имеют положительную залоговую стоимость.
+ */
+const mortgagedSellable = computed<Cell[]>(() => {
+  const myId = props.myPlayerId;
+  if (!myId) return [];
+  return props.myProperties
+    .filter(
+      (c) =>
+        c.isMortgaged === true &&
+        (c.houses ?? 0) === 0 &&
+        (c.mortgageValue ?? 0) > 0,
+    )
+    .sort((a, b) => (b.mortgageValue ?? 0) - (a.mortgageValue ?? 0));
+});
+
 /** Сколько денег останется после полной ликвидации. */
 const projectedMoney = computed<number>(() => props.money + props.maxLiquidity);
 
@@ -125,6 +155,15 @@ function onMortgage(cellId: number): void {
  */
 function onSellToBank(cellId: number): void {
   game.sendAction({ type: "BANKRUPTCY_SELL_PROPERTY", cellId });
+}
+
+/**
+ * Продать уже заложенную клетку Банку за дополнительные 50%
+ * (mortgageValue). В сумме с предыдущим залогом игрок получает 100%
+ * номинала. Допустимо только во время ликвидации.
+ */
+function onSellMortgagedToBank(cellId: number): void {
+  game.sendAction({ type: "BANKRUPTCY_SELL_MORTGAGED_PROPERTY", cellId });
 }
 
 function onConfirm(): void {
@@ -211,6 +250,35 @@ function onDeclare(): void {
       </div>
     </section>
 
+    <!-- Клетки, уже заложенные: допродажа Банку за дополнительные 50% (mortgageValue) -->
+    <section v-if="mortgagedSellable.length > 0" class="section">
+      <h3 class="section-title">Продать заложенный Банку (50%)</h3>
+      <div class="cards">
+        <div v-for="cell in mortgagedSellable" :key="`sm-${cell.id}`" class="card">
+          <div class="card-header" :style="{ background: cell.color || '#555' }">
+            <span class="card-name">{{ cell.name }}</span>
+            <span class="badge">Залог: ₽{{ cell.mortgageValue ?? 0 }}</span>
+          </div>
+          <div class="card-body">
+            <div class="card-row">
+              <span class="label">Тип</span>
+              <span class="value">
+                <template v-if="cell.type === 'PROPERTY'">Участок</template>
+                <template v-else-if="cell.type === 'RAILROAD'">Ж/д</template>
+                <template v-else-if="cell.type === 'UTILITY'">Предприятие</template>
+                <template v-else>{{ cell.type }}</template>
+              </span>
+            </div>
+          </div>
+          <div class="card-action">
+            <button class="action-btn btn-sell-mortgaged" @click="onSellMortgagedToBank(cell.id)">
+              💰 Допродать за ₽{{ cell.mortgageValue ?? 0 }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Клетки на продажу Банку (100% номинала) -->
     <section v-if="sellableToBank.length > 0" class="section">
       <h3 class="section-title">Продать Банку (100%)</h3>
@@ -241,7 +309,14 @@ function onDeclare(): void {
     </section>
 
     <!-- Ничего нельзя ликвидировать -->
-    <p v-if="housesForSale.length === 0 && mortgageable.length === 0" class="empty">
+    <p
+      v-if="
+        housesForSale.length === 0 &&
+        mortgageable.length === 0 &&
+        mortgagedSellable.length === 0
+      "
+      class="empty"
+    >
       У вас нет ни домов, ни участков, доступных для ликвидации.
     </p>
 
@@ -420,6 +495,15 @@ function onDeclare(): void {
 
 .btn-mortgage:hover {
   background: linear-gradient(135deg, #8aa3ff, #6080e0);
+  transform: translateY(-1px);
+}
+
+.btn-sell-mortgaged {
+  background: linear-gradient(135deg, #e67e22, #c0392b);
+}
+
+.btn-sell-mortgaged:hover {
+  background: linear-gradient(135deg, #ff9248, #d04535);
   transform: translateY(-1px);
 }
 

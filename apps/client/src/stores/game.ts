@@ -106,16 +106,25 @@ export const useGameStore = defineStore("game", () => {
       if (newState.phase !== "CARD_REVEAL" && newState.phase !== "CARD_EFFECT") {
         cardPendingConfirm.value = false;
       }
-      // UX-фаза BUILDING_PHASE: автооткрытие модалки «Строить» (только
-      // если мы — текущий игрок-человек, который её открыл). Делаем
-      // через lazy import, чтобы не было циклической зависимости.
-      if (newState.phase === "BUILDING_PHASE" && previousPhase !== "BUILDING_PHASE") {
+      // UX-фаза BUILDING_PHASE: автооткрытие модалки «Строить» ТОЛЬКО
+      // для текущего игрока-человека, чей сейчас ход. Раньше модалка
+      // открывалась у ВСЕХ подключённых клиентов (людей и ботов) при
+      // чужой фазе — это сбивало с толку, т.к. UI предлагал строить
+      // чужому игроку. Теперь проверяем `state.currentPlayerIndex`.
+      // Делаем через lazy import, чтобы не было циклической зависимости.
+      const currentPlayer = newState.players[newState.currentPlayerIndex];
+      // Берём свой ID из trade-store (он синхронизируется в GameView
+      // через setMyPlayerId) — это самый надёжный источник «кто я».
+      const myId = useTradeStore().myId;
+      const isMyTurn = !!myId && !!currentPlayer && currentPlayer.id === myId;
+      if (newState.phase === "BUILDING_PHASE" && previousPhase !== "BUILDING_PHASE" && isMyTurn) {
         import("./build").then((m) => {
           const build = m.useBuildStore();
           if (!build.isOpen) build.open();
         });
       }
       // При выходе из фазы — закрываем модалку, если она ещё открыта.
+      // Закрываем у ВСЕХ, чтобы при реконнекте/чужом ходу она не висела.
       if (previousPhase === "BUILDING_PHASE" && newState.phase !== "BUILDING_PHASE") {
         import("./build").then((m) => {
           const build = m.useBuildStore();
@@ -233,7 +242,26 @@ export const useGameStore = defineStore("game", () => {
     }
     const trade = useTradeStore();
     const myId = trade.myId;
+    // ВАЖНО: модалку результата сделки показываем ТОЛЬКО её участникам
+    // (инициатор + получатель). Раньше она показывалась ВСЕМ клиентам в
+    // комнате, что выглядело как чужой диалог. Чужим игрокам событие
+    // просто попадает в LogPanel и не блокирует UI.
     const otherId = ev.payload?.otherPlayerId;
+    if (!myId || (ev.playerId !== myId && otherId !== myId)) {
+      return;
+    }
+    // Если среди участников сделки есть бот (а бот не имеет собственного
+    // браузерного клиента и не нажмёт «Принять»), модалка может зависнуть
+    // на экране у людей-участников. Ставим короткий auto-dismiss — 4 секунды
+    // достаточно, чтобы прочитать сообщение, и при этом игра не «встанет»
+    // из-за висящего диалога. Если человек успел нажать раньше — `acknowledgeResult`
+    // просто очистит уже обнулённый `lastResult` (защита в самом методе).
+    const mePlayer = state.value.players.find((p) => p.id === myId);
+    const otherPlayer = otherId ? state.value.players.find((p) => p.id === otherId) : undefined;
+    const hasBotParticipant = mePlayer?.kind === "bot" || otherPlayer?.kind === "bot";
+    if (hasBotParticipant) {
+      setTimeout(() => trade.acknowledgeResult(), 4000);
+    }
     // Имя второй стороны для UI: пробуем взять из trade.recipient (если
     // ещё не закрыли модалку), иначе по otherPlayerId, иначе "игрок".
     let partnerName = "игрок";

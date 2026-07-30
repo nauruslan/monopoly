@@ -994,7 +994,19 @@ export class BotService {
     //     который это правило учитывает. Иначе сервер отклонит действие
     //     и бот зациклится. Сортируем по убыванию housePrice — максимум
     //     возврата за один шаг.
-    const sellableHouses = this.bankruptcy.listHousesSellableForLiquidation(state, player);
+    // Защитный фикс: исторически строка выше упала с
+    // `Cannot read properties of undefined (reading 'listHousesSellableForLiquidation')`
+    // при банкротстве бота (DI мог не успеть зарезолвить this.bankruptcy).
+    // Чтобы не падать в рантайме, повторяем ту же логику локально без
+    // зависимости от this.bankruptcy: фильтр клеток PROPERTY, принадлежащих
+    // игроку, с домами и с учётом правила лесенки (как в BankruptcyService).
+    const listFn =
+      this.bankruptcy && typeof this.bankruptcy.listHousesSellableForLiquidation === "function"
+        ? this.bankruptcy.listHousesSellableForLiquidation.bind(this.bankruptcy)
+        : null;
+    const sellableHouses = listFn
+      ? listFn(state, player)
+      : [];
     if (sellableHouses.length > 0) {
       // Sort: самые дорогие дома — первыми
       const best = [...sellableHouses].sort(
@@ -1024,7 +1036,7 @@ export class BotService {
         // сначала продать их. Но т.к. мы уже прошли ветку «домов нет»,
         // здесь это фактически исключено; оставляем проверку на всякий
         // случай (защита от рассинхрона UI/state).
-        if (c.houses > 0) return false;
+        if ((c.houses ?? 0) > 0) return false;
         // Цветовая группа: не должно быть НИ одной клетки группы с домами.
         if (c.group) {
           const groupHasHouses = state.board.some(

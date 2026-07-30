@@ -31,9 +31,9 @@ import { AuctionService, type AuctionEvent } from "./handlers/auction.service";
 import { TradeService } from "./handlers/trade.service";
 import { MortgageService } from "./handlers/mortgage.service";
 import { BuildService } from "./handlers/build.service";
+import { LogService } from "./handlers/log.service";
 import { canRollDice, canEndTurn, isCurrentPlayer } from "./turn-permissions";
 import type { GameEventKind } from "@monopoly/shared";
-import { randomUUID } from "crypto";
 
 export type GameStateChangedCallback = (
   gameId: string,
@@ -113,6 +113,8 @@ export class GamesService {
     private readonly mortgageSvc: MortgageService,
     @Inject(forwardRef(() => BuildService))
     private readonly buildSvc: BuildService,
+    @Inject(forwardRef(() => LogService))
+    private readonly log: LogService,
   ) {
     if (!this.rentCalc) console.error("[GamesService] RentCalculator не заинжектирован!");
     if (!this.jail) console.error("[GamesService] JailHandlerService не заинжектирован!");
@@ -122,6 +124,7 @@ export class GamesService {
     if (!this.auction) console.error("[GamesService] AuctionService не заинжектирован!");
     if (!this.trade) console.error("[GamesService] TradeService не заинжектирован!");
     if (!this.buildSvc) console.error("[GamesService] BuildService не заинжектирован!");
+    if (!this.log) console.error("[GamesService] LogService не заинжектирован!");
     if (!this.onStateChanged) {
       console.error(
         "[GamesService] onStateChanged не зарегистрирован (GameGateway не подключился?)",
@@ -197,6 +200,16 @@ export class GamesService {
     }
 
     this.logger.log(`Game created: ${dbGame.id}`);
+
+    // Записываем в журнал событие «Игра началась» (GAME_STARTED) и
+    // сразу же кладём в state.events, чтобы при reconnect клиент
+    // увидел стартовое сообщение в LogPanel.
+    const startEv = this.log.logGameStarted(
+      state,
+      state.players.map((p) => p.displayName),
+    );
+    this.onStateChanged?.(dbGame.id, state, startEv);
+
     this.scheduleBotIfNeeded(state, dbGame.id);
 
     return { gameId: dbGame.id, state };
@@ -393,6 +406,16 @@ export class GamesService {
 
     state.version++;
     state.lastActivityAt = new Date().toISOString();
+
+    // Кладём событие в кольцевой буфер `state.events`, чтобы при
+    // reconnect новый клиент получил полную историю (а не только
+    // последние N событий broadcast'а). Используем приватный хелпер
+    // LogService — он сам обрежет буфер до MAX_EVENTS_IN_STATE.
+    // Важно: событие в этом месте уже сформировано через makeEvent,
+    // поэтому мы НЕ пересоздаём его, а просто пушим в массив.
+    if (event) {
+      this.log.pushToState(state, event);
+    }
 
     this.logger.log(`[applyAction] after-dispatch gameId=${gameId} phase=${state.phase}`);
 
@@ -609,6 +632,11 @@ export class GamesService {
     player: Player,
     _action: GameAction,
   ): Promise<{ dice?: [number, number]; card?: unknown; event?: GameEvent }> {
+    // Лог «Начало хода» — всегда в начале START_TURN, чтобы в журнале
+    // LogPanel было видно, кто сейчас ходит. Возвращаем event, чтобы
+    // applyAction отправил его через broadcast и положил в state.events.
+    const startEv = this.log.logTurnStart(state, player, state.round);
+
     player.mustRollAgain = false;
     player.consecutiveDoubles = 0;
     // Сбрасываем флаги свежего попадания в специальные зоны
@@ -635,14 +663,16 @@ export class GamesService {
     // или действовать в тюрьме, пока не ликвидирует имущество.
     if (player.money < 0 && !player.isBankrupt) {
       this.startBankruptcyProcedure(state, player, null, -player.money);
-      return {};
+      // Возвращаем startEv, чтобы он попал в broadcast и state.events
+      // даже при принудительном банкротстве (полезно для истории).
+      return { event: startEv };
     }
     if (player.inJail) {
       state.phase = "JAIL_DECISION";
     } else {
       state.phase = "ROLLING";
     }
-    return {};
+    return { event: startEv };
   }
 
   /**
@@ -667,7 +697,9 @@ export class GamesService {
     state.lastDice = { dice: diceResult, isDouble };
     state.phase = "DICE_ANIMATION";
 
-    return { dice: diceResult };
+    // Лог броска кубиков в журнал LogPanel.
+    const diceEv = this.log.logDiceRolled(state, player, diceResult, isDouble);
+    return { dice: diceResult, event: diceEv };
   }
 
   /**
@@ -752,6 +784,7 @@ export class GamesService {
         // (без `Math.max(0, ...)`) — если денег не хватило, баланс
         // уйдёт в минус и сработает триггер банкротства.
         player.money -= 50;
+        this.log.logJailEscaped(state, player, "pay");
         if (this.shouldStartBankruptcy(state, player, null, 50)) {
           return {};
         }
@@ -760,6 +793,8 @@ export class GamesService {
       // бесплатно, даже на 3-й попытке. Это правильный ход Монополии.
       player.inJail = false;
       player.jailTurns = 0;
+      // Журнал: «Игрок выходит из тюрьмы (бросок дубля)».
+      this.log.logJailEscaped(state, player, "double");
 
       // Очищаем контекст прошлой анимации (он относился к попытке
       // выхода из тюрьмы, а не к обычному движению). После нажатия
@@ -793,6 +828,8 @@ export class GamesService {
         // `handleStartTurn` сбросит флаг.
         this.jail.sendToJail(player);
         state.justEnteredJail = true;
+        // Журнал: попадание в тюрьму через 3 дубля подряд.
+        this.log.logJailEntered(state, player, "double");
         state.phase = "JAIL_DECISION";
         return {};
       }
@@ -894,8 +931,14 @@ export class GamesService {
     // ТОЛЬКО за реальный wrap мимо 0 (newPos > 0 И newPos < oldPos).
     // Условие `newPos !== 0` исключает случай точного приземления
     // на 0, чтобы избежать двойной зарплаты.
+    const salaryEarned = 0;
     if (newPos < oldPos && newPos !== 0) {
       player.money += state.settings.goSalary;
+      // Журнал: «Получил N₽ за проход через ВПЕРЁД» (при wrap мимо 0).
+      // Сумма фиксированная — без двойной
+      // выплаты (двойная — только если фишка приземлилась РОВНО на GO,
+      // этот случай логируется ниже в handleResolvingLanding).
+      this.log.logGoSalary(state, player, state.settings.goSalary, false);
     }
 
     // Очищаем moveAnimation - он использовался для анимации на клиенте.
@@ -948,9 +991,16 @@ export class GamesService {
         // Остановка на GO после дубля: двойная зарплата, и
         // право на повторный бросок сохраняется (правило дублей).
         player.money += state.settings.goSalary * 2;
+        // Журнал: двойная зарплата за приземление на GO после дубля.
+        // «Получил 200₽ за проход через ВПЕРЁД»
+        // — здесь с пометкой «(после дубля — двойная)».
+        this.log.logGoSalary(state, player, state.settings.goSalary * 2, true);
         state.phase = "ROLLING";
       } else {
         player.money += state.settings.goSalary;
+        // Журнал: обычная зарплата за приземление ровно на GO.
+        // «Получил 200₽ за проход через ВПЕРЁД».
+        this.log.logGoSalary(state, player, state.settings.goSalary, false);
         state.phase = "BUILDING";
       }
       return {};
@@ -1006,6 +1056,8 @@ export class GamesService {
       // fallback (если карточка не найдена в деке — теоретически невозможно)
       this.jail.sendToJail(player);
       state.justEnteredJail = true;
+      // Журнал: попадание в тюрьму через клетку 30 (fallback).
+      this.log.logJailEntered(state, player, "cell");
       state.phase = "JAIL_DECISION";
       return {};
     }
@@ -1016,6 +1068,12 @@ export class GamesService {
     if (cell.type === "CHANCE" || cell.type === "TREASURY") {
       const deck = cell.type === "CHANCE" ? "chance" : "treasury";
       const card = this.cards.drawFromDeck(deck, state);
+      // Журнал: фиксируем, какая карточка была вытянута.
+      // «должна быть информация, какую карточку вытянул игрок».
+      // Регистрируем сразу при показе — так в журнале сначала идёт
+      // событие «бросок кубиков → попал на клетку → вытянул карту»,
+      // затем ниже (после CONFIRM_CARD) — событие с эффектом.
+      this.log.logCardDrawn(state, player, deck, card.text);
       state.cardContext = {
         playerId: player.id,
         deck,
@@ -1064,6 +1122,8 @@ export class GamesService {
       // (модалка с описанием формулы; списывание — после CONFIRM_CARD в CARD_EFFECT).
       if (cell.taxVariant === "luxury") {
         const card = this.cards.drawFromDeck("luxury-tax", state);
+        // Журнал: фиксируем «вытянутую карточку-формулу».
+        this.log.logCardDrawn(state, player, "luxury-tax", card.text);
         state.cardContext = {
           playerId: player.id,
           deck: "luxury-tax",
@@ -1181,6 +1241,13 @@ export class GamesService {
         player.money -= rent;
         owner.money += rent;
         state.rentContext = undefined;
+        // Лог: фиксируем факт оплаты аренды (с указанием
+        // получателя и клетки). Не логируем, если игрок
+        // сразу уходит в банкротство — там будет отдельное
+        // сообщение о банкротстве.
+        if (!this.shouldStartBankruptcy(state, player, owner, rent)) {
+          this.log.logRentPaid(state, player, owner, cell.name, rent);
+        }
         // Триггер банкротства: проверяем, что у игрока
         // реально нет ликвидности (или её не хватает на покрытие).
         if (this.shouldStartBankruptcy(state, player, owner, rent)) {
@@ -1234,6 +1301,9 @@ export class GamesService {
     // ВАЖНО: НЕ клампим в 0 — пусть баланс уйдёт в минус,
     // сработает триггер банкротства.
     player.money -= cell.taxAmount;
+    // Журнал: фиксированный «Подоходный налог N₽» (клетка id=4).
+    // «Игрок заплатил подоходный налог 200₽».
+    this.log.logIncomeTaxPaid(state, player, cell.taxAmount);
     if (this.shouldStartBankruptcy(state, player, null, cell.taxAmount)) {
       return {};
     }
@@ -1298,6 +1368,10 @@ export class GamesService {
       player.money -= cell.price;
       player.properties.push(cell.id);
       cell.ownerId = player.id;
+      // Журнал: фиксируем покупку собственности. Добавляем в state.events
+      // (через logService), а сам event не возвращаем — иначе applyAction
+      // продублирует его. Запись попадает на клиент в следующем snapshot.
+      this.log.logPropertyBought(state, player, cell.name, cell.price);
       if (this.shouldStartBankruptcy(state, player, null, cell.price)) {
         return {};
       }
@@ -1306,6 +1380,10 @@ export class GamesService {
     }
 
     if (action.type === "DECLINE_BUY") {
+      // Журнал: фиксируем отказ от покупки. Полезно для истории партии:
+      // видно, кто и какую клетку пропустил (а на следующем ходу
+      // выясняется, что она ушла на аукционе или осталась свободной).
+      this.log.logPropertyDeclined(state, player, cell.name);
       if (state.settings.auctionEnabled) {
         // Запускаем аукцион: AuctionService выставляет state.auction
         // (статус AWAITING_START → AUCTION_ACTIVE) и эмитит
@@ -1608,6 +1686,8 @@ export class GamesService {
       state.justEnteredJail = true;
       state.phase = "JAIL_DECISION";
       state.cardContext = undefined;
+      // Журнал: попадание в тюрьму через карточку «Отправляйтесь в тюрьму».
+      this.log.logJailEntered(state, player, "card");
       return { card };
     }
 
@@ -1621,6 +1701,26 @@ export class GamesService {
     // Спецслучай: `money` с положительным amount (карточка «получите N₽»)
     // не может привести к минусу, но мы всё равно вызываем проверку —
     // она no-op, если `player.money >= 0`.
+    if (card.effect.kind === "luxury-tax-house") {
+      // Журнал: Роскошный налог с разбивкой по участкам/домам/отелям.
+      // «Игрок заплатил Роскошный налог — сумма (формула
+      // сумма=участки+дома+отели)».
+      // Пересчитываем properties/houses/hotels для UI-сообщения.
+      let houses = 0;
+      let hotels = 0;
+      let properties = 0;
+      for (const cellId of player.properties) {
+        const c = state.board[cellId];
+        if (!c || c.isMortgaged) continue;
+        properties += 1;
+        if (c.houses >= 1 && c.houses <= 4) houses += c.houses;
+        else if (c.houses === 5) hotels += 1;
+      }
+      const { perHouse, perHotel, perProperty } = card.effect;
+      const total = perHouse * houses + perHotel * hotels + perProperty * properties;
+      this.log.logLuxuryTaxPaid(state, player, total, houses, hotels, properties);
+    }
+
     if (this.shouldStartBankruptcy(state, player, null, 0)) {
       // shouldStartBankruptcy уже изменил фазу на BANKRUPTCY_LIQUIDATE
       // (или объявил банкрота) — возвращаемся, дальнейшие шаги не нужны.
@@ -1728,9 +1828,10 @@ export class GamesService {
         //  - зачисляет mortgageValue игроку;
         //  - выставляет isMortgaged = true.
         const mortgageAmount = this.mortgageSvc.mortgage(state, player, action.cellId);
+        const cellName = state.board[action.cellId]?.name ?? `клетку #${action.cellId}`;
         return {
           event: this.makeEvent("PROPERTY_MORTGAGED", player, {
-            message: `🏦 ${player.displayName} заложил(а) участок и получил(а) $${mortgageAmount}`,
+            message: `🏦 ${player.displayName} заложил «${cellName}» и получил ${mortgageAmount}₽`,
             type: "buy",
             payload: { cellId: action.cellId, mortgageAmount },
           }),
@@ -1743,9 +1844,10 @@ export class GamesService {
         //  - списывает mortgageValue * 1.1 (округлено вверх);
         //  - выставляет isMortgaged = false.
         const unmortgageAmount = this.mortgageSvc.unmortgage(state, player, action.cellId);
+        const cellName = state.board[action.cellId]?.name ?? `клетку #${action.cellId}`;
         return {
           event: this.makeEvent("PROPERTY_UNMORTGAGED", player, {
-            message: `💰 ${player.displayName} выкупил(а) участок за $${unmortgageAmount}`,
+            message: `💰 ${player.displayName} выкупил «${cellName}» за ${unmortgageAmount}₽`,
             type: "buy",
             payload: { cellId: action.cellId, mortgageAmount: unmortgageAmount },
           }),
@@ -1806,13 +1908,12 @@ export class GamesService {
         if (player.mustRollAgain) {
           throw new ForbiddenException("Сначала бросьте кубики ещё раз");
         }
+        // Открытие меню строительства НЕ логируется — это
+        // UX-фаза без реального действия. В журнал попадут
+        // только конкретные события: постройка/снос дома,
+        // залог/выкуп клетки.
         state.phase = "BUILDING_PHASE";
-        return {
-          event: this.makeEvent("BUILDING_PHASE_OPENED", player, {
-            message: `🛠️ ${player.displayName} открыл(а) меню строительства`,
-            type: "buy",
-          }),
-        };
+        return {};
       }
 
       case "END_TURN": {
@@ -1917,9 +2018,10 @@ export class GamesService {
 
       case "MORTGAGE_PROPERTY": {
         const mortgageAmount = this.mortgageSvc.mortgage(state, player, action.cellId);
+        const cellName = state.board[action.cellId]?.name ?? `клетку #${action.cellId}`;
         return {
           event: this.makeEvent("PROPERTY_MORTGAGED", player, {
-            message: `🏦 ${player.displayName} заложил(а) участок и получил(а) $${mortgageAmount}`,
+            message: `🏦 ${player.displayName} заложил «${cellName}» и получил ${mortgageAmount}₽`,
             type: "buy",
             payload: { cellId: action.cellId, mortgageAmount },
           }),
@@ -1928,9 +2030,10 @@ export class GamesService {
 
       case "UNMORTGAGE_PROPERTY": {
         const unmortgageAmount = this.mortgageSvc.unmortgage(state, player, action.cellId);
+        const cellName = state.board[action.cellId]?.name ?? `клетку #${action.cellId}`;
         return {
           event: this.makeEvent("PROPERTY_UNMORTGAGED", player, {
-            message: `💰 ${player.displayName} выкупил(а) участок за $${unmortgageAmount}`,
+            message: `💰 ${player.displayName} выкупил «${cellName}» за ${unmortgageAmount}₽`,
             type: "buy",
             payload: { cellId: action.cellId, mortgageAmount: unmortgageAmount },
           }),
@@ -1963,18 +2066,15 @@ export class GamesService {
         // поэтому переключение фазы на BUILDING_PHASE делаем здесь.
         // Если уже в BUILDING_PHASE (повторный клик при открытой модалке)
         // — no-op.
+        //
+        // Открытие меню НЕ логируется — это UX-фаза без реального
+        // действия. В журнал попадают только конкретные события:
+        // постройка/снос дома, залог/выкуп клетки.
         if (state.phase !== "BUILDING_PHASE") {
           // Запоминаем фазу, из которой открыли модалку, чтобы
           // CONFIRM_BUILDING_PHASE мог корректно вернуться именно в неё.
           state.preBuildingPhase = state.phase;
           state.phase = "BUILDING_PHASE";
-          return {
-            event: this.makeEvent("BUILDING_PHASE_OPENED", player, {
-              message: `🏗️ ${player.displayName} открыл(а) меню строительства`,
-              type: "buy",
-              payload: {},
-            }),
-          };
         }
         return {};
       }
@@ -2118,6 +2218,9 @@ export class GamesService {
       player.money -= 50;
       player.inJail = false;
       player.jailTurns = 0;
+      // Журнал: «Игрок заплатил 50₽ штрафа и вышел из тюрьмы».
+      // «Игрок заплатил 50₽ и вышел из тюрьмы».
+      this.log.logJailEscaped(state, player, "pay");
       if (this.shouldStartBankruptcy(state, player, null, 50)) {
         return {};
       }
@@ -2130,6 +2233,8 @@ export class GamesService {
       player.jailCards -= 1;
       player.inJail = false;
       player.jailTurns = 0;
+      // Журнал: «Игрок использует карточку выхода из тюрьмы».
+      this.log.logJailEscaped(state, player, "card");
       state.phase = "ROLLING";
       return {};
     }
@@ -2208,6 +2313,21 @@ export class GamesService {
    * один бросок.
    */
   private afterAuctionFinished(state: GameState): void {
+    // Журнал: фиксируем итог аукциона ДО finalize (потому что finalize
+    // только логирует в свой logger, а state.auction ещё жив). Берём
+    // cellId/winnerId/finalBid/finishReason — всё уже установлено движком
+    // при AUCTION_END.
+    if (state.auction && state.auction.status === "FINISHED") {
+      const { cellId, winnerId, finalBid, finishReason } = state.auction;
+      if (finishReason === "SOLD" && winnerId) {
+        const winner = state.players.find((p) => p.id === winnerId);
+        if (winner) {
+          this.log.logAuctionWon(state, winner, cellId, finalBid);
+        }
+      } else if (finishReason === "UNSOLD") {
+        this.log.logAuctionUnsold(state, cellId);
+      }
+    }
     this.auction.finalize(state);
     // ВАЖНО: тут же очищаем state.auction, иначе клиент продолжает
     // показывать модалку аукциона (auctionStore.status === "FINISHED"
@@ -2332,12 +2452,16 @@ export class GamesService {
     // немедленное банкротство.
     if (this.bankruptcy.canCoverDebt(state, player, need)) {
       this.startBankruptcyProcedure(state, player, creditor, need);
+      const creditorName = creditor?.displayName ?? "Банк";
+      this.log.logBankruptcyLiquidationStarted(state, player, creditorName, need);
       return true;
     }
 
     // Нет возможности покрыть — сразу банкрот.
     // По правилу: всё имущество → БАНК, кредитор получает
     // компенсацию `debt` от Банка.
+    // Журнал: финальное объявление банкротства.
+    this.log.logBankruptcyDeclared(state, player, creditor?.displayName ?? "Банк");
     this.bankruptcy.handle(state, player, creditor, need);
     state.phase = "BUILDING";
     this.checkGameOver(state);
@@ -2391,8 +2515,20 @@ export class GamesService {
       // Отель (houses === 5) продаётся за 5 housePrice, но превращается в 4 дома.
       // Списываем 1 юнит (дом) с клетки; для отеля это даёт 4 дома.
       const newHouses = cell.houses === 5 ? 4 : cell.houses - 1;
-      player.money += cell.housePrice / 2;
+      const refundLiquidation = cell.housePrice / 2;
+      const wasHotelLiquidation = cell.houses === 5;
+      player.money += refundLiquidation;
       cell.houses = newHouses as 0 | 1 | 2 | 3 | 4 | 5;
+      const nounLiquidation = wasHotelLiquidation ? "отель" : "дом";
+      this.log.logBankruptcyHouseSold(
+        state,
+        player,
+        cell.name,
+        nounLiquidation,
+        refundLiquidation,
+        newHouses,
+        wasHotelLiquidation,
+      );
       return {};
     }
 
@@ -2404,6 +2540,7 @@ export class GamesService {
       if (cell.mortgageValue === undefined) throw new BadRequestException("Нельзя заложить");
       player.money += cell.mortgageValue;
       cell.isMortgaged = true;
+      this.log.logBankruptcyMortgage(state, player, cell.name, cell.mortgageValue);
       return {};
     }
 
@@ -2413,7 +2550,10 @@ export class GamesService {
       // валидация (нет домов, не заложена, в группе нет домов) и
       // сброс состояния клетки (ownerId = undefined, isMortgaged = false,
       // houses = 0).
+      const soldCellName = state.board[action.cellId]?.name ?? `#${action.cellId}`;
+      const soldCellPrice = state.board[action.cellId]?.price ?? 0;
       this.bankruptcy.sellPropertyToBank(state, player, action.cellId);
+      this.log.logPropertySoldToBank(state, player, soldCellName, soldCellPrice);
       return {};
     }
 
@@ -2433,18 +2573,14 @@ export class GamesService {
       state.bankruptcy.debt = remainingDebt;
 
       if (player.money >= 0 && remainingDebt === 0) {
-        // Игрок успешно восстановил ликвидность. Долг погашен.
-        // Если был кредитор — переводим остаток денег игрока ему
-        // (это переплата, но логично: банкрот должен отдать ВСЁ что
-        // нажил сверх нуля). Если кредитора нет — деньги остаются
-        // игроку (он их честно отвоевал распродажей).
-        const creditor = state.bankruptcy.creditorId
-          ? (state.players.find((p) => p.id === state.bankruptcy!.creditorId) ?? null)
-          : null;
-        if (creditor) {
-          creditor.money += player.money;
-          player.money = 0;
-        }
+        // Игрок успешно восстановил ликвидность через распродажу и НЕ
+        // объявлял банкротство: остаток денег у него сохраняется,
+        // партия возвращается к штатному ходу через afterRentOrTax.
+        // Кредитор ничего не получает — долг-то погашен.
+        //
+        // Деньги уходят кредитору ТОЛЬКО в объявленном банкротстве —
+        // см. ниже bankruptcy.handle() (state.phase = BUILDING,
+        // player.isBankrupt = true). Здесь же игрок остаётся в игре.
         state.bankruptcy = undefined;
         this.afterRentOrTax(state, player);
         return {};
@@ -2456,6 +2592,7 @@ export class GamesService {
       const creditor = state.bankruptcy.creditorId
         ? (state.players.find((p) => p.id === state.bankruptcy!.creditorId) ?? null)
         : null;
+      this.log.logBankruptcyDeclared(state, player, creditor?.displayName ?? "Банк");
       // `debt` — это ИСХОДНЫЙ долг (state.bankruptcy.debt до пересчёта
       // в remainingDebt) или используем remainingDebt, что то же самое.
       this.bankruptcy.handle(state, player, creditor, remainingDebt);
@@ -2680,22 +2817,45 @@ export class GamesService {
 
   /**
    * Хелпер: сконструировать GameEvent с дефолтными полями.
-   * Используется обработчиками, чтобы не дублировать id/at/playerId.
+   * Делегирует работу в `LogService` (централизованный сервис журнала),
+   * чтобы не дублировать генерацию uuid/at/playerId.
+   *
+   * Принимает `state` (опционально) — если передан, событие будет
+   * добавлено в `state.events` (кольцевой буфер до MAX_EVENTS_IN_STATE).
    */
   private makeEvent(
     kind: GameEventKind,
     player: Player,
     fields: Pick<GameEvent, "message" | "type"> & { payload?: GameEvent["payload"] },
   ): GameEvent {
-    return {
-      id: randomUUID(),
-      at: new Date().toISOString(),
+    return this.log.createWithoutState({
       kind,
-      playerId: player.id,
+      player,
       message: fields.message,
       type: fields.type,
       ...(fields.payload ? { payload: fields.payload } : {}),
-    };
+    });
+  }
+
+  /**
+   * Хелпер: создать GameEvent и положить его в `state.events`
+   * (для восстановления истории при reconnect) + вернуть объект.
+   * Удобен для обработчиков, которые хотят сразу записать событие
+   * в журнал.
+   */
+  private logEvent(
+    state: GameState,
+    kind: GameEventKind,
+    player: Player | null,
+    fields: { message: string; type?: string; payload?: GameEvent["payload"] },
+  ): GameEvent {
+    return this.log.create(state, {
+      kind,
+      player,
+      message: fields.message,
+      ...(fields.type ? { type: fields.type } : {}),
+      ...(fields.payload ? { payload: fields.payload } : {}),
+    });
   }
 
   private advanceToNextPlayer(state: GameState) {

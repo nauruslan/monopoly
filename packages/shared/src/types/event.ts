@@ -21,12 +21,28 @@ import type { Card } from "../data/cards";
  *  - `HOUSE_BUILT`  — игрок построил дом/отель;
  *  - `HOUSE_SOLD`   — игрок продал дом/отель банку;
  *  - `BUILDING_PHASE_OPENED` — игрок открыл модалку строительства/залога.
+ *
+ * Дополнительно для торговли:
+ *  - `TRADE_STARTED`   — инициатор предложил обмен;
+ *  - `TRADE_COUNTER`   — встречное предложение;
+ *  - `TRADE_COMPLETED` — сделка совершена;
+ *  - `TRADE_REJECTED`  — получатель отклонил;
+ *  - `TRADE_CANCELLED` — инициатор отменил.
+ *
+ * Дополнительно для банкротства (v2):
+ *  - `BANKRUPTCY_LIQUIDATION` — игрок распродаёт имущество (фаза).
+ *  - `BANKRUPTCY_DECLARED`    — игрок объявил банкротство.
+ *
+ * Журнал хранит ВСЕ события партии (без удаления). В снапшоте
+ * `state.events[]` лежит полная история, и при reconnect клиент видит
+ * её целиком. На клиенте `LogPanel.vue` не обрезает список.
  */
 
 export type GameEventKind =
   | "GAME_STARTED"
   | "TURN_START"
   | "DICE_ROLLED"
+  | "GO_SALARY_PAID"
   | "PROPERTY_BOUGHT"
   | "PROPERTY_DECLINED"
   | "RENT_PAID"
@@ -50,6 +66,8 @@ export type GameEventKind =
   | "HOUSE_BUILT"
   | "HOUSE_SOLD"
   | "BUILDING_PHASE_OPENED"
+  | "BANKRUPTCY_LIQUIDATION"
+  | "BANKRUPTCY_DECLARED"
   | "GAME_OVER";
 
 export interface GameEvent {
@@ -68,7 +86,7 @@ export interface GameEvent {
   /**
    * Класс для подсветки в журнале:
    * "" (по умолчанию) | "move" | "rent" | "chance" | "win" | "buy"
-   * | "auction" | "pass".
+   * | "auction" | "pass" | "trade" | "tax" | "jail" | "system".
    */
   type: string;
   /** Доп. данные для UI (например, dice, card, amount, cellId). */
@@ -99,5 +117,15 @@ export interface GameEvent {
     buildAmount?: number;
     /** true, если операция — строительство/снос отеля (а не дома). */
     isHotel?: boolean;
+    /**
+     * Признак операции в фазе распродажи имущества (BANKRUPTCY_LIQUIDATE).
+     * Используется UI для отдельной подсветки и текстовых пометок
+     * "(распродажа)".
+     */
+    liquidation?: boolean;
+    /**
+     * ID второй стороны для тюрьмы: кто засадил (или null для клетки 30).
+     */
+    reason?: "cell" | "card" | "double" | "other";
   };
 }

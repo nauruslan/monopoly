@@ -33,6 +33,7 @@ import { BuildService } from "../handlers/build.service";
 import { BotService } from "../bots/bot.service";
 import { AuctionService } from "../handlers/auction.service";
 import { TradeService } from "../handlers/trade.service";
+import { LogService } from "../handlers/log.service";
 import type { GameState, Player } from "@monopoly/shared";
 import { BOARD, DEFAULT_SETTINGS } from "@monopoly/shared";
 
@@ -134,6 +135,7 @@ describe("GamesService.applyAction (FSM)", () => {
         BotService,
         AuctionService,
         TradeService,
+        LogService,
         { provide: GameRepository, useValue: repoMock },
       ],
     }).compile();
@@ -819,3 +821,8 @@ describe("GamesService.applyAction (FSM)", () => {
     });
   });
 });
+
+
+
+
+

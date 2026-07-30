@@ -71,8 +71,18 @@ const myPlayerId = computed<string>(() => {
   if (me) return me.id;
   return players.value[0]?.id ?? "";
 });
-// Синхронизируем с auctionStore.
-watch(myPlayerId, (id) => auctionStore.setMyPlayerId(id), { immediate: true });
+// Синхронизируем с auctionStore и tradeStore (нужно для фильтрации
+// модалок в `game.ts` — модалку результата сделки показываем ТОЛЬКО
+// её участникам, и для проверки `isMyTurn` в `BUILDING_PHASE`).
+const tradeStore = useTradeStore();
+watch(
+  myPlayerId,
+  (id) => {
+    auctionStore.setMyPlayerId(id);
+    tradeStore.setMyPlayerId(id);
+  },
+  { immediate: true },
+);
 const isMyTurn = computed(
   () => currentPlayer.value?.kind === "human" && currentPlayer.value?.id === myPlayerId.value,
 );
@@ -295,7 +305,7 @@ function closeBankruptNotice() {
   showBankruptNotice.value = false;
 }
 
-// ===== Тултип  =====
+// Тултип  
 const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
 const tooltipSide = ref<BoardSide>("bottom");
@@ -316,7 +326,7 @@ const TOOLTIP_GAP = 8;
 const currentCell = computed<Cell | null>(() => game.currentCell);
 const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
 
-// ===== BANKRUPTCY: вычисляемые данные для модалки ликвидации =====
+// BANKRUPTCY: вычисляемые данные для модалки ликвидации 
 const bankruptcyPlayer = computed(
   () => state.value.players.find((p) => p.id === state.value.bankruptcy?.playerId) ?? null,
 );
@@ -349,7 +359,7 @@ const bankruptcyMaxLiquidity = computed<number>(() => {
   return total;
 });
 
-// ===== Watcher: глобальное уведомление о НОВЫХ банкротах =====
+// Watcher: глобальное уведомление о НОВЫХ банкротах 
 // Отслеживаем изменение `players` и при появлении нового игрока с
 // `isBankrupt = true` (которого мы ещё не видели) показываем модалку.
 watch(
@@ -726,7 +736,6 @@ watch(
       const ma = state.value.moveAnimation;
       animatePlayerTo(ma.playerId, ma.from, ma.to);
     }
-
     // RESOLVING_LANDING — пауза 400мс, потом авто-CONFIRM_LANDING.
     // ВАЖНО: от ЛЮБОГО текущего игрока (и от бота, и от человека).
     // Раньше здесь стояла проверка `isMyTurn.value` — для бота confirm
@@ -739,7 +748,6 @@ watch(
         }
       }, 400);
     }
-
     // END_TURN — пауза 500мс, потом авто-CONFIRM_END_TURN.
     // ВАЖНО: от ЛЮБОГО текущего игрока.
     if (newPhase === "END_TURN" && isCurrentPlayerActive.value) {
@@ -1236,7 +1244,7 @@ function logout() {
         :max-liquidity="bankruptcyMaxLiquidity"
       />
 
-      <!-- Глобальное уведомление о банкротстве (видит ВСЕ клиенты) -->
+      <!-- Глобальное уведомление о банкротстве (видят ВСЕ клиенты) -->
       <PlayerBankruptNoticeModal
         :show="showBankruptNotice"
         :player-name="bankruptNoticePlayer ?? ''"

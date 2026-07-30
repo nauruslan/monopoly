@@ -10,6 +10,7 @@ import { TradeService } from "./handlers/trade.service";
 import { MortgageService } from "./handlers/mortgage.service";
 import { BuildService } from "./handlers/build.service";
 import { BankService } from "./handlers/bank.service";
+import { LogService } from "./handlers/log.service";
 import { BotService } from "./bots/bot.service";
 import { GamesSaveController } from "./games-save.controller";
 import { GameGateway } from "../gateways/game.gateway";
@@ -47,6 +48,7 @@ import { AuthModule } from "../auth/auth.module";
     MortgageService,
     BuildService,
     BankService,
+    LogService,
     GameGateway,
   ],
   exports: [
@@ -64,6 +66,7 @@ import { AuthModule } from "../auth/auth.module";
     MortgageService,
     BuildService,
     BankService,
+    LogService,
   ],
 })
 export class GamesModule {}

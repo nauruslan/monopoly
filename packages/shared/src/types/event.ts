@@ -50,7 +50,7 @@ export type GameEventKind =
   | "CARD_DRAWN"
   | "JAIL_ENTERED"
   | "JAIL_ESCAPED"
-  | "JAIL_PAID"
+  | "JAIL_TRY_DOUBLE"
   | "AUCTION_STARTED"
   | "AUCTION_BID"
   | "AUCTION_PASS"
@@ -126,6 +126,10 @@ export interface GameEvent {
     /**
      * ID второй стороны для тюрьмы: кто засадил (или null для клетки 30).
      */
-    reason?: "cell" | "card" | "double" | "other";
+    reason?: "cell" | "card" | "double" | "other" | "pay";
+    /**
+     * Для JAIL_TRY_DOUBLE — номер попытки (1-based).
+     */
+    attempt?: number;
   };
 }

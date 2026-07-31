@@ -155,7 +155,7 @@ export class LogService {
         return "trade";
       case "JAIL_ENTERED":
       case "JAIL_ESCAPED":
-      case "JAIL_PAID":
+      case "JAIL_TRY_DOUBLE":
         return "jail";
       case "GAME_STARTED":
       case "PROPERTY_DECLINED":
@@ -197,7 +197,7 @@ export class LogService {
     return this.create(state, {
       kind: "TURN_START",
       player,
-      message: `▶️ Ход ${player.displayName} (раунд ${round})`,
+      message: `➡️ ${player.displayName} — твой ход!`,
       type: "move",
     });
   }
@@ -213,7 +213,7 @@ export class LogService {
     return this.create(state, {
       kind: "DICE_ROLLED",
       player,
-      message: `🎲 ${player.displayName} бросил ${dice[0]} и ${dice[1]} = ${total}${doubleNote}`,
+      message: `🎲 ${player.displayName} бросил кубики → ${dice[0]}+${dice[1]}=${total}${doubleNote}`,
       type: "move",
       payload: { dice, amount: total },
     });
@@ -316,70 +316,80 @@ export class LogService {
   }
 
   /**
-   * Попадание в тюрьму. `reason` управляет формулировкой:
-   *  - "card"   — через карточку «Отправляйтесь в тюрьму» (Шанс/Казна);
-   *  - "double" — после трёх дублей подряд;
-   *  - "cell"   — попал на клетку «В тюрьму!» (id=30);
-   *  - "other"  — fallback на случай неизвестной причины.
+   * Универсальное сообщение о попадании в тюрьму.
+   * Конкретная причина (клетка / карточка / 3-й дубль) намеренно
+   * не указывается — читатель узнает её из предыдущих событий
+   * (вытянутая карточка, серия дублей и т.п.).
+   *
+   * Параметр `reason` сохранён для payload и для возможных будущих
+   * фильтров в UI.
    */
   logJailEntered(
     state: GameState,
     player: Player,
     reason: "cell" | "card" | "double" | "other",
   ): GameEvent {
-    let message: string;
-    if (reason === "cell") {
-      message = `⛓️ ${player.displayName} попал(а) в тюрьму (поле «В тюрьму»)`;
-    } else if (reason === "card") {
-      message = `⛓️ ${player.displayName} попал(а) в тюрьму (карточка)`;
-    } else if (reason === "double") {
-      message = `⛓️ ${player.displayName} попал(а) в тюрьму (3-й дубль подряд)`;
-    } else {
-      message = `⛓️ ${player.displayName} попал(а) в тюрьму`;
-    }
     return this.create(state, {
       kind: "JAIL_ENTERED",
       player,
-      message,
+      message: `⛓️ ${player.displayName} попал в тюрьму`,
       type: "jail",
       payload: { reason },
     });
   }
 
   /**
-   * Выход из тюрьмы (по разным причинам).
+   * Журнал: игрок пытается выбросить дубль, чтобы выйти из тюрьмы.
+   * Зовётся при обработке TRY_DOUBLE (ДО броска кубиков).
+   */
+  logJailTryDouble(
+    state: GameState,
+    player: Player,
+    attempt: number,
+    attemptMax: number,
+  ): GameEvent {
+    return this.create(state, {
+      kind: "JAIL_TRY_DOUBLE",
+      player,
+      message: `🎲 ${player.displayName} пытается бросить дубль для выхода из тюрьмы (попытка ${attempt} из ${attemptMax})`,
+      type: "jail",
+      payload: { attempt },
+    });
+  }
+
+  /**
+   * Универсальное сообщение о выходе из тюрьмы.
+   * Используется единый текст «Игрок вышел из тюрьмы», способ выхода
+   * (оплата / карточка / бросок дубля) передаётся в скобках.
+   *
+   * Благодаря единому тексту журнал при 3-й неудачной попытке НЕ
+   * получает двух сообщений подряд — сперва tryDouble, потом
+   * единственный лог оплаты штрафа.
+   *
+   * `method`:
    *  - "pay"    — игрок заплатил 50₽ штрафа;
    *  - "card"   — игрок использовал карточку «Выход бесплатно»;
    *  - "double" — игрок выбросил дубль (вышел бесплатно).
    */
   logJailEscaped(state: GameState, player: Player, method: "double" | "card" | "pay"): GameEvent {
-    if (method === "double") {
-      return this.create(state, {
-        kind: "JAIL_ESCAPED",
-        player,
-        message: `🎲 ${player.displayName} вышел(а) из тюрьмы (бросок дубля)`,
-        type: "jail",
-        payload: { reason: "double" },
-      });
-    }
-    if (method === "card") {
-      return this.create(state, {
-        kind: "JAIL_ESCAPED",
-        player,
-        message: `🃏 ${player.displayName} использовал(а) карточку выхода из тюрьмы`,
-        type: "jail",
-        payload: { reason: "card" },
-      });
-    }
-    // method === "pay"
+    const reasonText =
+      method === "pay" ? "заплатил штраф" : method === "card" ? "карта выхода" : "бросок дубля";
     return this.create(state, {
-      kind: "JAIL_PAID",
+      kind: "JAIL_ESCAPED",
       player,
-      message: `💵 ${player.displayName} заплатил(а) $50 штрафа и вышел(а) из тюрьмы`,
+      message: `🚪 ${player.displayName} вышел из тюрьмы (${reasonText})`,
       type: "jail",
-      payload: { cellId: -1, amount: 50, reason: "other" },
+      payload: { reason: method },
     });
   }
+
+  /**
+   * Примечание: отдельный лог «Игрок покрыл долг перед банком/игроком»
+   * в журнал НЕ пишется — он избыточен: читатель сам видит, что после
+   * серии «заложил»/«продал» баланс игрока стал неотрицательным.
+   * Если в будущем понадобится явно подсветить этот момент — лучше
+   * делать это в state.events (отдельным флагом), а не журналом.
+   */
 
   /**
    * Проход через клетку «Вперёд» (GO) — начисление зарплаты.
@@ -405,17 +415,23 @@ export class LogService {
     state: GameState,
     player: Player,
     cellName: string,
-    noun: string,
+    _noun: string,
     buildAmount: number,
     housesAfter: number,
     isHotel: boolean,
     context: OperationContext = "normal",
   ): GameEvent {
+    // Универсальное сообщение: «построил дом». Правила Монополии
+    // позволяют строить строго по одному дому за ход, поэтому
+    // слово «дома» (мн. ч.) тут избыточно — формулировка «построил
+    // дом» подходит и для первого дома, и для второго/третьего/четвёртого.
+    // Для отеля (5) тоже используется «построил дом» — это сознательно,
+    // журнал фиксирует ФАКТ строительства, а не нюанс «отель».
     const prefix = context === "liquidation" ? "🏦 (распродажа) " : "🏗️ ";
     return this.create(state, {
       kind: "HOUSE_BUILT",
       player,
-      message: `${prefix}${player.displayName} построил(а) ${noun} на «${cellName}» за $${buildAmount}`,
+      message: `${prefix}${player.displayName} построил дом на «${cellName}» за $${buildAmount}`,
       type: "buy",
       payload: {
         cellId: -1,

@@ -779,12 +779,12 @@ export class GamesService {
       player.consecutiveDoubles = 0;
       player.mustRollAgain = false;
 
+      const escapedMethod: "pay" | "double" = outcome === "pay" ? "pay" : "double";
       if (outcome === "pay") {
         // 3-й промах: принудительная оплата 50₽. Списываем ПОЛНУЮ сумму
         // (без `Math.max(0, ...)`) — если денег не хватило, баланс
         // уйдёт в минус и сработает триггер банкротства.
         player.money -= 50;
-        this.log.logJailEscaped(state, player, "pay");
         if (this.shouldStartBankruptcy(state, player, null, 50)) {
           return {};
         }
@@ -793,8 +793,9 @@ export class GamesService {
       // бесплатно, даже на 3-й попытке. Это правильный ход Монополии.
       player.inJail = false;
       player.jailTurns = 0;
-      // Журнал: «Игрок выходит из тюрьмы (бросок дубля)».
-      this.log.logJailEscaped(state, player, "double");
+      // Журнал: единое универсальное сообщение о выходе из тюрьмы
+      // с явным указанием способа выхода (pay/double).
+      this.log.logJailEscaped(state, player, escapedMethod);
 
       // Очищаем контекст прошлой анимации (он относился к попытке
       // выхода из тюрьмы, а не к обычному движению). После нажатия
@@ -1788,7 +1789,7 @@ export class GamesService {
         }
         const isHotel = result.isHotel;
         const emoji = isHotel ? "🏨" : "🏠";
-        const noun = isHotel ? "отель" : result.newHousesCount === 1 ? "дом" : "дома";
+        const noun = isHotel ? "отель" : "дом";
         return {
           event: this.makeEvent("HOUSE_BUILT", player, {
             message: `${emoji} ${player.displayName} построил(а) ${noun} на «${cell.name}» за $${result.cost}`,
@@ -1982,7 +1983,7 @@ export class GamesService {
         const cell = state.board[action.cellId];
         const isHotel = result.isHotel;
         const emoji = isHotel ? "🏨" : "🏠";
-        const noun = isHotel ? "отель" : result.newHousesCount === 1 ? "дом" : "дома";
+        const noun = isHotel ? "отель" : "дом";
         return {
           event: this.makeEvent("HOUSE_BUILT", player, {
             message: `${emoji} ${player.displayName} построил(а) ${noun} на «${cell.name}» за $${result.cost}`,
@@ -2243,6 +2244,10 @@ export class GamesService {
       const diceResult = this.roll(state);
       const isDouble = diceResult[0] === diceResult[1];
       state.lastDice = { dice: diceResult, isDouble };
+      // Журнал: «Игрок пытается бросить дубль для выхода из тюрьмы»
+      // — пишется ДО outcome, чтобы читатель видел намерение независимо
+      // от результата (попал/не попал).
+      this.log.logJailTryDouble(state, player, player.jailTurns + 1, 3);
       // Сохраняем outcome в state.jailRollOutcome — итог (escape / pay / stay)
       // будет обработан в `handleDiceAnimation` после CONFIRM_DICE_ANIMATION.
       // Это позволяет клиенту увидеть анимацию кубиков и в случае «промаха»
@@ -2431,6 +2436,18 @@ export class GamesService {
    *          обрабатывать текущее действие нельзя); `false` если игрок
    *          продолжает обычную игру.
    */
+  /**
+   * Обёртка над startBankruptcyProcedure, которая дополнительно
+   * пишет в журнал «Игрок распродаёт имущество». Все вызовы
+   * процедуры банкротства из логики оплаты (рента/налог/постройка)
+   * идут ЧЕРЕЗ эту обёртку — благодаря этому в журнале всегда
+   * ровно одна запись о начале распродажи.
+   *
+   * Прямые вызовы `startBankruptcyProcedure` (например, из
+   * `handleBuilding` при `END_TURN` с отрицательным балансом)
+   * оборачиваются этой же обёрткой с `creditor=null`, чтобы
+   * поведение было консистентным.
+   */
   private shouldStartBankruptcy(
     state: GameState,
     player: Player,
@@ -2451,9 +2468,11 @@ export class GamesService {
     // Можно ли покрыть? Если да — даём шанс продать/заложить. Иначе —
     // немедленное банкротство.
     if (this.bankruptcy.canCoverDebt(state, player, need)) {
+      // Лог «Игрок распродаёт имущество» пишется ИЗНУТРИ
+      // `startBankruptcyProcedure` — здесь второй раз не вызываем,
+      // иначе в журнале будут дубли при повторных вызовах (боты +
+      // фоновые таймеры в `scheduleBotIfNeeded`).
       this.startBankruptcyProcedure(state, player, creditor, need);
-      const creditorName = creditor?.displayName ?? "Банк";
-      this.log.logBankruptcyLiquidationStarted(state, player, creditorName, need);
       return true;
     }
 
@@ -2475,6 +2494,18 @@ export class GamesService {
     creditor: Player | null,
     debt: number,
   ) {
+    // Защита от повторного лога: если для ЭТОГО игрока в `state.events`
+    // уже есть событие BANKRUPTCY_LIQUIDATION за последние ~30 секунд,
+    // не пишем второе. Это спасает от дублей при бот-цикле, когда
+    // `applyAction` вызывается несколько раз подряд (например,
+    // shouldStartBankruptcy → scheduleBotIfNeeded повторно проверяет
+    // баланс — для одного банкротства образуется две записи).
+    const recentlyLogged = (state.events ?? []).some((ev) => {
+      if (ev.kind !== "BANKRUPTCY_LIQUIDATION") return false;
+      if (ev.playerId !== player.id) return false;
+      const ageMs = Date.now() - new Date(ev.at).getTime();
+      return ageMs < 30_000;
+    });
     state.bankruptcy = {
       playerId: player.id,
       creditorId: creditor?.id ?? null,
@@ -2482,6 +2513,15 @@ export class GamesService {
       stage: 1,
     };
     state.phase = "BANKRUPTCY_LIQUIDATE";
+    // Журнал: одно сообщение о начале распродажи. Эта функция —
+    // ЕДИНСТВЕННОЕ место, откуда пишется «Игрок распродаёт
+    // имущество». Любые внешние вызовы (handleStartTurn, handleBuilding,
+    // handleEndTurn, advanceToNextPlayer и shouldStartBankruptcy)
+    // делегируют сюда.
+    if (!recentlyLogged) {
+      const creditorName = creditor?.displayName ?? "Банк";
+      this.log.logBankruptcyLiquidationStarted(state, player, creditorName, debt);
+    }
   }
 
   private async handleBankruptcyLiquidate(
@@ -2581,6 +2621,11 @@ export class GamesService {
         // Деньги уходят кредитору ТОЛЬКО в объявленном банкротстве —
         // см. ниже bankruptcy.handle() (state.phase = BUILDING,
         // player.isBankrupt = true). Здесь же игрок остаётся в игре.
+        //
+        // В журнал НЕ пишем отдельное «Игрок покрыл долг» — по правилу
+        // журнал фиксирует только конкретные ФАКТЫ (заложил, продал),
+        // а промежуточный итог ликвидации (баланс снова ≥ 0) читается
+        // из хода событий и текущего состояния.
         state.bankruptcy = undefined;
         this.afterRentOrTax(state, player);
         return {};

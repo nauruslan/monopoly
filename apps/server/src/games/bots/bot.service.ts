@@ -19,7 +19,8 @@ import { BankruptcyService } from "../handlers/bankruptcy.service";
  *  - Ставки на аукционе (AUCTION_ACTIVE)
  *  - Ответы на обмен (TRADING_NEGOTIATE, TRADING_CONFIRM)
  *  - Инициация обмена (BUILDING + bot initiative)
- *  - Банкротство: приоритет — продать дома / заложить, потом объявить
+ *  - Банкротство: приоритет — заложить → допродать заложенное →
+ *    продать дома → крайняя мера (продажа клеток) → банкротство
  *
  * ВАЖНО (после рефакторинга FSM):
  *  - Визуальные фазы (`DICE_ANIMATION`, `MOVE_ANIMATION`, `CARD_REVEAL`,
@@ -524,7 +525,7 @@ export class BotService {
     );
 
     // Деньги — 1:1 (без наценки), но если получатель на грани
-    // банкротства, бот предпоч��ёт деньги как подушку.
+    // банкротства, бот предпочтёт деньги как подушку.
     const value = incomingPropsValue + incomingCash;
     const cost = outgoingPropsValue + outgoingCash;
     const ratio = cost > 0 ? value / cost : value > 0 ? Infinity : 0;
@@ -956,28 +957,64 @@ export class BotService {
    * Алгоритм выхода из отрицательного баланса для бота (фаза
    * BANKRUPTCY_LIQUIDATE).
    *
-   * Идея:
-   *  1. Если баланс уже >= 0 — ликвидация завершена, подтверждаем
-   *     оплату. Сервер сам пересчитает долг и либо закроет процедуру
-   *     (если `money >= 0`), либо объявит банкротство.
-   *  2. Иначе ищем, что ещё можно ликвидировать. Приоритет:
-   *     а) Продать дом с самой дорогой клетки (`housePrice` desc).
-   *        Сервер (`handleBankruptcyLiquidate.BANKRUPTCY_LIQUIDATE_HOUSES`)
-   *        уменьшает `houses` на 1 и зачисляет `housePrice / 2`.
-   *        Правило «лесенки» применяется и при ликвидации: нельзя
-   *        асимметрично продавать дома в одной цветовой группе.
-   *        Поэтому выбираем из `listHousesSellableForLiquidation`
-   *        (он уже учитывает «лесенку»).
-   *     б) Заложить клетку с максимальным `mortgageValue`. НО! Сервер
-   *        (`MortgageService.canMortgage`) отклоняет залог клетки, если
-   *        в её цветовой группе есть дома. Поэтому мы заранее фильтруем
-   *        такие клетки — иначе бот зациклится на ошибках валидации.
-   *     в) Если ничего не помогает — объявляем банкротство.
+   * Возвращаем РОВНО ОДНО действие за вызов. Сервер после применения
+   * пересчитывает `player.money` и снова вызывает `bot.decide()` через
+   * `scheduleBotIfNeeded` -> `runBotTurn` -> `applyAction`. Это значит,
+   * что после каждого шага цикл «проверить баланс -> выбрать действие»
+   * начинается заново с актуальным состоянием — именно так, как требует
+   * игровая логика (см. задачу).
    *
-   * Метод возвращает ровно ОДНО действие. Сервер после применения снова
-   * вызовет `decideBankruptcy` (через `scheduleBotIfNeeded`), и бот
-   * продолжит ликвидацию шаг за шагом, пока не выйдет в 0+ или пока
-   * не исчерпает все варианты.
+   * Приоритеты (от мягких к жёстким):
+   *
+   *   1) CONFIRM_BANKRUPTCY — деньги уже >= 0, долг покрыт. Сервер
+   *      закроет фазу и вернёт партию в обычное русло.
+   *
+   *   2) MORTGAGE_FOR_BANKRUPTCY — есть клетка, которую можно заложить
+   *      прямо сейчас (без залога, без домов на клетке и в её цветовой
+   *      группе). Это САМЫЙ МЯГКИЙ шаг: клетка остаётся у игрока, её
+   *      потом можно выкупить обратно за 110% mortgageValue. Сортируем
+   *      кандидатов по убыванию mortgageValue, чтобы максимизировать
+   *      возврат за один ход.
+   *
+   *      ВАЖНО: MortgageService.canMortgage требует, чтобы в цветовой
+   *      группе не было ни одной клетки с домами. Иначе сервер отклонит
+   *      действие и бот зациклится на ошибке. Поэтому мы заранее
+   *      фильтруем такие клетки.
+   *
+   *   3) SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY — допродажа уже
+   *      заложенной клетки Банку за дополнительные 50% (mortgageValue).
+   *      Суммарно с предыдущим залогом получается 100% номинала, но
+   *      клетка уходит в банк безвозвратно (UNOWNED, не заложена, без
+   *      построек). Приоритет — максимальный mortgageValue.
+   *
+   *   4) LIQUIDATE_HOUSES — продажа ОДНОГО дома с самой «передовой»
+   *      клетки группы (правило лесенки: сначала сносятся дома с самой
+   *      застроенной клетки). Сервер начисляет housePrice / 2. Бот
+   *      выбирает клетку через `listHousesSellableForLiquidation`,
+   *      чтобы правило лесенки уже было учтено (иначе сервер отклонит).
+   *      Приоритет �� максимальный housePrice (возврат за один шаг).
+   *
+   *   5) SELL_PROPERTY_FOR_BANKRUPTCY — крайняя мера: продажа
+   *      незаложенной клетки Банку за 100% номинала. Клетка идёт в банк
+   *      безвозвратно. Используется, только если все вышестоящие шаги
+   *      исчерпаны. Приоритет — максимальная цена клетки.
+   *
+   *   6) DECLARE_BANKRUPTCY — ликвидировать нечего, объявляем банкрот.
+   *      Сервер финализирует распродажу и помечает игрока банкротом.
+   *
+   * Логика «приоритета итераций»: после шага 2 баланс увеличивается,
+   * бот следующим тиком увидит новое значение и может выйти в 0+
+   * (CONFIRM_BANKRUPTCY). Если всё ещё минус — выполнится шаг 2 ещё
+   * раз (заложим следующую клетку), и так далее, пока либо залог не
+   * покроет долг, либо закончатся клетки без домов. Тогда переходим
+   * к шагу 3 (допродажа заложенного). Если и этого мало — к шагу 4
+   * (продажа домов). Каждый шаг уменьшает долг, и после следующего
+   * тика бот снова трезво оценивает приоритеты с новым балансом.
+   *
+   * Защитный фикс (исторический):
+   *   Раньше `this.bankruptcy.listHousesSellableForLiquidation` падало
+   *   с TypeError «Cannot read properties of undefined». Чтобы не
+   *   зависеть от DI в горячем пути, защищаемся через typeof-check.
    */
   private decideBankruptcy(player: Player, state: GameState): BotDecision {
     const proc = state.bankruptcy;
@@ -988,70 +1025,72 @@ export class BotService {
       return "CONFIRM_BANKRUPTCY";
     }
 
-    // 2а) Продажа дома с самой дорогой клетки.
-    //     Сервер (`handleBankruptcyLiquidate`) применяет правило
-    //     «лесенки» — поэтому бот ДОЛЖЕН выбирать клетку из списка,
-    //     который это правило учитывает. Иначе сервер отклонит действие
-    //     и бот зациклится. Сортируем по убыванию housePrice — максимум
-    //     возврата за один шаг.
-    // Защитный фикс: исторически строка выше упала с
-    // `Cannot read properties of undefined (reading 'listHousesSellableForLiquidation')`
-    // при банкротстве бота (DI мог не успеть зарезолвить this.bankruptcy).
-    // Чтобы не падать в рантайме, повторяем ту же логику локально без
-    // зависимости от this.bankruptcy: фильтр клеток PROPERTY, принадлежащих
-    // игроку, с домами и с учётом правила лесенки (как в BankruptcyService).
+    // Защитный фикс: если DI не успел зарезолвить this.bankruptcy —
+    // fallback на простую локальную фильтрацию.
     const listFn =
       this.bankruptcy && typeof this.bankruptcy.listHousesSellableForLiquidation === "function"
         ? this.bankruptcy.listHousesSellableForLiquidation.bind(this.bankruptcy)
         : null;
-    const sellableHouses = listFn
-      ? listFn(state, player)
-      : [];
-    if (sellableHouses.length > 0) {
-      // Sort: самые дорогие дома — первыми
-      const best = [...sellableHouses].sort(
-        (a, b) => (b.housePrice ?? 0) - (a.housePrice ?? 0),
-      )[0]!;
-      return { kind: "LIQUIDATE_HOUSES", cellId: best.id };
-    }
 
-    // 2б) Залог клетки с максимальной ликвидностью, при условии что
-    //     в её цветовой группе нет других клеток с домами (иначе
-    //     `MortgageService.canMortgage` отклонит операцию).
-    //
-    //     ПРИОРИТЕТ: залог ВЫГОДНЕЕ продажи, потому что заложенную
-    //     клетку можно потом выкупить обратно (за 110% mortgageValue).
-    //     Поэтому сначала пробуем залоговать; к продаже переходим
-    //     только если залога недостаточно для покрытия долга.
+    // 2) Залог клетки. Кандидаты: незаложенные клетки игрока без домов
+    //    (на самой клетке и в её цветовой группе), mortgageValue > 0.
+    //    Включаем все типы, на которых определён mortgageValue
+    //    (PROPERTY/RAILROAD/UTILITY).
     const mortgageable = state.board
       .filter(
         (c) =>
-          c.type === "PROPERTY" &&
+          (c.type === "PROPERTY" || c.type === "RAILROAD" || c.type === "UTILITY") &&
           c.ownerId === player.id &&
           !c.isMortgaged &&
           (c.mortgageValue ?? 0) > 0,
       )
       .filter((c) => {
-        // Клетка не должна иметь собственных домов — иначе бан попросит
-        // сначала продать их. Но т.к. мы уже прошли ветку «домов нет»,
-        // здесь это фактически исключено; оставляем проверку на всякий
-        // случай (защита от рассинхрона UI/state).
         if ((c.houses ?? 0) > 0) return false;
-        // Цветовая группа: не должно быть НИ одной клетки группы с домами.
         if (c.group) {
           const groupHasHouses = state.board.some(
             (b) =>
-              b.type === c.type && b.group === c.group && b.ownerId === player.id && b.houses > 0,
+              b.type === c.type &&
+              b.group === c.group &&
+              b.ownerId === player.id &&
+              (b.houses ?? 0) > 0,
           );
           if (groupHasHouses) return false;
         }
         return true;
       })
       .sort((a, b) => (b.mortgageValue ?? 0) - (a.mortgageValue ?? 0));
+    if (mortgageable.length > 0) {
+      return { kind: "MORTGAGE_FOR_BANKRUPTCY", cellId: mortgageable[0]!.id };
+    }
 
-    // 2в) Продажа клетки Банку за 100% номинала. Это крайняя
-    //     мера: используем только если залог не покрывает долг.
-    //     Клетка БЕЗ домов, БЕЗ залога, с price > 0.
+    // 3) Допродажа уже заложенных клеток Банку (дополнительные 50%).
+    const mortgagedSellable = state.board
+      .filter(
+        (c) =>
+          (c.type === "PROPERTY" || c.type === "RAILROAD" || c.type === "UTILITY") &&
+          c.ownerId === player.id &&
+          c.isMortgaged === true &&
+          (c.houses ?? 0) === 0 &&
+          (c.mortgageValue ?? 0) > 0,
+      )
+      .sort((a, b) => (b.mortgageValue ?? 0) - (a.mortgageValue ?? 0));
+    if (mortgagedSellable.length > 0) {
+      return {
+        kind: "SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY",
+        cellId: mortgagedSellable[0]!.id,
+      };
+    }
+
+    // 4) Продажа домов (1 дом с самой «передовой» клетки, правило лесенки).
+    const sellableHouses = listFn ? listFn(state, player) : [];
+    if (sellableHouses.length > 0) {
+      const best = [...sellableHouses].sort(
+        (a, b) => (b.housePrice ?? 0) - (a.housePrice ?? 0),
+      )[0]!;
+      return { kind: "LIQUIDATE_HOUSES", cellId: best.id };
+    }
+
+    // 5) Продажа незаложенной клетки Банку за 100% номинала (крайняя мера).
     const sellable = state.board
       .filter(
         (c) =>
@@ -1075,44 +1114,11 @@ export class BotService {
         return true;
       })
       .sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
-
-    // Оценка: хватит ли залога покрыть долг? `player.money` сейчас
-    // отрицательный, debt = -money. Залог даст +mortgageValue.
-    const need = -player.money;
-    const mortgageTotal = mortgageable.reduce((s, c) => s + (c.mortgageValue ?? 0), 0);
-    if (mortgageable.length > 0 && mortgageTotal >= need) {
-      // Залог покроет — закладываем самую ликвидную клетку.
-      return { kind: "MORTGAGE_FOR_BANKRUPTCY", cellId: mortgageable[0]!.id };
-    }
-    // Залога не хватит — прибегаем к продаже (100%).
     if (sellable.length > 0) {
       return { kind: "SELL_PROPERTY_FOR_BANKRUPTCY", cellId: sellable[0]!.id };
     }
 
-    // 2г) Продажа уже заложенных клеток Банку за дополнительные 50%
-    //     (mortgageValue). Суммарно с предыдущим залогом — 100% номинала.
-    //     Это последний шанс перед объявлением банкротства: клетка уходит
-    //     в банк чистой (UNOWNED, не заложена, без построек).
-    const mortgagedSellable = state.board
-      .filter(
-        (c) =>
-          (c.type === "PROPERTY" || c.type === "RAILROAD" || c.type === "UTILITY") &&
-          c.ownerId === player.id &&
-          c.isMortgaged === true &&
-          (c.houses ?? 0) === 0 &&
-          (c.mortgageValue ?? 0) > 0,
-      )
-      .sort((a, b) => (b.mortgageValue ?? 0) - (a.mortgageValue ?? 0));
-    if (mortgagedSellable.length > 0) {
-      return { kind: "SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY", cellId: mortgagedSellable[0]!.id };
-    }
-    // Если только залог и его хватает по сумме, но мы уже проверили —
-    // залог как последний шанс, если больше ничего нет.
-    if (mortgageable.length > 0) {
-      return { kind: "MORTGAGE_FOR_BANKRUPTCY", cellId: mortgageable[0]!.id };
-    }
-
-    // 3) Ликвидировать нечего — банкрот.
+    // 6) Ликвидировать нечего — банкрот.
     return "DECLARE_BANKRUPTCY";
   }
 }

@@ -25,9 +25,9 @@ import seedrandom from "seedrandom";
  * 2. `applyEffect()` — применяет эффект карты к игроку/стейту.
  *    Вызывается в фазе `CARD_EFFECT` (ПОСЛЕ закрытия модалки).
  *
- * Если эффект карты — `move` / `move-relative` / `go-salary` / `goto-jail`,
+ * Если эффект карты — `move` / `move-relative` / `goto-jail`,
  * то после применения сервер должен перевести партию в:
- *  - `move` / `move-relative` / `go-salary` → фазу `MOVE_ANIMATION`
+ *  - `move` / `move-relative` → фазу `MOVE_ANIMATION`
  *    (телепорт-анимация фишки на новую клетку);
  *  - `goto-jail` → фазу `JAIL_DECISION`;
  *  - остальные (`money`, `jail-free`, `luxury-tax-house`) → фазу `BUILDING`
@@ -150,14 +150,18 @@ export class CardHandlerService {
         // поэтому направление для move по правилам всегда «forward»:
         // игрок перемещается в указанную клетку напрямую (телепорт),
         // а анимация строится по кратчайшему пути через игровое поле.
-        // Для классической Монополии любой телепорт всегда ВПЕРЁД по
+        // Для классической Монополии любой телепорт всегда «вперёд» по
         // правилам (если target < from — это всё равно forward через 0).
         return { kind: "move", target: card.effect.target, direction: "forward" };
       }
 
       case "go-salary": {
-        // Карточка «Отправляйтесь на Вперёд. Получите goSalary».
-        // Начисляем goSalary всегда, перемещаем на клетку 0.
+        // Карточка «Идите на СТАРТ» (исторический вариант: «Отправляйтесь
+        // на Вперёд. Получите goSalary»). В ТЕКУЩЕЙ ВЕРСИИ эта карта не
+        // используется — ch1 переведён в эффект `move` с target=0,
+        // а двойная выплата 2× goSalary за приземление на СТАРТ
+        // начисляется автоматически в `handleResolvingLanding`.
+        // Оставляем ветку как fallback на случай старых снапшотов БД.
         player.money += state.settings.goSalary;
         return { kind: "move", target: 0, passedGo: true, direction: "forward" };
       }

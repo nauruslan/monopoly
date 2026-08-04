@@ -4,10 +4,13 @@
  *
  * Контрактные требования (по правилам Монополии):
  *
- *  1. **GO (id=0) — «Вперёд»**:
- *     - Без дубля: обычная goSalary (200₽), фаза BUILDING.
- *     - С дублём: ДВОЙНАЯ goSalary (400₽), `mustRollAgain` СОХРАНЯЕТСЯ,
- *       фаза ROLLING (игрок бросает ещё раз).
+ *  1. **GO (id=0) — «СТАРТ»**:
+ *     - Проход мимо (wrap через 0) — обычная goSalary (200₽).
+ *     - Приземление ровно на 0 — ДВОЙНАЯ выплата (2× goSalary = 400₽),
+ *       НЕЗАВИСИМО от того, был ли бросок дублём или нет.
+ *     - Правило дублей продолжает действовать стандартно:
+ *       mustRollAgain=true -> фаза ROLLING (игрок бросает ещё раз);
+ *       иначе -> фаза BUILDING.
  *
  *  2. **JAIL (id=10) — «Тюрьма» (визит)**:
  *     - Без дубля: `mustRollAgain=false`, фаза BUILDING, `inJail=false`.
@@ -169,34 +172,34 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     );
   }
 
-  // 1) GO (id=0) — двойная зарплата при дубле
+  // 1) GO (id=0) — СТАРТ: 2× goSalary при приземлении,
+  //    НЕЗАВИСИМО от того, был ли дубль.
 
-  it("GO без дубля: обычная goSalary 200₽, фаза BUILDING", async () => {
+  it("GO без дубля: 2× goSalary 400₽, фаза BUILDING (правило СТАРТ без дубля)", async () => {
     const p = activeState.players[activeState.currentPlayerIndex]!;
-    // Игрок встаёт ровно на 38, чтобы бросок 2 привёл его на 0 (GO).
+    // Игрок встаёт ровно на 38, чтобы бросок 2 привёл его на 0 (СТАРТ).
     p.position = 38;
-    activeState.lastDice = { dice: [1, 1], isDouble: true }; // временно
-    activeState.phase = "MOVE_ANIMATION";
-
-    // Передвинем, но это дубль, который сохранится. Проверим, что
-    // для случая БЕЗ дубля goSalary начисляется один раз (200₽) и
-    // фаза = BUILDING.
     p.mustRollAgain = false;
     p.consecutiveDoubles = 0;
     activeState.lastDice = { dice: [1, 1], isDouble: false };
+    activeState.phase = "MOVE_ANIMATION";
 
     const moneyBefore = p.money;
+    const goSalary = activeState.settings.goSalary;
     await act({ type: "CONFIRM_MOVE_ANIMATION" });
     expect(p.position).toBe(0);
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
-    // После CONFIRM_LANDING для клетки GO без дубля — обычная goSalary 200₽.
-    expect(p.money).toBe(moneyBefore + activeState.settings.goSalary);
+
+    // Главная проверка: приземление на СТАРТ даёт ДВОЙНУЮ goSalary
+    // (2× 200₽ = 400₽) НЕЗАВИСИМО от дубля, и фаза переходит в
+    // BUILDING (т.к. mustRollAgain=false).
+    expect(p.money).toBe(moneyBefore + goSalary * 2);
     expect(activeState.phase).toBe("BUILDING");
     expect(p.mustRollAgain).toBe(false);
   });
 
-  it("GO с дублём: ДВОЙНАЯ goSalary 400₽, mustRollAgain сохранён, фаза ROLLING", async () => {
+  it("GO с дублём: 2× goSalary 400₽, mustRollAgain сохранён, фаза ROLLING (правило дублей действует)", async () => {
     const p = activeState.players[activeState.currentPlayerIndex]!;
     p.position = 38; // дубль [1,1] = 2 → 38+2=40 → 0
     p.mustRollAgain = true;
@@ -211,8 +214,12 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Главная проверка: двойная зарплата, mustRollAgain сохранён,
-    // фаза ROLLING (игрок бросает ещё раз).
+    // Главная проверка: приземление на СТАРТ при дубле:
+    //   - двойная выплата (2× goSalary = 400₽);
+    //   - правило дублей продолжает действовать (mustRollAgain сохранён,
+    //     фаза ROLLING — игрок бросает ещё раз).
+    // Размер выплаты НЕ зависит от дубля, только правило mustRollAgain
+    // определяет следующую фазу.
     expect(p.money).toBe(moneyBefore + goSalary * 2);
     expect(p.mustRollAgain).toBe(true);
     expect(p.consecutiveDoubles).toBe(1);
@@ -565,8 +572,3 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(canEndTurn(activeState, p)).toBe(false);
   });
 });
-
-
-
-
-

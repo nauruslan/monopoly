@@ -879,12 +879,15 @@ export class GamesService {
    * Два режима:
    *  1) **Обычный бросок кубиков**: `state.moveAnimation` НЕ заполнен,
    *     позиция вычисляется здесь через `state.lastDice` (сумма кубиков).
-   *  2) **Движение по карточке (move / move-relative / go-salary)**:
+   *  2) **Движение по карточке (move / move-relative)**:
    *     `state.moveAnimation` уже заполнен картой, и `player.position`
    *     УЖЕ равен целевой клетке (был изменён в `applyCardEffectAndAdvance`).
    *     В этом случае мы НЕ сдвигаем позицию ещё раз, а только
    *     начисляем goSalary, если было прохождение через 0 (для forward)
    *     или нет (для backward — goSalary НЕ начисляется).
+   *     (Карточка «Идите на СТАРТ» с target=0 теперь НЕ даёт бонус
+   *     сама — двойная выплата 2× goSalary начисляется в
+   *     `handleResolvingLanding` при приземлении на 0.)
    */
   private async handleMoveAnimation(
     state: GameState,
@@ -898,12 +901,14 @@ export class GamesService {
       throw new BadRequestException("Нет контекста последнего броска");
     }
 
-    // Отличаем карточное движение (move / move-relative / go-salary)
-    // от обычного броска кубиков. Для карточного движения:
+    // Отличаем карточное движение (move / move-relative) от обычного
+    // броска кубиков. Для карточного движения:
     //   - player.position УЖЕ изменён в applyCardEffectAndAdvance;
     //   - state.moveAnimation.direction задан явно ("forward" | "backward");
     //   - goSalary уже начислен (если был wrap через 0 для forward);
     //   - здесь мы только переходим в RESOLVING_LANDING.
+    // Для move-карты «Идите на СТАРТ» (target=0) бонус НЕ начисляется
+    // — двойная выплата 2× goSalary происходит в `handleResolvingLanding`.
     // Для обычного броска state.moveAnimation заполняется в
     // handleDiceAnimation БЕЗ поля direction - это маркер "позицию ещё
     // нужно сдвинуть здесь".
@@ -938,11 +943,12 @@ export class GamesService {
     const salaryEarned = 0;
     if (newPos < oldPos && newPos !== 0) {
       player.money += state.settings.goSalary;
-      // Журнал: «Получил N₽ за проход через ВПЕРЁД» (при wrap мимо 0).
-      // Сумма фиксированная — без двойной
-      // выплаты (двойная — только если фишка приземлилась РОВНО на GO,
-      // этот случай логируется ниже в handleResolvingLanding).
-      this.log.logGoSalary(state, player, state.settings.goSalary, false);
+      // Журнал: «Получил 200₽ за проход через СТАРТ» (wrap мимо 0).
+      // Сумма фиксированная — 1× goSalary.
+      // Повышенная выплата 2× goSalary начисляется только когда фишка
+      // ПРИЗЕМЛЯЕТСЯ ровно на 0 (логируется в handleResolvingLanding
+      // отдельным сообщением «за остановку на СТАРТ»).
+      this.log.logGoSalaryPassed(state, player, state.settings.goSalary);
     }
 
     // Очищаем moveAnimation - он использовался для анимации на клиенте.
@@ -973,40 +979,30 @@ export class GamesService {
       return {};
     }
 
-    // GO — если игрок ОСТАНОВИЛСЯ ровно на клетке 0 (например, после тюрьмы
-    // или из-за точной длины броска), начисляем goSalary.
+    // ГО/СТАРТ — если игрок ОСТАНОВИЛСЯ ровно на клетке id=0
+    // (например, после тюрьмы, по карточке «Идите на СТАРТ» или
+    // из-за точной длины броска), начисляем ДВОЙНУЮ зарплату
+    // (2× goSalary) — правило «приземление на СТАРТ».
     //
-    // Правила Монополии:
-    //  - Без дубля: обычная зарплата 200₽, фаза BUILDING.
-    //  - После дубля: ДВОЙНАЯ зарплата (2× goSalary), и `mustRollAgain`
-    //    СОХРАНЯЕТСЯ — игрок бросает ещё раз (фаза ROLLING).
+    // Итоговая формула оплаты за клетку СТАРТ:
+    //   - Проход мимо 0 (wrap в `handleMoveAnimation`) — 1× goSalary;
+    //   - Приземление ровно на 0 (`handleResolvingLanding`) — 2× goSalary,
+    //     НЕЗАВИСИМО от того, был ли бросок дублём.
+    //
+    // Правило дублей на этой клетке продолжает действовать
+    // стандартно (как на любой «нейтральной» клетке): при
+    // `mustRollAgain=true` после приземления — фаза ROLLING.
     if (cell.type === "GO") {
-      // раньше здесь проверялось `state.lastDice?.isDouble`,
-      // что в общем случае совпадает с `player.mustRollAgain`, но
-      // может рассинхронизироваться:
-      //  - после `tryDouble` из тюрьмы `lastDice` обнуляется, и при
-      //    дальнейшем движении `isDouble` теряется;
-      //  - при ручном выставлении `mustRollAgain` (тесты, edge-cases).
-      // Используем `player.mustRollAgain` — это ЕДИНСТВЕННЫЙ
-      // каноничный флаг «игрок обязан бросить ещё раз» (см.
-      // turn-permissions.ts:mustRollDiceNow).
-      const isDouble = player.mustRollAgain === true;
-      if (isDouble) {
-        // Остановка на GO после дубля: двойная зарплата, и
-        // право на повторный бросок сохраняется (правило дублей).
-        player.money += state.settings.goSalary * 2;
-        // Журнал: двойная зарплата за приземление на GO после дубля.
-        // «Получил 200₽ за проход через ВПЕРЁД»
-        // — здесь с пометкой «(после дубля — двойная)».
-        this.log.logGoSalary(state, player, state.settings.goSalary * 2, true);
-        state.phase = "ROLLING";
-      } else {
-        player.money += state.settings.goSalary;
-        // Журнал: обычная зарплата за приземление ровно на GO.
-        // «Получил 200₽ за проход через ВПЕРЁД».
-        this.log.logGoSalary(state, player, state.settings.goSalary, false);
-        state.phase = "BUILDING";
-      }
+      // Двойная выплата за приземление на СТАРТ.
+      player.money += state.settings.goSalary * 2;
+      // Журнал: «Получил 400₽ за остановку на СТАРТ».
+      // Правило «приземление на СТАРТ = 2× goSalary» действует
+      // НЕЗАВИСИМО от того, был ли бросок дублём — поэтому здесь
+      // используется отдельное сообщение (а не «за проход через …»).
+      this.log.logGoSalaryLanded(state, player, state.settings.goSalary * 2);
+      // Правило дублей: если игрок обязан бросить ещё раз (после
+      // дубля) — он остаётся в ROLLING; иначе — BUILDING.
+      state.phase = player.mustRollAgain ? "ROLLING" : "BUILDING";
       return {};
     }
     // GOTO_JAIL (id=30) — «попадание в тюрьму» по правилам Монополии.
@@ -1468,7 +1464,6 @@ export class GamesService {
    * На этом этапе мы ПРИМЕНЯЕМ эффект, и в зависимости от результата:
    *  - `money` / `jail-free` / `luxury-tax-house` → BUILDING (или ROLLING при mustRollAgain)
    *  - `move` (телепорт)    → MOVE_ANIMATION (фишка полетит на новую клетку)
-   *  - `go-salary`          → MOVE_ANIMATION (с начислением goSalary)
    *  - `move-relative`      → MOVE_ANIMATION
    *  - `goto-jail`          → JAIL_DECISION
    */
@@ -1533,8 +1528,11 @@ export class GamesService {
     //  - move-relative (шаг вперёд/назад, любая дистанция) — это НЕ
     //    «выводящая» карточка: игрок остаётся в основном цикле хода,
     //    `mustRollAgain` СОХРАНЯЕТСЯ.
-    //  - go-salary (target=0 через move) — игрок остаётся в основном
-    //    цикле, `mustRollAgain` СОХРАНЯЕТСЯ (правило дублей действует).
+    //  - move на СТАРТ (target=0) — игрок остаётся в основном цикле,
+    //    `mustRollAgain` СОХРАНЯЕТСЯ. Денежная выплата за приземление
+    //    на СТАРТ начисляется автоматически в `handleResolvingLanding`
+    //    (ветка `cell.type === "GO"`): 2× goSalary НЕЗАВИСИМО от дубля.
+    //    Карточка бонус НЕ даёт (раньше давала +goSalary).
     //  - move на конкретную клетку вроде ул. Арбат (target=37) — тоже
     //    НЕ «выводящая» карточка, `mustRollAgain` СОХРАНЯЕТСЯ.
     //  - move на парковку (target=20) — «выводящая» (отдых), сброс
@@ -1551,10 +1549,14 @@ export class GamesService {
     // (парковка, тюрьма) сброс делается в специальных ветках ниже.)
 
     if (outcome.kind === "move") {
-      // Если телепорт через клетку 0 (GO) — начисляем goSalary.
-      if (outcome.target === 0 && !outcome.passedGo) {
-        player.money += state.settings.goSalary;
-      }
+      // ВАЖНО: для карточек «move» (включая «Идите на СТАРТ» с
+      // target=0) мы НЕ начисляем goSalary на этом шаге.
+      // Выплата за приземление на СТАРТ (2× goSalary, НЕЗАВИСИМО от
+      // дубля) происходит автоматически в `handleResolvingLanding`
+      // (ветка `cell.type === "GO"`). Раньше здесь начислялся +goSalary
+      // за target=0, что давало 200₽ от карточки + 400₽ от
+      // приземления = 600₽ (и больше при дубле). По новым правилам
+      // карточка бонус НЕ даёт.
       // Переставляем позицию игрока.
       const from = player.position;
       player.position = outcome.target;
@@ -1646,8 +1648,8 @@ export class GamesService {
         // Прохождение GO начисляет зарплату (только при движении вперёд).
         // ВНИМАНИЕ: начисляем ТОЛЬКО если игрок РЕАЛЬНО прошёл через 0
         // (т.е. его позиция обернулась), а не оказался на 0 в результате
-        // точного броска — этот случай уже обработан в ветке `go-salary`
-        // или в handleResolvingLanding (клетка GO).
+        // точного броска — этот случай уже обработан в handleResolvingLanding
+        // (клетка GO): 2× goSalary НЕЗАВИСИМО от дубля.
         if (oldPos + steps >= 40) {
           player.money += state.settings.goSalary;
         }
@@ -1749,7 +1751,7 @@ export class GamesService {
    * и нужно просто выставить финальную фазу.
    */
   private advanceFromCardEffect(state: GameState, player: Player) {
-    // Если это move/move-relative/go-salary — фаза уже MOVE_ANIMATION.
+    // Если это move/move-relative — фаза уже MOVE_ANIMATION.
     if (state.phase === "MOVE_ANIMATION" && state.moveAnimation) {
       return;
     }

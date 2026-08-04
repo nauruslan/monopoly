@@ -15,8 +15,9 @@
  * GamesService сбрасывает `mustRollAgain=false` и `consecutiveDoubles=0`
  * ТОЛЬКО для «выводящих» карт: `move` target=20 (парковка) и
  * `goto-jail` (через `JailHandlerService.sendToJail`). Для остальных
- * move-исходов (`move-relative`, `go-salary`, `move` с другой клеткой)
- * `mustRollAgain` СОХРАНЯЕТСЯ — это обычные перемещения, к которым
+ * move-исходов (`move-relative`, `move` с любой клеткой, включая
+ * «Идите на СТАРТ» с target=0) `mustRollAgain` СОХРАНЯЕТСЯ — это
+ * обычные перемещения, к которым
  * правило дублей должно применяться. Цепочка «бросок → движение →
  * эффект» обрывается только в «выводящих» клетках.
  *
@@ -434,13 +435,14 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     expect(canEndTurn(activeState, p)).toBe(false);
   });
 
-  it("go-salary карта при дубле: mustRollAgain СОХРАНЯЕТСЯ (регресс #1)", async () => {
-    // «Отправляйтесь на Вперёд. Получите 200₽» — это go-salary.
-    // Это НЕ «выводящая» карта (как тюрьма/парковка) — это просто
-    // перемещение на GO + зарплата. По правилам дублей после хода
-    // фишка уже на GO, и правило дублей продолжает действовать
-    // (если пришли сюда с дубля) — игрок должен бросить ещё раз.
-    const goCard = CHANCE_CARDS.find((c) => c.effect.kind === "go-salary");
+  it("move-карта «Идите на СТАРТ» при дубле: mustRollAgain СОХРАНЯЕТСЯ (регресс #1)", async () => {
+    // ch1: «Идите на СТАРТ» (target=0, kind="move"). Это НЕ
+    // «выводящая» карта (как тюрьма/парковка) — это просто
+    // телепорт на GO. Бонус карточка НЕ даёт; двойная выплата
+    // (2× goSalary) начисляется автоматически в handleResolvingLanding
+    // НЕЗАВИСИМО от дубля. По правилу дублей, если пришли сюда с
+    // дубля, после приземления игрок должен бросить ещё раз.
+    const goCard = CHANCE_CARDS.find((c) => c.effect.kind === "move" && c.effect.target === 0);
     expect(goCard).toBeDefined();
     if (!goCard) return;
 
@@ -465,24 +467,25 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     const moneyBefore = p.money;
     const goSalary = activeState.settings.goSalary;
 
-    // 1) CONFIRM_CARD: go-salary не сбрасывает mustRollAgain, фаза
-    //    MOVE_ANIMATION (идём на GO с анимацией).
+    // 1) CONFIRM_CARD: move-карта не сбрасывает mustRollAgain, фаза
+    //    MOVE_ANIMATION (идём на СТАРТ с анимацией).
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(true);
     expect(p.consecutiveDoubles).toBe(1);
     expect(activeState.phase).toBe("MOVE_ANIMATION");
 
-    // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING на GO.
+    // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING на СТАРТ.
+    //    Карточка ch1 НЕ начисляет бонус — деньги пока не меняются.
     await act({ type: "CONFIRM_MOVE_ANIMATION" });
     expect(p.position).toBe(0);
-    expect(p.money).toBe(moneyBefore + goSalary); // goSalary начислился
+    expect(p.money).toBe(moneyBefore);
     expect(activeState.phase).toBe("RESOLVING_LANDING");
 
-    // 3) CONFIRM_LANDING → handleResolvingLanding на GO при дубле
-    //    использует `player.mustRollAgain`, фаза ROLLING,
-    //    зарплата НЕ удваивается (т.к. on landing isDouble вычисляется
-    //    по `player.mustRollAgain`, который в этой точке уже true).
+    // 3) CONFIRM_LANDING → handleResolvingLanding на СТАРТ: двойная
+    //    выплата 2× goSalary НЕЗАВИСИМО от дубля, mustRollAgain
+    //    сохранён, фаза ROLLING (правило дублей продолжает действовать).
     await act({ type: "CONFIRM_LANDING" });
+    expect(p.money).toBe(moneyBefore + goSalary * 2);
     expect(p.mustRollAgain).toBe(true);
     expect(p.consecutiveDoubles).toBe(1);
     expect(activeState.phase).toBe("ROLLING");
@@ -536,8 +539,3 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     expect(activeState.justEnteredJail).toBe(true);
   });
 });
-
-
-
-
-

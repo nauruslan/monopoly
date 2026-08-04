@@ -83,10 +83,16 @@ export type CardEffect =
 export const CHANCE_CARDS: Card[] = [
   {
     id: "ch1",
+    // Карточка «Идите на СТАРТ». Деньги НЕ начисляются напрямую —
+    // при приземлении на клетку id=0 (GO/СТАРТ) сервер начислит
+    // двойную выплату (2× goSalary) в handleResolvingLanding
+    // (ветка cell.type === "GO"). Здесь намеренно НЕ указан
+    // `passedGo` и НЕ используется `go-salary` (т.к. тот сразу
+    // начисляет goSalary — для новой логики нам это не нужно).
     deck: "chance",
-    text: "Отправляйтесь на Вперёд. Получите 200₽",
+    text: "Идите на СТАРТ",
     direction: "forward",
-    effect: { kind: "go-salary" },
+    effect: { kind: "move", target: 0 },
   },
   {
     id: "ch2",

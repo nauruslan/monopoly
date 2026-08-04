@@ -35,12 +35,17 @@ import type { GameState, Player, Phase } from "@monopoly/shared";
  *
  *      Если игрок выбросил дубль (mustRollAgain=true) и затем попал на
  *      клетку Шанс/Казна, `applyCardEffectAndAdvance` в GamesService
- *      сбрасывает `mustRollAgain=false` и `consecutiveDoubles=0` ПРИ
- *      эффектах `move` / `move-relative` / `go-salary` (т.е. для
- *      карточек, перемещающих фишку на конкретную/другую клетку).
- *      Логика: «выводящая» из обычного цикла карточка обрывает серию
- *      дублей — игрок должен либо заплатить/попасть в тюрьму/попасть
- *      на парковку и т.п. и завершить ход, а не бросать ещё раз.
+ *      НЕ сбрасывает `mustRollAgain` для эффектов `move` /
+ *      `move-relative` (т.е. для карточек, перемещающих фишку на
+ *      конкретную/другую клетку, в т.ч. «Идите на СТАРТ» с target=0).
+ *      Логика: обычное перемещение фишки НЕ «выводит» из серии дублей —
+ *      после хода игрок должен бросить ещё раз.
+ *
+ *      Исключения, где `mustRollAgain` сбрасывается в спецветках:
+ *       - move на парковку (target=20) — там ставится
+ *         `justArrivedAtParking=true` и фаза = BUILDING;
+ *       - move в тюрьму (target=10) и `goto-jail` — `sendToJail`
+ *         сбрасывает оба флага и ставит фазу JAIL_DECISION.
  *
  *      Для карточек-«stay» (`money` / `jail-free` / `luxury-tax-house`)
  *      `mustRollAgain` НЕ сбрасывается — игрок остаётся на той же

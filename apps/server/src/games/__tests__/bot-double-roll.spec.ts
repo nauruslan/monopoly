@@ -348,12 +348,12 @@ describe("GamesService.applyAction: regression дубль + карточка →
 
   it("Бот в TRADING_NEGOTIATE отклоняет trade после карточки на дубле: mustRollAgain сохраняется", async () => {
     // Сценарий: игрок бросает дубль, попадает на ШАНС, тянет
-    // go-salary (или stay-карту), переходит в BUILDING. Во время
-    // своего хода другой игрок предлагает обмен — текущий игрок
-    // (который должен бросить ещё раз из-за дубля) отклоняет trade.
-    // После TRADE_REJECT mustRollAgain должен сохраниться, и фаза
-    // должна быть ROLLING.
-    const goCard = CHANCE_CARDS.find((c) => c.effect.kind === "go-salary");
+    // карточку «Идите на СТАРТ» (move target=0) или stay-карту,
+    // переходит в фазу приземления на СТАРТ. Во время своего хода
+    // другой игрок предлагает обмен — текущий игрок (который должен
+    // бросить ещё раз из-за дубля) отклоняет trade. После TRADE_REJECT
+    // mustRollAgain должен сохраниться, и фаза должна быть ROLLING.
+    const goCard = CHANCE_CARDS.find((c) => c.effect.kind === "move" && c.effect.target === 0);
     expect(goCard).toBeDefined();
     if (!goCard) return;
 
@@ -380,13 +380,15 @@ describe("GamesService.applyAction: regression дубль + карточка →
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
-    // go-salary → MOVE_ANIMATION → RESOLVING_LANDING → ROLLING.
+    // move-карта «Идите на СТАРТ» → MOVE_ANIMATION → RESOLVING_LANDING
+    // на СТАРТ → двойная выплата 2× goSalary (НЕЗАВИСИМО от дубля),
+    // фаза ROLLING (т.к. mustRollAgain=true).
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(true);
     await act({ type: "CONFIRM_MOVE_ANIMATION" });
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
-    // На GO: goSalary начислился, фаза ROLLING (т.к. mustRollAgain=true).
+    // На СТАРТ: 2× goSalary, фаза ROLLING (т.к. mustRollAgain=true).
     expect(p.mustRollAgain).toBe(true);
     expect(activeState.phase).toBe("ROLLING");
 

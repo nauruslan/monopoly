@@ -392,16 +392,32 @@ export class LogService {
    */
 
   /**
-   * Проход через клетку «Вперёд» (GO) — начисление зарплаты.
-   * «Получил 200₽ за проход через ВПЕРЁД».
-   * `amount` может быть удвоен (после дубля) — это отражается в тексте.
+   * Проход через клетку «СТАРТ» (GO) — фишка пересекла клетку 0
+   * (wrap по полю). Игрок получает 200₽ — фиксированная сумма.
+   * Сообщение журнала: «Игрок получил 200₽ за проход через СТАРТ».
    */
-  logGoSalary(state: GameState, player: Player, amount: number, isDouble: boolean): GameEvent {
-    const note = isDouble ? " (после дубля — двойная)" : "";
+  logGoSalaryPassed(state: GameState, player: Player, amount: number): GameEvent {
     return this.create(state, {
       kind: "GO_SALARY_PAID",
       player,
-      message: `💰 ${player.displayName} получил(а) $${amount} за проход через ВПЕРЁД${note}`,
+      message: `💰 ${player.displayName} получил(а) $${amount} за проход через СТАРТ`,
+      type: "move",
+      payload: { cellId: 0, amount, dice: [0, 0] },
+    });
+  }
+
+  /**
+   * Приземление ровно на клетку «СТАРТ» (GO) — фишка остановилась
+   * на клетке 0 (после броска, карточки «Идите на СТАРТ» и т.п.).
+   * Игрок получает 400₽ (2× goSalary) — повышенная выплата за
+   * приземление на СТАРТ.
+   * Сообщение журнала: «Игрок получил 400₽ за остановку на СТАРТ».
+   */
+  logGoSalaryLanded(state: GameState, player: Player, amount: number): GameEvent {
+    return this.create(state, {
+      kind: "GO_SALARY_PAID",
+      player,
+      message: `💰 ${player.displayName} получил(а) $${amount} за остановку на СТАРТ`,
       type: "move",
       payload: { cellId: 0, amount, dice: [0, 0] },
     });

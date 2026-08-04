@@ -59,12 +59,13 @@ const {
   lastDrawnCard,
 } = storeToRefs(game);
 
-// Кому принадлежит ход. `useAuthStore` даёт нам userId; резолвим
-// в playerId через `state.players` (ищем первого human-игрока, чей
-// id в локальном маппинге, либо — для одиночной партии — просто
-// первого human).
-// На клиенте нет надёжного маппинга userId → playerId (сервер
-// не отдаёт userId в state). Берём первого human-игрока (обычно хост).
+// Кому принадлежит ход. В текущей реализации `Player` (см.
+// packages/shared/src/types/player.ts) НЕ содержит поля `userId` —
+// сервер не отдаёт идентификатор залогиненного пользователя в
+// `state.players`. Поэтому «мой» ID определяется как ID первого
+// human-игрока в партии (host). В одиночных партиях (1 человек + боты)
+// это работает корректно: я один human, и когда ход переходит ко мне,
+// `myPlayerId` указывает на меня.
 const auctionStore = useAuctionStore();
 const myPlayerId = computed<string>(() => {
   const me = state.value?.players?.find((p) => p.kind === "human");
@@ -305,7 +306,7 @@ function closeBankruptNotice() {
   showBankruptNotice.value = false;
 }
 
-// Тултип  
+// Тултип
 const hoveredCell = ref<Cell | null>(null);
 const tooltipPos = ref({ x: 0, y: 0 });
 const tooltipSide = ref<BoardSide>("bottom");
@@ -326,7 +327,7 @@ const TOOLTIP_GAP = 8;
 const currentCell = computed<Cell | null>(() => game.currentCell);
 const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
 
-// BANKRUPTCY: вычисляемые данные для модалки ликвидации 
+// BANKRUPTCY: вычисляемые данные для модалки ликвидации
 const bankruptcyPlayer = computed(
   () => state.value.players.find((p) => p.id === state.value.bankruptcy?.playerId) ?? null,
 );
@@ -359,7 +360,7 @@ const bankruptcyMaxLiquidity = computed<number>(() => {
   return total;
 });
 
-// Watcher: глобальное уведомление о НОВЫХ банкротах 
+// Watcher: глобальное уведомление о НОВЫХ банкротах
 // Отслеживаем изменение `players` и при появлении нового игрока с
 // `isBankrupt = true` (которого мы ещё не видели) показываем модалку.
 watch(

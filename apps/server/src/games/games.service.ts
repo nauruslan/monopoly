@@ -1242,18 +1242,26 @@ export class GamesService {
         player.money -= rent;
         owner.money += rent;
         state.rentContext = undefined;
-        // Лог: фиксируем факт оплаты аренды (с указанием
-        // получателя и клетки). Не логируем, если игрок
-        // сразу уходит в банкротство — там будет отдельное
-        // сообщение о банкротстве.
-        if (!this.shouldStartBankruptcy(state, player, owner, rent)) {
-          this.log.logRentPaid(state, player, owner, cell.name, rent);
-        }
-        // Триггер банкротства: проверяем, что у игрока
-        // реально нет ликвидности (или её не хватает на покрытие).
+        // Триггер банкротства: один-единственный вызов.
+        // ВАЖНО (исправление бага «BUILDING вместо ROLLING после
+        // банкротства»): раньше `shouldStartBankruptcy` вызывался
+        // ДВАЖДЫ — сначала для лога, потом повторно. Если первый
+        // вызов уже сработал (банкротство, переход к следующему
+        // игроку, `state.phase = "ROLLING"` через `beginNextPlayerTurn`),
+        // второй вызов шёл с УЖЕ обнулённым `money` (bankruptcy.handle
+        // ставит money=0) и возвращал `false`. Тогда `return {};` не
+        // срабатывал, выполнение падало дальше на
+        // `this.afterRentOrTax(state, player)` — а там `state.phase
+        // = "BUILDING"`, что ПЕРЕТИРАЛО только что установленный
+        // ROLLING. Следующий игрок оказывался в фазе BUILDING без
+        // контекста, кнопка «Бросить кубики» неактивна.
+        // Теперь: ОДИН вызов + ранний return при банкротстве, никаких
+        // побочных эффектов `afterRentOrTax` поверх банкротства.
         if (this.shouldStartBankruptcy(state, player, owner, rent)) {
           return {};
         }
+        // Банкротства нет — логируем факт оплаты ренты.
+        this.log.logRentPaid(state, player, owner, cell.name, rent);
       } else {
         state.rentContext = undefined;
       }
@@ -2379,6 +2387,65 @@ export class GamesService {
   }
 
   /**
+   * Хелпер: синхронно инициализировать ход СЛЕДУЮЩЕГО живого игрока
+   * (после `advanceToNextPlayer`). Используется в местах, где
+   * `handleStartTurn` нельзя вызвать через `await` (например, из
+   * синхронного `shouldStartBankruptcy`, который вызывается из
+   * 11 sync-мест) — или там, где `void this.handleStartTurn(...)`
+   * ломает тесты из-за fire-and-forget Promise'а (фаза успевает
+   * измениться ПОСЛЕ того, как applyAction уже вернул state).
+   *
+   * Логика — зеркало `handleStartTurn`:
+   *   1) сбросить флаги хода (mustRollAgain, consecutiveDoubles,
+   *      justEnteredJail, justArrivedAtParking, jailRollOutcome,
+   *      preBuildingPhase, tradeInitiationLog, lastDice, cardContext,
+   *      moveAnimation);
+   *   2) выставить фазу в ROLLING (или JAIL_DECISION, если в тюрьме);
+   *   3) записать в журнал «Начало хода N» (через `log.logTurnStart`).
+   *
+   * Если у нового игрока отрицательный баланс (теоретически) — снова
+   * запускаем `startBankruptcyProcedure` (как и в `handleStartTurn`).
+   *
+   * ВАЖНО: при активной анимации/контексте (например, `state.lastDice`
+   * не пустой) их сброс НЕ делаем — `advanceToNextPlayer` уже чистит
+   * `lastDice`/`cardContext`/`botThinking` (см. реализацию).
+   */
+  private beginNextPlayerTurn(state: GameState): void {
+    const next = state.players[state.currentPlayerIndex];
+    if (!next) {
+      state.phase = "BUILDING";
+      return;
+    }
+    // Лог «Начало хода» — как в handleStartTurn.
+    this.log.logTurnStart(state, next, state.round);
+    // Сброс обязательных флагов начала хода.
+    next.mustRollAgain = false;
+    next.consecutiveDoubles = 0;
+    state.justEnteredJail = false;
+    state.justArrivedAtParking = false;
+    state.preBuildingPhase = undefined;
+    state.jailRollOutcome = undefined;
+    state.tradeInitiationLog = [];
+    // ВАЖНО: полная очистка контекста, оставшегося от ПРЕДЫДУЩЕГО хода.
+    // Без этого клиент может видеть «застрявшую» модалку (например,
+    // BANKRUPTCY от старого игрока) и блокировать свои кнопки
+    // (canRoll=false/canEndTurn=false) из-за остатков phase != ROLLING.
+    state.bankruptcy = undefined;
+    state.cardContext = undefined;
+    state.lastDice = undefined;
+    state.moveAnimation = undefined;
+    state.rentContext = undefined;
+    state.botThinking = undefined;
+    // Если у нового игрока остался долг — принудительное банкротство.
+    if (next.money < 0 && !next.isBankrupt) {
+      this.startBankruptcyProcedure(state, next, null, -next.money);
+      return;
+    }
+    // Обычное начало хода: ROLLING или JAIL_DECISION.
+    state.phase = next.inJail ? "JAIL_DECISION" : "ROLLING";
+  }
+
+  /**
    * Таймер 2-секундного показа результата аукциона. После этого —
    * очищаем state.auction и переключаем фазу.
    */
@@ -2482,9 +2549,38 @@ export class GamesService {
     // Журнал: финальное объявление банкротства.
     this.log.logBankruptcyDeclared(state, player, creditor?.displayName ?? "Банк");
     this.bankruptcy.handle(state, player, creditor, need);
-    state.phase = "BUILDING";
     this.checkGameOver(state);
+    // ВАЖНО: после банкротства — `advanceToNextPlayer` уже пропустил
+    // обанкротившегося игрока (и других банкротов) и подвинул
+    // `currentPlayerIndex` на следующего ЖИВОГО. Если игра ещё не
+    // завершена — нужно:
+    //   1) синхронизировать state.phase с ROLLING, иначе
+    //      `canRollDice` на клиенте вернёт `false` (фаза ≠ ROLLING)
+    //      → кнопка «Бросить кубики» неактивна, игрок застрял;
+    //   2) вызвать `handleStartTurn` для нового игрока — он сбросит
+    //      флаги (mustRollAgain/consecutiveDoubles/justEnteredJail) и
+    //      решит, переводить ли в ROLLING или JAIL_DECISION.
+    // Без этого фикс цикла «банкрот → ход следующему» сломан, и
+    // следующий игрок не может бросить кубики (см. canRollDice в
+    // turn-permissions.ts).
     this.advanceToNextPlayer(state);
+    // ВАЖНО: после банкротства нужно СРАЗУ инициализировать ход
+    // следующего живого игрока (а не оставлять фазу `BUILDING`, как
+    // раньше). Иначе:
+    //   - `canRollDice` на клиенте возвращает `false` (фаза ≠ ROLLING);
+    //   - кнопка «Бросить кубики» неактивна, игрок застрял;
+    //   - бот не делает ROLL_DICE по таймеру.
+    // Используем СИНХРОННЫЙ хелпер `beginNextPlayerTurn` —
+    // `handleStartTurn` (async) тут не подходит: fire-and-forget
+    // Promise оставляет фазу `BUILDING` в моменте, когда
+    // applyAction уже вернул state, и тесты/UI видят «застрявшую»
+    // фазу до разрешения микротасок.
+    const next = state.players[state.currentPlayerIndex];
+    if (state.status === "active" && next && !next.isBankrupt) {
+      this.beginNextPlayerTurn(state);
+    } else {
+      state.phase = "BUILDING";
+    }
     return true;
   }
 
@@ -2643,8 +2739,22 @@ export class GamesService {
       this.bankruptcy.handle(state, player, creditor, remainingDebt);
       state.bankruptcy = undefined;
       this.checkGameOver(state);
-      state.phase = "BUILDING";
       this.advanceToNextPlayer(state);
+      // ВАЖНО: после `advanceToNextPlayer` нужно СРАЗУ инициализировать
+      // ход следующего живого игрока (а не оставлять фазу `BUILDING`,
+      // как раньше). Без этого:
+      //   - `canRollDice` на клиенте возвращает `false` (фаза ≠ ROLLING);
+      //   - кнопка «Бросить кубики» неактивна, игрок застрял;
+      //   - бот не делает ROLL_DICE по таймеру.
+      // Используем СИНХРОННЫЙ хелпер `beginNextPlayerTurn` — он
+      // идемпотентен, обнуляет флаги хода и сразу ставит фазу ROLLING
+      // (или JAIL_DECISION), пишет «Начало хода» в журнал.
+      const next = state.players[state.currentPlayerIndex];
+      if (state.status === "active" && next && !next.isBankrupt) {
+        this.beginNextPlayerTurn(state);
+      } else {
+        state.phase = "BUILDING";
+      }
       return {};
     }
 

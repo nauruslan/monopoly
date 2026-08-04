@@ -685,6 +685,9 @@ export class GamesService {
     player: Player,
     action: GameAction,
   ): Promise<{ dice?: [number, number]; card?: unknown; event?: GameEvent }> {
+    // Reset preBuildingPhase on entering ROLLING (protect against dirty state).
+    state.preBuildingPhase = undefined;
+
     if (action.type !== "ROLL_DICE") {
       throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе ROLLING`);
     }

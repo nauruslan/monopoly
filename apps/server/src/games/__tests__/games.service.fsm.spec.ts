@@ -623,7 +623,7 @@ describe("GamesService.applyAction (FSM)", () => {
       expect(p.mustRollAgain).toBe(false);
     });
 
-    it("CONFIRM_DICE_ANIMATION после TRY_DOUBLE (escape) → MOVE_ANIMATION, без mustRollAgain", async () => {
+    it("CONFIRM_DICE_ANIMATION после TRY_DOUBLE (escape): выход без mustRollAgain, потом отдельный бросок и движение", async () => {
       const p = setupJailDecision(0);
       // Дубль (5,5) — выход из тюрьмы.
       activeState.jailRollOutcome = "escape";
@@ -635,23 +635,36 @@ describe("GamesService.applyAction (FSM)", () => {
       p.jailTurns = 0;
 
       await act({ type: "CONFIRM_DICE_ANIMATION" });
-      // После дубля из тюрьмы — движение начинается с клетки 10
-      // (тюрьма), и фишка перемещается на 10 шагов вперёд.
-      expect(activeState.phase).toBe("MOVE_ANIMATION");
-      expect(activeState.moveAnimation).toBeDefined();
-      expect(activeState.moveAnimation?.from).toBe(10);
-      expect(activeState.moveAnimation?.to).toBe(20);
-      // КЛЮЧЕВАЯ проверка: mustRollAgain НЕ ставится (правило «выход
-      // дублем из тюрьмы — без повторного броска»).
+      // После выхода дублём из тюрьмы сервер ставит phase=ROLLING,
+      // очищает lastDice/moveAnimation. Никаких mustRollAgain (правило
+      // «выход дублем из тюрьмы — без повторного броска на этом броске»).
+      // Дальше игрок САМ нажимает «Бросить кубики» — отдельный бросок
+      // для начала движения фишки от клетки 10.
+      expect(activeState.phase).toBe("ROLLING");
+      expect(activeState.moveAnimation).toBeUndefined();
+      expect(activeState.lastDice).toBeUndefined();
       expect(p.mustRollAgain).toBe(false);
       expect(p.consecutiveDoubles).toBe(0);
       expect(activeState.jailRollOutcome).toBeUndefined();
+
+      // Отдельный бросок кубиков — обычный ROLL_DICE из ROLLING.
+      // Реальные кубики случайны, поэтому проверяем только факт
+      // перехода в DICE_ANIMATION и появление lastDice.
+      await act({ type: "ROLL_DICE" });
+      expect(activeState.phase).toBe("DICE_ANIMATION");
+      expect(activeState.lastDice).toBeDefined();
+      expect(activeState.lastDice?.dice).toHaveLength(2);
+
+      // Подтверждение анимации кубиков -> фишка едет от клетки 10.
+      await act({ type: "CONFIRM_DICE_ANIMATION" });
+      expect(activeState.phase).toBe("MOVE_ANIMATION");
+      expect(activeState.moveAnimation).toBeDefined();
+      expect(activeState.moveAnimation?.from).toBe(10);
     });
 
-    it("CONFIRM_DICE_ANIMATION после TRY_DOUBLE (pay, 3 попытки) → списание 50₽ + MOVE_ANIMATION, без mustRollAgain", async () => {
+    it("CONFIRM_DICE_ANIMATION после TRY_DOUBLE (pay, 3 попытки): списание 50$ + ROLLING, потом отдельный бросок и движение", async () => {
       const p = setupJailDecision(2);
       const moneyBefore = p.money;
-      // ДО CONFIRM_DICE_ANIMATION: деньги ещё НЕ списаны, inJail=true.
       activeState.jailRollOutcome = "pay";
       activeState.phase = "DICE_ANIMATION";
       activeState.lastDice = { dice: [2, 3], isDouble: false };
@@ -660,16 +673,28 @@ describe("GamesService.applyAction (FSM)", () => {
       p.mustRollAgain = false;
       p.consecutiveDoubles = 0;
 
+      // ФАЗА 1: CONFIRM_DICE_ANIMATION в попытке выхода (3-й промах).
+      // Списывается 50 и игрок выходит из тюрьмы. Никаких mustRollAgain.
       await act({ type: "CONFIRM_DICE_ANIMATION" });
-      // ПОСЛЕ: деньги списаны, inJail=false.
       expect(p.money).toBe(moneyBefore - 50);
       expect(p.inJail).toBe(false);
       expect(p.jailTurns).toBe(0);
-      expect(activeState.phase).toBe("MOVE_ANIMATION");
-      expect(activeState.moveAnimation?.from).toBe(10);
-      expect(activeState.moveAnimation?.to).toBe(15);
       expect(p.mustRollAgain).toBe(false);
+      expect(activeState.phase).toBe("ROLLING");
+      expect(activeState.moveAnimation).toBeUndefined();
+      expect(activeState.lastDice).toBeUndefined();
       expect(activeState.jailRollOutcome).toBeUndefined();
+
+      // ФАЗА 2: отдельный бросок кубиков игроком.
+      await act({ type: "ROLL_DICE" });
+      expect(activeState.phase).toBe("DICE_ANIMATION");
+      expect(activeState.lastDice).toBeDefined();
+
+      // ФАЗА 3: подтверждаем анимацию -> фишка едет от клетки 10.
+      await act({ type: "CONFIRM_DICE_ANIMATION" });
+      expect(activeState.phase).toBe("MOVE_ANIMATION");
+      expect(activeState.moveAnimation).toBeDefined();
+      expect(activeState.moveAnimation?.from).toBe(10);
     });
 
     it("END_TURN после неудачной попытки (stay) → фаза END_TURN, jailTurns сохраняется", async () => {
@@ -721,7 +746,7 @@ describe("GamesService.applyAction (FSM)", () => {
       expect(p.money).toBe(moneyBefore);
     });
 
-    it("Дубль на 3-й попытке (CONFIRM_DICE_ANIMATION с escape, jailTurns=2) → MOVE_ANIMATION, деньги НЕ списываются", async () => {
+    it("Дубль на 3-й попытке (escape, jailTurns=2): бесплатный выход, потом отдельный бросок и движение", async () => {
       const p = setupJailDecision(2);
       const moneyBefore = p.money;
       activeState.jailRollOutcome = "escape";
@@ -731,14 +756,28 @@ describe("GamesService.applyAction (FSM)", () => {
       p.jailTurns = 2;
       p.mustRollAgain = false;
       p.consecutiveDoubles = 0;
+
+      // Faza 1: CONFIRM_DICE_ANIMATION: выход дублём бесплатный.
       await act({ type: "CONFIRM_DICE_ANIMATION" });
       expect(p.inJail).toBe(false);
       expect(p.jailTurns).toBe(0);
       expect(p.money).toBe(moneyBefore);
-      expect(activeState.phase).toBe("MOVE_ANIMATION");
-      expect(activeState.moveAnimation?.from).toBe(10);
-      expect(activeState.moveAnimation?.to).toBe(18);
       expect(p.mustRollAgain).toBe(false);
+      expect(activeState.phase).toBe("ROLLING");
+      expect(activeState.moveAnimation).toBeUndefined();
+      expect(activeState.lastDice).toBeUndefined();
+      expect(activeState.jailRollOutcome).toBeUndefined();
+
+      // Faza 2: отдельный бросок кубиков игроком.
+      await act({ type: "ROLL_DICE" });
+      expect(activeState.phase).toBe("DICE_ANIMATION");
+      expect(activeState.lastDice).toBeDefined();
+
+      // Faza 3: подтверждаем анимацию -> фишка едет от клетки 10.
+      await act({ type: "CONFIRM_DICE_ANIMATION" });
+      expect(activeState.phase).toBe("MOVE_ANIMATION");
+      expect(activeState.moveAnimation).toBeDefined();
+      expect(activeState.moveAnimation?.from).toBe(10);
     });
   });
 
@@ -821,8 +860,3 @@ describe("GamesService.applyAction (FSM)", () => {
     });
   });
 });
-
-
-
-
-

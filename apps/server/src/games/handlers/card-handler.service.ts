@@ -145,14 +145,15 @@ export class CardHandlerService {
         if (card.effect.money !== undefined) {
           player.money += card.effect.money;
         }
-        // Направление определяется соотношением target/position.
-        // Здесь position ЕЩЁ НЕ изменён (мутация будет в GamesService),
-        // поэтому направление для move по правилам всегда «forward»:
-        // игрок перемещается в указанную клетку напрямую (телепорт),
-        // а анимация строится по кратчайшему пути через игровое поле.
-        // Для классической Монополии любой телепорт всегда «вперёд» по
-        // правилам (если target < from — это всё равно forward через 0).
-        return { kind: "move", target: card.effect.target, direction: "forward" };
+        // Направление НЕ определяем здесь — `GamesService` сам вычислит
+        // его на основе соотношения `from` (текущая позиция игрока) и
+        // `target`, чтобы фишка не «наматывала» через СТАРТ ради
+        // 200₽ бонуса:
+        //  - target=0 (СТАРТ) → всегда "forward" (правило игры)
+        //  - target=10 (JAIL), target=20 (PARKING), target=30 (GOTO_JAIL)
+        //    → всегда "backward" (тюрьма/парковка — «отдых»)
+        //  - остальные → "backward" если from > target, иначе "forward"
+        return { kind: "move", target: card.effect.target, direction: undefined };
       }
 
       case "go-salary": {

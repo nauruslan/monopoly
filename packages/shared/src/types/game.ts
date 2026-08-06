@@ -1,4 +1,4 @@
-import type { Player } from "./player";
+﻿import type { Player } from "./player";
 import type { Cell } from "./cell";
 import type { GameEvent } from "./event";
 import type { Card } from "../data/cards";
@@ -100,7 +100,7 @@ export interface GameSettings {
   auctionBotThinkMs?: number;
   /**
    * Кастомное правило нашей версии: цена ОТЕЛЯ равна цене ДОМА.
-   * По умолчанию `true` (см. GDD §5). При `false` используется
+   * По умолчанию `true`. При `false` используется
    * классическая Монополия: отель стоит 5 × цена дома, а при продаже
    * возвращается как 4 дома (по 50%).
    */
@@ -492,6 +492,13 @@ export interface GameState {
    * тогда игрок снова может бросать кубики.
    */
   justArrivedAtParking?: boolean;
+  /**
+   * Маркер для handleResolvingLanding: приземление на клетку 10
+   * (JAIL) произошло через карточку/move-эффект или goto-jail outcome,
+   * а НЕ через обычные кубики (visit). Ставится в applyCardEffectAndAdvance
+   * (move to=10, goto-jail). После отправки в тюрьму — сбрасывается.
+   */
+  pendingJailFromCard?: boolean;
 }
 
 /**

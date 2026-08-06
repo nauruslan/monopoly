@@ -216,8 +216,8 @@ describe("GamesService.applyAction (FSM)", () => {
     await expect(act({ type: "UNMORTGAGE_PROPERTY", cellId: 0 })).rejects.toThrow();
   });
 
-  it("TRADE_OFFER в фазе ROLLING разрешается (GDD §1.1: торги в любой фазе хода)", async () => {
-    // По GDD §1.1 торговать можно в любой момент хода текущего игрока,
+  it("TRADE_OFFER в фазе ROLLING разрешается (торги в любой фазе хода)", async () => {
+    // торговать можно в любой момент хода текущего игрока,
     // включая ROLLING/DICE_ANIMATION/MOVE_ANIMATION. Пустой оффер в любом
     // случае отклоняется валидацией в TradeService.startTrade, но не FSM.
     await expect(
@@ -460,12 +460,19 @@ describe("GamesService.applyAction (FSM)", () => {
       expect(p.inJail).toBe(false);
       expect(activeState.justEnteredJail).toBeFalsy();
 
-      // 2) CONFIRM_CARD: сервер применяет эффект «goto-jail» — sendToJail
-      // сбрасывает position→10, inJail=true, mustRollAgain=false,
-      // consecutiveDoubles=0, jailTurns=0; фаза → JAIL_DECISION,
-      // justEnteredJail=true (визуально фишка мгновенно встаёт на 10).
+      // 2) CONFIRM_CARD: теперь фишка АНИМИРУЕТСЯ backward к клетке 10
+      // (от 30 → 29 → ... → 10), фаза = MOVE_ANIMATION. После
+      // анимации handleResolvingLanding → sendToJail + JAIL_DECISION.
       await act({ type: "CONFIRM_CARD" });
       expect(p.position).toBe(10);
+      expect(p.inJail).toBe(false);
+      expect(activeState.phase).toBe("MOVE_ANIMATION");
+      expect(activeState.moveAnimation?.direction).toBe("backward");
+
+      await act({ type: "CONFIRM_MOVE_ANIMATION" });
+      expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+      await act({ type: "CONFIRM_LANDING" });
       expect(p.inJail).toBe(true);
       expect(p.jailTurns).toBe(0);
       expect(p.mustRollAgain).toBe(false);

@@ -185,7 +185,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     return p;
   }
 
-  it("move-карта (парковка) при дубле: сбрасывает mustRollAgain и consecutiveDoubles", async () => {
+  it("move-карта (парковка) при дубле: идёт через MOVE_ANIMATION → RESOLVING_LANDING → BUILDING", async () => {
     // Ищем move-карту с target=20 (парковка). В колоде Шанс её нет,
     // но в TREASURY есть «Бесплатная парковка. Перейдите на клетку 20».
     const parkingCard = TREASURY_CARDS.find(
@@ -214,31 +214,46 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
+    // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ backward к клетке 20
+    //    (а не телепортируется мгновенно, как раньше — это был баг).
+    //    `mustRollAgain` и `consecutiveDoubles` сбрасываются, фишка
+    //    уже стоит на 20, фаза = MOVE_ANIMATION, moveAnimation
+    //    заполнен с direction="backward".
     await act({ type: "CONFIRM_CARD" });
-
-    // Главная проверка: флаги сброшены сервером.
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
-    // И фишка уже перемещена на 20 (move-эффект выполнился).
     expect(p.position).toBe(20);
-    // Карточка применена, контекст очищен.
     expect(activeState.cardContext).toBeUndefined();
-    // ─── Спецлогика «отправляйтесь на парковку» по карточке ─────
-    // Парковка (id=20) трактуется как «отдых» (аналог ареста): фишка
-    // телепортируется мгновенно, без MOVE_ANIMATION, право на ещё
-    // один бросок (после дубля) ТЕРЯЕТСЯ. Поэтому фаза сразу
-    // BUILDING и выставлен флаг justArrivedAtParking.
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation).toBeDefined();
+    expect(activeState.moveAnimation?.playerId).toBe(p.id);
+    expect(activeState.moveAnimation?.to).toBe(20);
+    expect(activeState.moveAnimation?.direction).toBe("backward");
+    // Флаг justArrivedAtParking ставится сразу в applyCardEffectAndAdvance
+    // (нужен для блокировки canRollDice в turn-permissions.ts: пока идёт
+    // анимация, игрок НЕ должен мочь бросить кубики ещё раз).
+    expect(activeState.justArrivedAtParking).toBe(true);
+
+    // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
+    //    moveAnimation очищается, фаза переходит в RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.moveAnimation).toBeUndefined();
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // 3) CONFIRM_LANDING → handleResolvingLanding на PARKING:
+    //    justArrivedAtParking=true, фаза = BUILDING, право на ещё
+    //    один бросок (после дубля) ТЕРЯЕТСЯ (отдых, аналог ареста).
+    await act({ type: "CONFIRM_LANDING" });
     expect(activeState.phase).toBe("BUILDING");
     expect(activeState.justArrivedAtParking).toBe(true);
-    expect(activeState.moveAnimation).toBeUndefined();
-    // UI-блокировка: canRollDice=false, но canEndTurn=true
-    // (игрок может только завершить ход).
+    // UI-блокировка: canRollDice=false (justArrivedAtParking),
+    // canEndTurn=true.
     expect(canRollDice(activeState, p)).toBe(false);
     expect(canEndTurn(activeState, p)).toBe(true);
   });
 
-  it("полный цикл: дубль + move-карта → BUILDING, canEndTurn=true", async () => {
-    // Проходим весь цикл: CONFIRM_CARD (применяет move) →
+  it("полный цикл: дубль + move-карта парковки → анимация → BUILDING, canEndTurn=true", async () => {
+    // Проходим весь цикл: CONFIRM_CARD (запускает анимацию) →
     // CONFIRM_MOVE_ANIMATION (RESOLVING_LANDING) → CONFIRM_LANDING (BUILDING).
     const parkingCard = TREASURY_CARDS.find(
       (c) => c.effect.kind === "move" && "target" in c.effect && c.effect.target === 20,
@@ -264,11 +279,20 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
-    // 1) CONFIRM_CARD: применяет move → мгновенный переход на 20,
-    //    фаза BUILDING (без MOVE_ANIMATION/RESOLVING_LANDING/CONFIRM_LANDING).
+    // 1) CONFIRM_CARD: анимация к 20, фаза = MOVE_ANIMATION.
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(false);
     expect(p.position).toBe(20);
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toBe("backward");
+
+    // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // 3) CONFIRM_LANDING → handleResolvingLanding на PARKING →
+    //    justArrivedAtParking=true, фаза = BUILDING.
+    await act({ type: "CONFIRM_LANDING" });
     expect(activeState.phase).toBe("BUILDING");
     expect(activeState.justArrivedAtParking).toBe(true);
 
@@ -306,7 +330,20 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
+    // 1) CONFIRM_CARD → MOVE_ANIMATION (анимация к 20, backward).
     await act({ type: "CONFIRM_CARD" });
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toBe("backward");
+    // justArrivedAtParking ставится уже в applyCardEffectAndAdvance
+    // (флаг блокирует canRollDice во время анимации).
+    expect(activeState.justArrivedAtParking).toBe(true);
+
+    // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // 3) CONFIRM_LANDING → BUILDING + justArrivedAtParking=true.
+    await act({ type: "CONFIRM_LANDING" });
     expect(activeState.justArrivedAtParking).toBe(true);
     expect(activeState.phase).toBe("BUILDING");
 
@@ -529,12 +566,21 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
 
     const p = setupCardReveal(jailCard);
 
+    // Новая логика: фишка АНИМИРУЕТСЯ forward/backward к 10,
+    // затем уже в handleResolvingLanding → sendToJail + JAIL_DECISION.
     await act({ type: "CONFIRM_CARD" });
-
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
-    expect(p.inJail).toBe(true);
     expect(p.position).toBe(10);
+    expect(p.inJail).toBe(false);
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toMatch(/forward|backward/);
+
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    await act({ type: "CONFIRM_LANDING" });
+    expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("JAIL_DECISION");
     expect(activeState.justEnteredJail).toBe(true);
   });

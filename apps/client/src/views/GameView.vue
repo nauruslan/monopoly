@@ -148,7 +148,7 @@ const canRoll = computed(() => {
   return true;
 });
 /**
- * Можно ли сейчас открыть модалку «Строить» (GDD §1.1 — build/sell).
+ * Можно ли сейчас открыть модалку «Строить».
  *
  * Правила Монополии разрешают строительство / снос в любой «своей»
  * Turn-фазе — точно так же, как и торговлю (см. `canTrade` ниже).
@@ -158,7 +158,7 @@ const canRoll = computed(() => {
  * `OPEN_BUILDING_PHASE` маршрутизируется ДО switch по фазе.
  *
  * Условия (идентичны `canTrade`, чтобы кнопки СТРОИТЬ и ТОРГОВЛЯ были
- * активны в ОДНИ И ТЕ ЖЕ моменты — по требованию GDD §1.1):
+ * активны в ОДНИ И ТЕ ЖЕ моменты):
  *  1. Это ход игрока-человека.
  *  2. Игрок не в тюрьме.
  *  3. НЕТ анимации броска/движения.
@@ -178,7 +178,7 @@ const canRoll = computed(() => {
  */
 const canBuild = computed(() => {
   // ВАЖНО: валидация кнопки «Строить» ПОЛНОСТЬЮ наследует логику
-  // кнопки «Торговля» (требование GDD §1.1: кнопки активны в одни
+  // кнопки «Торговля» (кнопки активны в одни
   // и те же моменты). В отличие от старой реализации, мы НЕ
   // требуем, чтобы у игрока уже были клетки для строительства
   // или продажи — модалка может открыться и в начале партии, и
@@ -213,7 +213,7 @@ const canEndTurn = computed(() => {
   return true;
 });
 
-// Торговля доступна в любой момент хода активного игрока (GDD §1.1).
+// Торговля доступна в любой момент хода активного игрока.
 // Запрещаем только во время interrupt-фаз и анимации броска/движения.
 // В тюрьме торговля РАЗРЕШЕНА по правилам Монополии (Hasbro):
 // игрок может управлять своей недвижимостью, пока отбывает срок.
@@ -420,7 +420,7 @@ function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
 }
 
 /**
- * Наведение курсора на клетку (GDD §1.1 — hover-тултип).
+ * Наведение курсора на клетку.
  * Показываем тултип с учётом того, в каком «секторе» (top/bottom/left/right)
  * находится клетка: тултип ВСЕГДА появляется ВНУТРИ игровой доски,
  * чтобы его нижний край для нижнего ряда касался верхней грани
@@ -448,7 +448,7 @@ function onCellLeave() {
  *  3. События мыши (mouse position) — используем как «запасной»
  *     fallback, если DOM-элемент клетки ещё не найден.
  *
- * Логика по секторам (по требованию GDD §1.1):
+ * Логика по секторам:
  *  - bottom (id 0..10): тултип ВЫШЕ клетки (низ тултипа у верхней
  *                      грани клетки, у края board-center снизу).
  *  - top    (id 20..30): тултип НИЖЕ клетки.
@@ -875,54 +875,32 @@ watch(
   },
 );
 
-// Мгновенный телепорт на парковку: когда сервер ТОЛЬКО ЧТО отправил
-// игрока на парковку (id=20) карточкой «Отправляйтесь на парковку»,
-// state.justArrivedAtParking=true, фаза BUILDING, а MOVE_ANIMATION
-// не запускается (см. applyCardEffectAndAdvance на сервере).
-// Синхронизируем displayPositions с реальной player.position (20),
-// чтобы фишка «прыгнула» на парковку без анимации (по правилам —
-// «отдых», а не «путешествие»).
-watch(
-  () => state.value.justArrivedAtParking,
-  (justArrived) => {
-    if (!justArrived) return;
-    const p = currentPlayer.value;
-    if (!p) return;
-    // Очистим активный таймер анимации, если он был.
-    if (animTimers[p.id]) {
-      clearInterval(animTimers[p.id]);
-      delete animTimers[p.id];
-    }
-    displayPositions.value = {
-      ...displayPositions.value,
-      [p.id]: p.position,
-    };
-  },
-);
-
-// Подстраховка: если сервер прислал state с уже justArrivedAtParking=true
-// (например, при reconnect/mount), watcher выше мог не сработать.
-// Следим за изменением currentPlayer.position пока
-// justArrivedAtParking=true — если позиция поменялась (телепорт на 20),
-// мгновенно синхронизируем displayPositions.
-watch(
-  () => [currentPlayer.value?.id, currentPlayer.value?.position] as const,
-  ([, pos], [, oldPos]) => {
-    if (pos === undefined || oldPos === undefined) return;
-    if (pos === oldPos) return;
-    if (!state.value.justArrivedAtParking) return;
-    const p = currentPlayer.value;
-    if (!p) return;
-    if (animTimers[p.id]) {
-      clearInterval(animTimers[p.id]);
-      delete animTimers[p.id];
-    }
-    displayPositions.value = {
-      ...displayPositions.value,
-      [p.id]: pos,
-    };
-  },
-);
+// Анимация на парковку (id=20) и в тюрьму (id=10) для карточек
+//
+// Раньше для карточки «Отправляйтесь на парковку» на сервере
+// стоял «мгновенный телепорт»: applyCardEffectAndAdvance ставил
+// фазу BUILDING, state.moveAnimation = undefined, и
+// justArrivedAtParking=true. Здесь был watcher, который ловил
+// justArrivedAtParking и мгновенно синхронизировал displayPositions
+// с новой позицией игрока (20), отменяя любую активную анимацию.
+// Это был «баг»: фишка телепортировалась без анимации, что было
+// визуально непоследовательно (другие move-карточки, например
+// «Идите на СТАРТ» или «ул. Арбат», АНИМИРОВАЛИСЬ).
+//
+// Теперь (см. applyCardEffectAndAdvance в games.service.ts) фишка
+// на парковку (и в тюрьму по карточке) тоже АНИМИРУЕТСЯ — через
+// стандартный MOVE_ANIMATION flow с direction="backward". После
+// анимации handleResolvingLanding ставит justArrivedAtParking=true
+// и фазу BUILDING, но это уже не «телепорт», а просто «после
+// приземления дать игроку BUILDING-фазу». Фишка к этому моменту
+// уже стоит на клетке 20 (анимация завершилась).
+//
+// Флаг state.justArrivedAtParking остаётся — он нужен для
+// блокировки canRollDice на сервере (см. turn-permissions.ts).
+// Здесь, на клиенте, watcher больше не нужен: анимация
+// отрабатывает через стандартный phase-watcher ниже.
+// УДАЛЕНО: watcher на state.justArrivedAtParking + подстраховка
+// по изменению currentPlayer.position с этим флагом.
 
 /**
  * Следим за появлением/исчезновением игроков: новых — инициализируем

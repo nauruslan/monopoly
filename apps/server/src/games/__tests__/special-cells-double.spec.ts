@@ -348,9 +348,22 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
 
-    // Подтверждаем карточку: sendToJail + JAIL_DECISION.
+    // Подтверждаем карточку: фишка АНИМИРУЕТСЯ backward к 10
+    // (от 30 → 29 → ... → 10), фаза = MOVE_ANIMATION.
     await act({ type: "CONFIRM_CARD" });
     expect(p.position).toBe(10);
+    expect(p.inJail).toBe(false);
+    expect(p.mustRollAgain).toBe(false);
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toBe("backward");
+    expect(activeState.moveAnimation?.steps).toBe(20);
+
+    // CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // CONFIRM_LANDING → sendToJail + JAIL_DECISION.
+    await act({ type: "CONFIRM_LANDING" });
     expect(p.inJail).toBe(true);
     expect(p.mustRollAgain).toBe(false);
     expect(activeState.phase).toBe("JAIL_DECISION");
@@ -382,12 +395,23 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
 
-    // Подтверждаем карточку.
+    // Подтверждаем карточку: фишка АНИМИРУЕТСЯ backward к 10
+    // (от 30 → 29 → ... → 10), фаза = MOVE_ANIMATION.
     await act({ type: "CONFIRM_CARD" });
     expect(p.position).toBe(10);
-    expect(p.inJail).toBe(true);
+    expect(p.inJail).toBe(false);
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toBe("backward");
+
+    // CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // CONFIRM_LANDING → sendToJail + JAIL_DECISION.
+    await act({ type: "CONFIRM_LANDING" });
+    expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("JAIL_DECISION");
     expect(activeState.justEnteredJail).toBe(true);
 
@@ -424,13 +448,26 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
+    // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 10
+    //    (игрок был на 7 < 10, идём по часовой: 7→8→9→10).
+    //    Флаги сбрасываются, фаза = MOVE_ANIMATION.
     await act({ type: "CONFIRM_CARD" });
-
-    // Главная проверка: даже через карточку при дубле
-    // mustRollAgain сбрасывается, фишка на 10, inJail=true.
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
     expect(p.position).toBe(10);
+    expect(p.inJail).toBe(false);
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toBe("forward");
+    expect(activeState.moveAnimation?.steps).toBe(3);
+    expect(activeState.justEnteredJail).toBeFalsy();
+
+    // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // 3) CONFIRM_LANDING → handleResolvingLanding на JAIL →
+    //    sendToJail: inJail=true, justEnteredJail=true, фаза = JAIL_DECISION.
+    await act({ type: "CONFIRM_LANDING" });
     expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("JAIL_DECISION");
     expect(activeState.justEnteredJail).toBe(true);
@@ -461,11 +498,23 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
+    // 1) CONFIRM_CARD: анимация forward к клетке 10
+    //    (игрок был на 2 < 10, по часовой: 2→3→…→10).
     await act({ type: "CONFIRM_CARD" });
-
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
     expect(p.position).toBe(10);
+    expect(p.inJail).toBe(false);
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toBe("forward");
+    expect(activeState.moveAnimation?.steps).toBe(8);
+
+    // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
+    await act({ type: "CONFIRM_MOVE_ANIMATION" });
+    expect(activeState.phase).toBe("RESOLVING_LANDING");
+
+    // 3) CONFIRM_LANDING → sendToJail + JAIL_DECISION.
+    await act({ type: "CONFIRM_LANDING" });
     expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("JAIL_DECISION");
     expect(activeState.justEnteredJail).toBe(true);

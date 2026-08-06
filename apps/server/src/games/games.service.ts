@@ -317,7 +317,7 @@ export class GamesService {
     // 2.5) Торговлю и блокировку запрещено начинать во время interrupt-фаз
     // (аукцион, банкротство, уже идущая сделка) и в анимационных фазах
     // (DICE_ANIMATION, MOVE_ANIMATION), чтобы UI-тайминги оставались
-    // предсказуемыми. GDD §1.1 разрешает торговлю в любой момент хода
+    // предсказуемыми. разрешается торговля в любой момент хода
     // текущего игрока, кроме этих «защитных» фаз.
     if (action.type === "TRADE_OFFER" || action.type === "TRADE_TOGGLE_BLOCK") {
       if (state.trade && action.type === "TRADE_OFFER") {
@@ -517,7 +517,7 @@ export class GamesService {
     );
     // Действия, доступные на ЛЮБОМ шаге хода текущего игрока (кроме
     // interrupt-фаз: аукцион, торг, банкротство, тюрьма, FINISHED, ...):
-    //  - TRADE_OFFER / TRADE_TOGGLE_BLOCK — торговля (GDD §1.1);
+    //  - TRADE_OFFER / TRADE_TOGGLE_BLOCK — торговля;
     //  - MORTGAGE_PROPERTY / UNMORTGAGE_PROPERTY — залог/выкуп участка.
     // Обрабатываем их ДО выбора фазы, чтобы не отказывать игроку
     // в фазе ROLLING, DICE_ANIMATION, MOVE_ANIMATION и т.п. — он
@@ -1157,19 +1157,52 @@ export class GamesService {
     //    бросает ещё раз (правило дублей действует на любой
     //    «нейтральной» клетке, в т.ч. Бесплатная парковка).
     //
-    // Флаг `state.justArrivedAtParking` НЕ ставится при обычном
-    // попадании (через кубики) — он предназначен только для
-    // «телепорта» по карточке «Отправляйтесь на парковку»
-    // (см. applyCardEffectAndAdvance), где право на ещё один
-    // бросок ТЕРЯЕТСЯ по правилам Монополии.
+    // Флаг `state.justArrivedAtParking` ставится ТОЛЬКО при попадании
+    // по карточке «Отправляйтесь на парковку» (см.
+    // applyCardEffectAndAdvance в `move`-ветке). В этом случае
+    // право на ещё один бросок (после дубля) ТЕРЯЕТСЯ по правилам
+    // Монополии — фаза становится BUILDING безусловно (даже если
+    // бы `mustRollAgain` был `true`, он уже сброшен в
+    // applyCardEffectAndAdvance).
     if (cell.type === "PARKING") {
-      if (player.mustRollAgain) {
+      if (state.justArrivedAtParking) {
+        // Карточка «Отправляйтесь на парковку»: «отдых» (аналог
+        // ареста), цепочка дублей обрывается. `mustRollAgain` уже
+        // сброшен в applyCardEffectAndAdvance. Фаза = BUILDING,
+        // можно только завершить ход.
+        state.phase = "BUILDING";
+      } else if (player.mustRollAgain) {
         // Дубль: сохраняем право на повторный бросок.
         state.phase = "ROLLING";
       } else {
         // Без дубля: обычный отдых, можно завершить ход.
         state.phase = "BUILDING";
       }
+      return {};
+    }
+    // JAIL (id=10) — после анимации, инициированной карточкой
+    // «В тюрьму» (move-эффект `target=10` или goto-jail outcome),
+    // выполняем `sendToJail` для централизованной установки
+    // `inJail=true`, `jailTurns=0`, `consecutiveDoubles=0`,
+    // `mustRollAgain=false`, `justEnteredJail=true` + фаза =
+    // JAIL_DECISION.
+    //
+    // Раньше этот шаг делался сразу в `applyCardEffectAndAdvance`
+    // (как «мгновенный телепорт»). Теперь он отложен — сначала
+    // фишка АНИМИРУЕТСЯ backward к клетке 10, и только здесь, в
+    // `handleResolvingLanding`, выполняется фактическая отправка
+    // в тюрьму.
+    //
+    // Маркер `state.pendingJailFromCard` ставится в
+    // `applyCardEffectAndAdvance` для move-target=10 и goto-jail
+    // outcome. Без этого маркера обычный visit на JAIL через кубики
+    // тоже попадал бы сюда (старая регрессия).
+    if (cell.type === "JAIL" && !player.inJail && state.pendingJailFromCard) {
+      this.jail.sendToJail(player);
+      state.justEnteredJail = true;
+      this.log.logJailEntered(state, player, "card");
+      state.pendingJailFromCard = false;
+      state.phase = "JAIL_DECISION";
       return {};
     }
     // JAIL (visit, id=10) — «просто посещение», ничего не делаем.
@@ -1559,63 +1592,146 @@ export class GamesService {
       // карточка бонус НЕ даёт.
       // Переставляем позицию игрока.
       const from = player.position;
-      player.position = outcome.target;
+      const to = outcome.target;
+      player.position = to;
 
-      // ─── Особый случай: «Отправляйтесь на парковку» (id=20) ─────────
+      // ─── Направление анимации для move-карточек ───────────────────
+      // Правила:
+      //  1) «Идите на СТАРТ» (target=0) — ВСЕГДА "forward". Это
+      //     правило игры: фишка останавливается на СТАРТ и получает
+      //     двойной бонус 2× goSalary. Идти НАЗАД через 0 и потом
+      //     «наматывать» круг до 0 запрещено (бессмысленно).
+      //  2) «Отправляйтесь в тюрьму» (target=10) — ВСЕГДА "backward".
+      //     Это тюрьма, никакого goSalary за проход через СТАРТ, и
+      //     визуально фишка «уезжает назад» к клетке 10.
+      //  3) «Отправляйтесь на парковку» (target=20) — ВСЕГДА "backward".
+      //     Аналогично тюрьме: парковка — это «отдых», а не путешествие,
+      //     и фишка не должна проходить через СТАРТ ради 200₽ бонуса.
+      //  4) «Клетка В тюрьму» (target=30) — ВСЕГДА "backward".
+      //     Чтобы фишка не «наматывала» через СТАРТ ради goSalary.
+      //  5) Все остальные move-карточки (например, «ул. Арбат» target=37):
+      //     направление = "backward" если from > target, иначе "forward".
+      //     Тот же принцип: фишка НЕ проходит через СТАРТ и не получает
+      //     goSalary-бонус за wrap.
+      //
+      // Шаги анимации:
+      //  - forward:  (to - from + 40) % 40
+      //  - backward: (from - to + 40) % 40
+      //
+      // goSalary начисляется ТОЛЬКО в forward-ветке, и ТОЛЬКО если
+      // произошел wrap (oldPos + steps >= 40). Но в нашей текущей
+      // логике для move-карточек мы намеренно ИЗБЕГАЕМ wrap через
+      // СТАРТ (выбирая "backward" вместо "forward", если возможно).
+      // Поэтому goSalary за wrap для move-карточек НЕ начисляем —
+      // двойная выплата 2× goSalary происходит только при приземлении
+      // ровно на клетку 0 (в `handleResolvingLanding`, ветка `cell.type
+      // === "GO"`).
+      let direction: "forward" | "backward";
+      let steps: number;
+      if (to === 0) {
+        // Идите на СТАРТ — всегда вперёд (по часовой).
+        direction = "forward";
+        steps = (to - from + 40) % 40;
+      } else if (to === 10) {
+        // В тюрьму (id=10). Правило «не через СТАРТ»:
+        //   - from меньше 10 → ВПЕРЁД (напр., игрок на 3 после 3-го дубля: 3-4-5-6-7-8-9-10);
+        //   - from больше 10 → НАЗАД (напр., игрок на клетке 30 (GOTO_JAIL): 30-29-…-10).
+        // Никогда не наматываем через СТАРТ — wrap-бонус не нужен.
+        if (from < to) {
+          direction = "forward";
+          steps = to - from;
+        } else {
+          direction = "backward";
+          steps = from - to;
+        }
+      } else if (to === 20 || to === 30) {
+        // Парковка (id=20) / GOTO_JAIL (id=30) — всегда назад (против
+        // часовой). Чтобы фишка не наматывала через СТАРТ ради
+        // goSalary-бонуса. ВИЗУАЛЬНАЯ анимация фишки СОХРАНЯЕТСЯ
+        // через тот же MOVE_ANIMATION pipeline.
+        direction = "backward";
+        steps = (from - to + 40) % 40;
+      } else {
+        // Остальные move-карточки: «назад, если не пришлось бы
+        // проходить через СТАРТ». Т.е. если from > target — идём
+        // назад (короче и не проходим через 0); иначе — вперёд.
+        if (from > to) {
+          direction = "backward";
+          steps = from - to;
+        } else {
+          direction = "forward";
+          steps = (to - from + 40) % 40;
+        }
+      }
+
+      // ─── Спецслучай: «Отправляйтесь на парковку» (id=20) ──────────
       // По правилам Монополии парковка — это «отдых»: цепочка
       // «бросок → движение → эффект» обрывается, право на ещё один
-      // бросок (после дубля) ТЕРЯЕТСЯ, а карточка «Отправляйтесь на
-      // парковку» действует КАК арест: в этом ходу игрок может только
-      // завершить ход, бросать кубики ещё раз НЕЛЬЗЯ.
+      // бросок (после дубля) ТЕРЯЕТСЯ. АНИМАЦИЯ фишки СОХРАНЯЕТСЯ
+      // (раньше был мгновенный телепорт — это был баг: фишка
+      // «телепортировалась» без визуального отображения перемещения).
+      // После анимации `handleResolvingLanding` → ветка `cell.type
+      // === "PARKING"` → если `justArrivedAtParking=true`, фаза
+      // становится `BUILDING` (см. override ниже).
       //
-      // Чтобы UI не предлагал лишних действий, ставим:
-      //  - `justArrivedAtParking = true` — блокирует canRollDice
-      //    (см. turn-permissions.ts);
-      //  - фаза = BUILDING (а не MOVE_ANIMATION) — canEndTurn=true,
-      //    кнопка «Завершить ход» активна;
-      //  - moveAnimation НЕ заполняем — фишка телепортируется
-      //    мгновенно (как для justEnteredJail в GOTO_JAIL cell).
-      //
-      // Флаг сбрасывается в `handleStartTurn` при начале СЛЕДУЮЩЕГО хода.
+      // Флаг `justArrivedAtParking` блокирует `canRollDice`
+      // (см. turn-permissions.ts) — в этом ходу игрок может только
+      // завершить ход. Сбрасывается в `handleStartTurn` при начале
+      // СЛЕДУЮЩЕГО хода.
       const PARKING_ID = 20;
-      if (outcome.target === PARKING_ID) {
-        // «выводящая» карточка парковки обрывает
-        // цепочку дубля. Сбрасываем `mustRollAgain`/`consecutiveDoubles`
-        // явно ЗДЕСЬ, потому что общий безусловный сброс мы удалили
-        // выше (он ломал move-relative). Спецлогика парковки в этом
-        // ходу: игрок может только завершить ход.
+      if (to === PARKING_ID) {
+        // «выводящая» карточка парковки обрывает цепочку дублей.
+        // Сбрасываем `mustRollAgain`/`consecutiveDoubles` явно ЗДЕСЬ,
+        // потому что общий безусловный сброс удалён выше (он ломал
+        // move-relative).
         player.mustRollAgain = false;
         player.consecutiveDoubles = 0;
         state.justArrivedAtParking = true;
-        state.moveAnimation = undefined;
-        state.cardContext = undefined;
-        state.phase = "BUILDING";
-        state.lastDice = { dice: [0, 0], isDouble: false };
-        return { card };
       }
 
-      // Шаги для анимации (всегда положительные, по модулю 40).
-      const steps = (outcome.target - from + 40) % 40;
+      // ─── Спецслучай: «В тюрьму» (move target=10) ──────────────────
+      // До этой правки карточка «В тюрьму» ТОЖЕ была телепортом
+      // (через ветку `goto-jail` ниже или прямую `sendToJail`).
+      // Теперь фишка АНИМИРУЕТСЯ backward к клетке 10, и только
+      // ПОСЛЕ анимации (в `handleResolvingLanding` → ветка для
+      // JAIL/target=10) вызывается `sendToJail` + ставится
+      // `justEnteredJail=true` + фаза = JAIL_DECISION.
+      //
+      // Чтобы после анимации корректно сработала отправка в тюрьму,
+      // ставим `player.inJail = true` сразу. `sendToJail` ещё раз
+      // продублирует это в `handleResolvingLanding` (idempotent).
+      const JAIL_ID = 10;
+      if (to === JAIL_ID) {
+        // Сбрасываем mustRollAgain / consecutiveDoubles — тюрьма
+        // обрывает цепочку дублей (как и через клетку 30).
+        player.mustRollAgain = false;
+        player.consecutiveDoubles = 0;
+        // Маркер для handleResolvingLanding: приземление через
+        // карточку, а не обычный JAIL-visit через кубики.
+        state.pendingJailFromCard = true;
+      }
+
       // Заполняем moveAnimation — клиент использует его для анимации фишки.
-      // Направление для `move` (телепорт на конкретную клетку) — всегда
-      // "forward": по правилам Монополии любой телепорт идёт по кратчайшему
-      // пути через GO (если нужно) — это всегда по часовой стрелке.
       state.moveAnimation = {
         playerId: player.id,
         from,
-        to: outcome.target,
+        to,
         steps,
         isDouble: false,
-        direction: outcome.direction ?? "forward",
+        direction,
       };
       // Очищаем cardContext — карта «съедена», эффект move применён.
       // Без этого клиент видел ту же карту в MOVE_ANIMATION и мог
       // повторно открыть модалку.
       state.cardContext = undefined;
       state.phase = "MOVE_ANIMATION";
-      // lastDice с 0 шагами — handleMoveAnimation не сдвинет игрока повторно,
-      // т.к. position уже корректная; moveAnimation уже инициализирован.
-      state.lastDice = { dice: [0, 0], isDouble: false };
+      // lastDice — нужно для расчёта moveStepMs ботом.
+      // Кладём steps как сумму кубиков (аналогично move-relative):
+      // это влияет только на длительность анимации (moveStepMs × N).
+      state.lastDice = {
+        dice: direction === "forward" ? [0, steps] : [steps, 0],
+        isDouble: false,
+      };
       // Передаём карту наверх (для логов и broadcast).
       return { card };
     }
@@ -1688,20 +1804,39 @@ export class GamesService {
     }
 
     if (outcome.kind === "goto-jail") {
-      // Карта «Идёшь в тюрьму». `CardHandlerService.applyEffect`
-      // вернул `goto-jail` без мутаций — мы сами вызываем
-      // `JailHandlerService.sendToJail`, чтобы централизованно
-      // перенести фишку на 10, поставить inJail и сбросить флаги
-      // ВАЖНО: `justEnteredJail=true` означает, что в ЭТОМ ходу
-      // игрок может только «Завершить ход». Модалка тюрьмы с
-      // тремя способами выхода появится в начале СЛЕДУЮЩЕГО хода
-      // (тогда `handleStartTurn` сбросит `justEnteredJail`).
-      this.jail.sendToJail(player);
-      state.justEnteredJail = true;
-      state.phase = "JAIL_DECISION";
+      // Карточка «Отправляйтесь в тюрьму». Анимация фишки к клетке 10
+      // с правилом «не через СТАРТ»:
+      //   - from меньше 10 → forward (напр., 7→10);
+      //   - from больше 10 → backward (напр., 30→10).
+      const from = player.position;
+      const to = 10;
+      let direction: "forward" | "backward";
+      let stepsAbs: number;
+      if (from < to) {
+        direction = "forward";
+        stepsAbs = to - from;
+      } else {
+        direction = "backward";
+        stepsAbs = from - to;
+      }
+      player.position = to;
+      player.mustRollAgain = false;
+      player.consecutiveDoubles = 0;
+      state.pendingJailFromCard = true;
+      state.moveAnimation = {
+        playerId: player.id,
+        from,
+        to,
+        steps: stepsAbs,
+        isDouble: false,
+        direction,
+      };
       state.cardContext = undefined;
-      // Журнал: попадание в тюрьму через карточку «Отправляйтесь в тюрьму».
-      this.log.logJailEntered(state, player, "card");
+      state.phase = "MOVE_ANIMATION";
+      state.lastDice = {
+        dice: direction === "forward" ? [0, stepsAbs] : [stepsAbs, 0],
+        isDouble: false,
+      };
       return { card };
     }
 
@@ -1986,7 +2121,7 @@ export class GamesService {
     // В тюрьме строительство/залог/выкуп РАЗРЕШЕНЫ (правила Hasbro):
     // заключённый волен управлять своей недвижимостью.
     // `mustRollAgain` НЕ блокирует открытие строительной модалки —
-    // это согласовано с `canTrade` (GDD §1.1: «в любой момент хода»).
+    // это согласовано с `canTrade` («в любой момент хода»).
     // Игрок может открыть модалку, посмотреть варианты и, если ничего
     // не хочет делать, просто закрыть её и бросить кубики.
 
@@ -2065,7 +2200,7 @@ export class GamesService {
         //  - BUILDING — после покупки/события (классический случай).
         //  - PAY_RENT, TAX_PAYMENT и т.п. — крайне редкий случай
         //    (если игрок нажал «Строить» прямо во время фазы оплаты,
-        //    что допустимо по GDD §1.1: «в любой момент хода»).
+        //    что допустимо «в любой момент хода»).
         const restoreTo = state.preBuildingPhase ?? "BUILDING";
         state.phase = restoreTo;
         // Сбрасываем сохранённую фазу, чтобы случайно не «прилипла»

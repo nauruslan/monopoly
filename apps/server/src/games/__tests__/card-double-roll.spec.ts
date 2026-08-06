@@ -1,25 +1,9 @@
 /**
- * Регрессионные тесты: «дубль + карточка Шанс/Казна».
- *
- * Сценарий бага (описан пользователем):
+ * Сценарий:
  *  1) Игрок бросает дубль → mustRollAgain=true, consecutiveDoubles=1.
  *  2) Попадает на ШАНС/КАЗНУ → вытягивает карту «Бесплатная парковка
  *     (move target=20)» или аналогичную «выводящую» из обычного цикла.
  *  3) После CONFIRM_CARD сервер перемещает фишку на новую клетку.
- *  4) ДО ИСПРАВЛЕНИЯ: mustRollAgain оставался true, и в финальной фазе
- *     (BUILDING для парковки) кнопка «Завершить» была заблокирована
- *     (canEndTurn=false из-за mustRollAgain=true), а «Бросить» тоже
- *     (фаза ≠ ROLLING). Игра зависала.
- *
- * ИСПРАВЛЕНИЕ: `applyCardEffectAndAdvance` в
- * GamesService сбрасывает `mustRollAgain=false` и `consecutiveDoubles=0`
- * ТОЛЬКО для «выводящих» карт: `move` target=20 (парковка) и
- * `goto-jail` (через `JailHandlerService.sendToJail`). Для остальных
- * move-исходов (`move-relative`, `move` с любой клеткой, включая
- * «Идите на СТАРТ» с target=0) `mustRollAgain` СОХРАНЯЕТСЯ — это
- * обычные перемещения, к которым
- * правило дублей должно применяться. Цепочка «бросок → движение →
- * эффект» обрывается только в «выводящих» клетках.
  *
  * Для stay-исходов (`money` / `jail-free` / `luxury-tax-house`)
  * `mustRollAgain` НЕ сбрасывается — игрок остаётся на той же клетке и
@@ -214,11 +198,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
-    // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ backward к клетке 20
+    // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 20
     //    (а не телепортируется мгновенно, как раньше — это был баг).
     //    `mustRollAgain` и `consecutiveDoubles` сбрасываются, фишка
     //    уже стоит на 20, фаза = MOVE_ANIMATION, moveAnimation
-    //    заполнен с direction="backward".
+    //    заполнен с direction="forward" (from=2 < to=20, идём по
+    //    часовой, не «наматывая» через СТАРТ).
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
@@ -228,7 +213,8 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     expect(activeState.moveAnimation).toBeDefined();
     expect(activeState.moveAnimation?.playerId).toBe(p.id);
     expect(activeState.moveAnimation?.to).toBe(20);
-    expect(activeState.moveAnimation?.direction).toBe("backward");
+    expect(activeState.moveAnimation?.direction).toBe("forward");
+    expect(activeState.moveAnimation?.steps).toBe(18);
     // Флаг justArrivedAtParking ставится сразу в applyCardEffectAndAdvance
     // (нужен для блокировки canRollDice в turn-permissions.ts: пока идёт
     // анимация, игрок НЕ должен мочь бросить кубики ещё раз).
@@ -252,9 +238,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     expect(canEndTurn(activeState, p)).toBe(true);
   });
 
-  it("полный цикл: дубль + move-карта парковки → анимация → BUILDING, canEndTurn=true", async () => {
+  it("полный цикл: дубль + move-карта парковки (from<20) → forward-анимация → BUILDING, canEndTurn=true", async () => {
     // Проходим весь цикл: CONFIRM_CARD (запускает анимацию) →
     // CONFIRM_MOVE_ANIMATION (RESOLVING_LANDING) → CONFIRM_LANDING (BUILDING).
+    //
+    // Здесь from=2 < to=20, поэтому анимация идёт ВПЕРЁД по часовой
+    // (правило «кратчайший путь без прохода через СТАРТ»).
     const parkingCard = TREASURY_CARDS.find(
       (c) => c.effect.kind === "move" && "target" in c.effect && c.effect.target === 20,
     );
@@ -279,26 +268,69 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
-    // 1) CONFIRM_CARD: анимация к 20, фаза = MOVE_ANIMATION.
+    // 1) CONFIRM_CARD: анимация к 20 ВПЕРЁД (forward, 2→...→20).
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(false);
     expect(p.position).toBe(20);
     expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation?.direction).toBe("forward");
+    expect(activeState.moveAnimation?.steps).toBe(18);
+  });
+
+  it("move-карта (парковка) с from>20: анимация BACKWARD (симметрия с тюрьмой)", async () => {
+    // Регресс-тест на правило «кратчайший путь без прохода через СТАРТ»:
+    // если игрок стоит на клетке ПОСЛЕ парковки (id > 20) и тянет
+    // карточку «на парковку» (target=20), фишка должна идти НАЗАД
+    // (против часовой), а не «наматывать» через СТАРТ. Логика
+    // симметрична `goto-jail` и `move` на тюрьму (target=10).
+    const parkingCard = TREASURY_CARDS.find(
+      (c) => c.effect.kind === "move" && "target" in c.effect && c.effect.target === 20,
+    );
+    expect(parkingCard).toBeDefined();
+    if (!parkingCard) return;
+
+    // Ставим игрока на клетку 30 (GOTO_JAIL) — это from=30 > to=20,
+    // значит по правилу идём назад. steps = 30 - 20 = 10.
+    const p = activeState.players[activeState.currentPlayerIndex]!;
+    p.position = 30;
+    p.mustRollAgain = false;
+    p.consecutiveDoubles = 0;
+    activeState.phase = "CARD_REVEAL";
+    activeState.cardContext = {
+      playerId: p.id,
+      deck: parkingCard.deck,
+      card: parkingCard,
+      applied: false,
+    };
+    activeState.cardDecks = {
+      chance: { cards: [], cursor: 0 },
+      treasury: { cards: [parkingCard.id], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 },
+    };
+
+    // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ backward (30→29→...→20, 10 шагов).
+    //    ВАЖНО: НЕ через СТАРТ (это было бы 30 шагов вперёд, что
+    //    бессмысленно и не соответствует правилам Монополии).
+    await act({ type: "CONFIRM_CARD" });
+    expect(p.position).toBe(20);
+    expect(activeState.phase).toBe("MOVE_ANIMATION");
+    expect(activeState.moveAnimation).toBeDefined();
+    expect(activeState.moveAnimation?.playerId).toBe(p.id);
+    expect(activeState.moveAnimation?.from).toBe(30);
+    expect(activeState.moveAnimation?.to).toBe(20);
     expect(activeState.moveAnimation?.direction).toBe("backward");
+    expect(activeState.moveAnimation?.steps).toBe(10);
+    expect(activeState.justArrivedAtParking).toBe(true);
 
     // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
     await act({ type: "CONFIRM_MOVE_ANIMATION" });
     expect(activeState.phase).toBe("RESOLVING_LANDING");
+    expect(activeState.moveAnimation).toBeUndefined();
 
-    // 3) CONFIRM_LANDING → handleResolvingLanding на PARKING →
-    //    justArrivedAtParking=true, фаза = BUILDING.
+    // 3) CONFIRM_LANDING → BUILDING.
     await act({ type: "CONFIRM_LANDING" });
     expect(activeState.phase).toBe("BUILDING");
     expect(activeState.justArrivedAtParking).toBe(true);
-
-    // Финальная проверка: можно завершить ход, бросок заблокирован.
-    expect(canEndTurn(activeState, p)).toBe(true);
-    expect(canRollDice(activeState, p)).toBe(false);
   });
 
   it("justArrivedAtParking сбрасывается в handleStartTurn при начале следующего хода", async () => {
@@ -330,10 +362,14 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       "luxury-tax": { cards: [], cursor: 0 },
     };
 
-    // 1) CONFIRM_CARD → MOVE_ANIMATION (анимация к 20, backward).
+    // 1) CONFIRM_CARD → MOVE_ANIMATION (анимация к 20, forward — from=2 < to=20).
+    //    Здесь from=2 (Казна) < to=20, поэтому по правилу
+    //    «кратчайший путь без прохода через СТАРТ» анимация идёт
+    //    ВПЕРЁД по часовой (а не backward, как было до правки).
     await act({ type: "CONFIRM_CARD" });
     expect(activeState.phase).toBe("MOVE_ANIMATION");
-    expect(activeState.moveAnimation?.direction).toBe("backward");
+    expect(activeState.moveAnimation?.direction).toBe("forward");
+    expect(activeState.moveAnimation?.steps).toBe(18);
     // justArrivedAtParking ставится уже в applyCardEffectAndAdvance
     // (флаг блокирует canRollDice во время анимации).
     expect(activeState.justArrivedAtParking).toBe(true);

@@ -106,17 +106,21 @@ export const useGameStore = defineStore("game", () => {
       if (newState.phase !== "CARD_REVEAL" && newState.phase !== "CARD_EFFECT") {
         cardPendingConfirm.value = false;
       }
-      // UX-фаза BUILDING_PHASE: автооткрытие модалки «Строить» ТОЛЬКО
-      // для текущего игрока-человека, чей сейчас ход. Раньше модалка
-      // открывалась у ВСЕХ подключённых клиентов (людей и ботов) при
-      // чужой фазе — это сбивало с толку, т.к. UI предлагал строить
-      // чужому игроку. Теперь проверяем `state.currentPlayerIndex`.
+      // UX-фаза BUILDING_PHASE / JAIL_DECISION: автооткрытие модалок
+      // ТОЛЬКО для текущего игрока-человека, чей сейчас ход. Раньше
+      // модалки открывались у ВСЕХ подключённых клиентов (людей и
+      // ботов) при чужой фазе — это сбивало с толку, т.к. UI
+      // предлагал строить/выходить из тюрьмы чужому игроку. Теперь
+      // проверяем `state.currentPlayerIndex`.
       // Делаем через lazy import, чтобы не было циклической зависимости.
       const currentPlayer = newState.players[newState.currentPlayerIndex];
       // Берём свой ID из trade-store (он синхронизируется в GameView
       // через setMyPlayerId) — это самый надёжный источник «кто я».
       const myId = useTradeStore().myId;
       const isMyTurn = !!myId && !!currentPlayer && currentPlayer.id === myId;
+
+      // --- BUILDING_PHASE ---
+      // Автооткрытие модалки «Строить» при входе в фазу.
       if (newState.phase === "BUILDING_PHASE" && previousPhase !== "BUILDING_PHASE" && isMyTurn) {
         import("./build").then((m) => {
           const build = m.useBuildStore();
@@ -129,6 +133,63 @@ export const useGameStore = defineStore("game", () => {
         import("./build").then((m) => {
           const build = m.useBuildStore();
           if (build.isOpen) build.close();
+        });
+      }
+
+      // --- JAIL_DECISION ---
+      // Автооткрытие модалки «Выход из тюрьмы».
+      //
+      // BUGFIX 2026-08 #2: раньше условие срабатывало только при
+      // ПЕРЕХОДЕ в JAIL_DECISION (`previousPhase !== "JAIL_DECISION"`).
+      // Это не покрывало кейс «предыдущий игрок-бот тоже был в
+      // тюрьме» — тогда сервер транслирует game:state с фазы
+      // JAIL_DECISION → JAIL_DECISION (фаза не меняется), и моё
+      // «открыть модалку» молча скипалось. На старте моего хода UI
+      // оставался с кнопкой «Завершить» (фаза вроде бы верная, но
+      // модалка не видна), и `canRoll` оставался `false` без объяснения.
+      // Теперь проверка открытия запускается при КАЖДОМ `game:state`
+      // с фазой JAIL_DECISION; idempotent-страж `!jail.isOpen` и
+      // `useJailStore.canActInJail` гарантируют, что повторно мы не
+      // дёргаем. ВАЖНО: если игрок just-entered (`canActInJail=false`),
+      // модалка НЕ откроется (правила Монополии — только END_TURN).
+      if (newState.phase === "JAIL_DECISION" && isMyTurn) {
+        import("./jail").then((m) => {
+          const jail = m.useJailStore();
+          if (jail.canActInJail && !jail.isOpen) jail.open();
+        });
+      }
+      // Закрываем модалку тюрьмы при выходе из фазы, если она ещё
+      // открыта — на случай TRY_DOUBLE (DICE_ANIMATION) или выхода
+      // по карте/штрафу (ROLLING), а также при смене игрока.
+      if (previousPhase === "JAIL_DECISION" && newState.phase !== "JAIL_DECISION") {
+        import("./jail").then((m) => {
+          const jail = m.useJailStore();
+          if (jail.isOpen) jail.close();
+        });
+      }
+      // Защита от «застрявшего» isOpen:
+      // 1) если ФАЗА всё ещё JAIL_DECISION, но мой ход закончился
+      //    (например, `state.currentPlayerIndex` уже указывает на
+      //    другого игрока), закрываем модалку;
+      // 2) даже если это мой ход, но я уже НЕ в тюрьме (после
+      //    `tryDoubleOrPay` → escape, сервер перевёл фазу в
+      //    DICE_ANIMATION, и в промежуточном стейте модалка ещё
+      //    была открыта) — закрываем.
+      if (newState.phase === "JAIL_DECISION" && !isMyTurn) {
+        import("./jail").then((m) => {
+          const jail = m.useJailStore();
+          if (jail.isOpen) jail.close();
+        });
+      }
+      if (
+        newState.phase === "JAIL_DECISION" &&
+        isMyTurn &&
+        currentPlayer &&
+        !currentPlayer.inJail
+      ) {
+        import("./jail").then((m) => {
+          const jail = m.useJailStore();
+          if (jail.isOpen) jail.close();
         });
       }
       // восстановление значений кубиков при reconnect/reload.

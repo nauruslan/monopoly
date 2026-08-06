@@ -627,6 +627,29 @@ export class GamesService {
    * START_TURN — инициализация контекста хода (мгновенная фаза).
    * Сразу переходит в ROLLING (или в JAIL_DECISION, если игрок в тюрьме).
    */
+  /**
+   * Единая точка сброса «стартовых» флагов хода. Используется и в
+   * async-`handleStartTurn`, и в sync-зеркале `beginNextPlayerTurn` —
+   * раньше эти две функции независимо дублировали одинаковый набор
+   * сбросов, что приводило к риску рассинхрона (например, логика
+   * `justEnteredJail` могла «утечь» из одного хода в другой).
+   *
+   * @param player  игрок, чьи личные флаги надо сбросить (mustRollAgain,
+   *                consecutiveDoubles). Глобальные state-флаги
+   *                (`justEnteredJail`, `justArrivedAtParking`,
+   *                `preBuildingPhase`, `jailRollOutcome`,
+   *                `tradeInitiationLog`) тоже сбрасываются здесь.
+   */
+  private resetTurnFlags(state: GameState, player: Player): void {
+    player.mustRollAgain = false;
+    player.consecutiveDoubles = 0;
+    state.justEnteredJail = false;
+    state.justArrivedAtParking = false;
+    state.preBuildingPhase = undefined;
+    state.jailRollOutcome = undefined;
+    state.tradeInitiationLog = [];
+  }
+
   private async handleStartTurn(
     state: GameState,
     player: Player,
@@ -637,26 +660,10 @@ export class GamesService {
     // applyAction отправил его через broadcast и положил в state.events.
     const startEv = this.log.logTurnStart(state, player, state.round);
 
-    player.mustRollAgain = false;
-    player.consecutiveDoubles = 0;
-    // Сбрасываем флаги свежего попадания в специальные зоны
-    // (в текущем ходу их действие уже учтено; в следующем ходу
-    // игрок снова может бросать/действовать в обычном режиме).
-    state.justEnteredJail = false;
-    state.justArrivedAtParking = false;
-    // Сбрасываем "запомненную" фазу до открытия модалки строительства,
-    // чтобы она не протекла в следующий ход (turn boundary). В нормальном
-    // потоке поле очищается в CONFIRM_BUILDING_PHASE, но если ход
-    // оборвался раньше (дисконнект, реконнект, перезагрузка состояния),
-    // мы не хотим восстанавливать фазу вчерашнего хода.
-    state.preBuildingPhase = undefined;
-    // Сбрасываем outcome последнего TRY_DOUBLE — если он каким-то
-    // образом остался заполненным (например, на реконнекте), это
-    // гарантирует, что в новом ходу мы не «провалимся» в ветку
-    // DICE_ANIMATION как будто бы это была попытка выхода из тюрьмы.
-    state.jailRollOutcome = undefined;
-    // Новый ход — сбрасываем журнал попыток инициации торговли.
-    state.tradeInitiationLog = [];
+    // Сброс обязательных флагов начала хода делегирован общему хелперу —
+    // тот же набор полей сбрасывается в sync-зеркале `beginNextPlayerTurn`,
+    // чтобы обе ветки инициализации хода были структурно идентичны.
+    this.resetTurnFlags(state, player);
     // ВАЖНО: если у игрока отрицательный баланс к началу хода (например,
     // остался с прошлого хода, или деньги списали недавно) — принудительно
     // запускаем процедуру банкротства. Игрок НЕ может бросать кубики
@@ -2300,22 +2307,40 @@ export class GamesService {
    * После TRY_DOUBLE — если дубль, фишка сразу движется (MOVE_ANIMATION);
    * если промах — advanceToNextPlayer.
    */
+  /**
+   * Вспомогательный «pass-the-turn» сценарий для handleJailDecision:
+   * игрок УЖЕ не в тюрьме — значит текущий ход больше не JAIL-сценарий,
+   * передаём эстафету следующему через мгновенный START_TURN.
+   * Используется в обоих нижестоящих ветках (justEnteredJail / !inJail),
+   * чтобы не дублировать код (раньше здесь было два одинаковых блока).
+   */
+  private async advanceToNextFromJailDecision(
+    state: GameState,
+    trigger: GameAction,
+  ): Promise<{ dice?: [number, number]; card?: unknown; event?: GameEvent }> {
+    this.advanceToNextPlayer(state);
+    const next = state.players[state.currentPlayerIndex];
+    if (next) {
+      state.phase = "ROLLING";
+      return this.handleStartTurn(state, next, trigger);
+    }
+    state.phase = "ROLLING";
+    return {};
+  }
+
   private async handleJailDecision(
     state: GameState,
     player: Player,
     action: GameAction,
   ): Promise<{ dice?: [number, number]; card?: unknown; event?: GameEvent }> {
     if (!player.inJail) {
-      // Уже вышли — передаём ход через мгновенный START_TURN.
-      this.advanceToNextPlayer(state);
-      const next = state.players[state.currentPlayerIndex];
-      if (next) {
-        state.phase = "ROLLING";
-        await this.handleStartTurn(state, next, action);
-      } else {
-        state.phase = "ROLLING";
-      }
-      return {};
+      // Уже вышли (применили карту / заплатили штраф / вышли по дублю
+      // — но в случае дубля `jailRollOutcome` уже задан и обрабатывается
+      // в handleDiceAnimation, сюда мы попадём лишь если игрок вышел
+      // по другому механизму). Передаём ход дальше.
+      // Покрывает прежние ДУБЛИРУЮЩИЕСЯ блоки на !inJail:
+      // был один на самом верху и ещё один ниже по коду.
+      return this.advanceToNextFromJailDecision(state, action);
     }
 
     // Только что попал в тюрьму (в ЭТОМ ходу): по правилам Монополии
@@ -2324,38 +2349,13 @@ export class GamesService {
     // СЛЕДУЮЩЕГО хода, когда handleStartTurn сбросит justEnteredJail.
     if (state.justEnteredJail) {
       if (action.type === "END_TURN" || action.type === "CONFIRM_END_TURN") {
-        this.advanceToNextPlayer(state);
         // Следующий ход: мгновенный START_TURN (handleStartTurn сбросит
         // justEnteredJail и переведёт нового игрока в ROLLING/JAIL_DECISION).
-        const next = state.players[state.currentPlayerIndex];
-        if (next) {
-          state.phase = "ROLLING";
-          await this.handleStartTurn(state, next, action);
-        } else {
-          state.phase = "ROLLING";
-        }
-        return {};
+        return this.advanceToNextFromJailDecision(state, action);
       }
       throw new ForbiddenException(
         `Только что попал в тюрьму — в этом ходу можно только завершить ход, а не ${action.type}`,
       );
-    }
-
-    if (!player.inJail) {
-      // Уже вышли из тюрьмы (например, применили карту «выход из тюрьмы»
-      // по предыдущему ходу, или `tryDoubleOrPay` только что сделал
-      // `escape`/`pay` — но в этом случае `jailRollOutcome` уже задан
-      // и ниже сработает ветка `TRY_DOUBLE`). Передаём ход через
-      // мгновенный START_TURN.
-      this.advanceToNextPlayer(state);
-      const next = state.players[state.currentPlayerIndex];
-      if (next) {
-        state.phase = "ROLLING";
-        await this.handleStartTurn(state, next, action);
-      } else {
-        state.phase = "ROLLING";
-      }
-      return {};
     }
 
     if (action.type === "PAY_JAIL_FINE") {
@@ -2558,14 +2558,11 @@ export class GamesService {
     }
     // Лог «Начало хода» — как в handleStartTurn.
     this.log.logTurnStart(state, next, state.round);
-    // Сброс обязательных флагов начала хода.
-    next.mustRollAgain = false;
-    next.consecutiveDoubles = 0;
-    state.justEnteredJail = false;
-    state.justArrivedAtParking = false;
-    state.preBuildingPhase = undefined;
-    state.jailRollOutcome = undefined;
-    state.tradeInitiationLog = [];
+    // Используем тот же хелпер, что и async-`handleStartTurn`,
+    // чтобы обе ветки синхронно сбрасывали ИДЕНТИЧНЫЙ набор полей.
+    // Раньше набор полей сброса был продублирован в двух местах, и
+    // при добавлении нового поля легко было забыть одну из веток.
+    this.resetTurnFlags(state, next);
     // ВАЖНО: полная очистка контекста, оставшегося от ПРЕДЫДУЩЕГО хода.
     // Без этого клиент может видеть «застрявшую» модалку (например,
     // BANKRUPTCY от старого игрока) и блокировать свои кнопки

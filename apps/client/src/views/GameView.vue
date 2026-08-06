@@ -26,6 +26,7 @@ import { useTradeStore } from "../stores/trade";
 import { useMortgageStore } from "../stores/mortgage";
 import { useBuildStore } from "../stores/build";
 import { useAuctionStore } from "../stores/auction";
+import { useJailStore } from "../stores/jail";
 import { useSettingsStore } from "../stores/settings";
 import { useSocket, disconnectSocket } from "../composables/useSocket";
 import type { Cell, GameAction, TradeOffer, Phase, BoardSide } from "@monopoly/shared";
@@ -287,7 +288,12 @@ const rentAmount = ref(0);
 const rentOwnerName = ref("");
 const rentCellName = ref("");
 
-const showJailModal = ref(false);
+// Модалка тюрьмы теперь живёт в `useJailStore` (см. stores/jail.ts).
+// Единый источник правды для открытия/закрытия, чтобы не было
+// гонок с `state.justEnteredJail` при нескольких игроках в тюрьме.
+// `storeToRefs` даёт реактивные ref'ы на свойства стора.
+const jailStore = useJailStore();
+const { isOpen: showJailModal } = storeToRefs(jailStore);
 const showAuctionModal = ref(false);
 const showTradeModal = ref(false);
 
@@ -585,27 +591,45 @@ watch(
   },
 );
 
-// Реакция на смену фазы
+/**
+ * Реакция на смену фазы.
+ *
+ * Логика для JAIL_DECISION:
+ *  - Это режим принятия решения о выходе из тюрьмы (PAY_FINE / USE_CARD / TRY_DOUBLE).
+ *  - Показывается ТОЛЬКО когда:
+ *      • текущий игрок — это я (`isMyTurn`),
+ *      • я реально сижу в тюрьме (`targetPlayer.inJail === true`),
+ *      • я НЕ только что туда попал в текущем ходу (just-entered-режим).
+ *  - «Только что попал» определяем строго по СВОЕМУ игроку
+ *    (`targetPlayer.id === myPlayerId` и `position === 10`),
+ *    а не по глобальному `state.justEnteredJail`, который может быть `true`
+ *    из-за гонки с предыдущим игроком, севшим в тюрьму ранее в раунде.
+ */
+function syncJailModal(newPhase: Phase): void {
+  if (newPhase !== "JAIL_DECISION") {
+    showJailModal.value = false;
+    return;
+  }
+  const targetPlayer = state.value.players[state.value.currentPlayerIndex];
+  if (!targetPlayer || !isMyTurn.value || !targetPlayer.inJail) {
+    showJailModal.value = false;
+    return;
+  }
+  const isJustEnteredForMe =
+    !!state.value.justEnteredJail &&
+    targetPlayer.id === myPlayerId.value &&
+    targetPlayer.position === 10;
+  showJailModal.value = !isJustEnteredForMe;
+}
+
 watch(
   () => state.value.phase,
   (newPhase: Phase) => {
     // JAIL_DECISION отменяется как для escape/pay (игрок вышел и движется),
     // так и для stay (фаза переходит в DICE_ANIMATION -> BUILDING).
-    // Поэтому в JAIL_DECISION в нашем кейсе мы НЕ закрываем модалку тут
-    // (для justEnteredJail=true это уже не было открыто).
-    // Для попытки выхода дубля (TRY_DOUBLE) модалку закрываем:
-    // сервер переключит фазу в DICE_ANIMATION, и кубики покажутся.
-    if (newPhase !== "JAIL_DECISION") {
-      showJailModal.value = false;
-    } else if (newPhase === "JAIL_DECISION" && state.value.justEnteredJail) {
-      // Только что попал в тюрьму — модалку с тремя способами выхода
-      // НЕ показываем, но она и не должна быть открыта (вход в JAIL_DECISION
-      // для только что попавшего игрока — это just-entered-режим).
-      showJailModal.value = false;
-    } else if (newPhase === "JAIL_DECISION" && !state.value.justEnteredJail) {
-      // Обычный вход в JAIL_DECISION (новый ход) — открываем модалку.
-      showJailModal.value = isMyTurn.value;
-    }
+    // Поэтому в JAIL_DECISION в нашем кейсе модалку открываем только если
+    // сейчас наш ход и мы действительно в тюрьме (см. `syncJailModal`).
+    syncJailModal(newPhase);
     showBuyModal.value = newPhase === "BUY_DECISION" && isMyTurn.value;
     // Аукцион показываем, если идёт аукцион (любая из 3 фаз) или
     // state.auction ещё не очищен (сразу после SOLD/UNSOLD — короткий
@@ -782,20 +806,34 @@ watch(
   },
 );
 
-// Обработчики модалок
+// Обработчики модалки тюрьмы. Делегируют в `useJailStore`,
+// который, в свою очередь, вызывает `game.sendAction`.
+// Закрывать модалку здесь вручную НЕ нужно: сервер пришлёт
+// новый `game:state` с другой фазой, и game.ts / useJailStore
+// сами закроют её (см. JAIL_DECISION-close-блок в stores/game.ts).
+// Оставляем явный `close()` для UX-мгновенного скрытия до ответа
+// сервера (без него кнопки выглядят «висящими» 100-300 мс).
 function onPayJailFine() {
-  showJailModal.value = false;
-  dispatchAction({ type: "PAY_JAIL_FINE" });
+  jailStore.close();
+  jailStore.payFine();
 }
 
 function onUseJailCard() {
-  showJailModal.value = false;
-  dispatchAction({ type: "USE_JAIL_CARD" });
+  jailStore.close();
+  jailStore.useCard();
 }
 
 function onTryDouble() {
-  showJailModal.value = false;
-  dispatchAction({ type: "TRY_DOUBLE" });
+  jailStore.close();
+  jailStore.tryDouble();
+}
+
+/**
+ * Закрытие модалки тюрьмы без отправки действия (кнопка X / backdrop).
+ * Делегируем в стор, чтобы был один источник истины.
+ */
+function onCloseJail() {
+  jailStore.close();
 }
 
 function onTradeAccept() {
@@ -1195,7 +1233,7 @@ function logout() {
         @pay="onPayJailFine"
         @use-card="onUseJailCard"
         @try-double="onTryDouble"
-        @close="showJailModal = false"
+        @close="onCloseJail"
       />
 
       <TradeModal />

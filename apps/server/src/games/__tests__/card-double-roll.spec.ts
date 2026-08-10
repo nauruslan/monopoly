@@ -40,10 +40,10 @@ function makeFreshState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false,
+      isBankrupt: false
     },
     {
       id: "p1",
@@ -55,10 +55,10 @@ function makeFreshState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false,
+      isBankrupt: false
     },
   ];
   return {
@@ -73,7 +73,7 @@ function makeFreshState(): GameState {
     settings: { ...DEFAULT_SETTINGS },
     seed: "test-seed",
     createdAt: new Date().toISOString(),
-    lastActivityAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString()
   };
 }
 
@@ -98,11 +98,11 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       create: jest.fn(async (state: GameState) => ({
         id: state.id,
         rngSeed: state.seed,
-        stateSnapshot: state,
+        stateSnapshot: state
       })),
       updateSnapshot: jest.fn(async () => undefined),
       replaceSnapshot: jest.fn(async () => true),
-      findById: jest.fn(async () => null),
+      findById: jest.fn(async () => null)
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -121,7 +121,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
         TradeService,
         LogService,
         { provide: GameRepository, useValue: repoMock },
-      ],
+      ]
     }).compile();
 
     service = moduleRef.get(GamesService);
@@ -160,11 +160,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       card: (CHANCE_CARDS.find((c) => c.id === card.id) ??
         TREASURY_CARDS.find((c) => c.id === card.id))!,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [card.id], cursor: 0 },
       treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
     return p;
   }
@@ -191,11 +192,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [], cursor: 0 },
       treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 20
@@ -261,11 +263,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [], cursor: 0 },
       treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD: анимация к 20 ВПЕРЁД (forward, 2→...→20).
@@ -301,11 +304,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [], cursor: 0 },
       treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ backward (30→29→...→20, 10 шагов).
@@ -355,11 +359,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [], cursor: 0 },
       treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD → MOVE_ANIMATION (анимация к 20, forward — from=2 < to=20).
@@ -478,11 +483,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: backCard.deck,
       card: backCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [backCard.id], cursor: 0 },
       treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD — move-relative не сбрасывает mustRollAgain,
@@ -531,11 +537,12 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: goCard.deck,
       card: goCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [goCard.id], cursor: 0 },
       treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
     const moneyBefore = p.money;
     const goSalary = activeState.settings.goSalary;

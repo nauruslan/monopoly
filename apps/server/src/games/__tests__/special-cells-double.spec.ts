@@ -1,5 +1,5 @@
 /**
- * Регрессионные тесты для специальных клеток (id=0, 10, 20, 30) при
+ * тесты для специальных клеток (id=0, 10, 20, 30) при
  * попадании на них через дубль.
  *
  * Контрактные требования (по правилам Монополии):
@@ -73,10 +73,10 @@ function makeFreshState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false,
+      isBankrupt: false
     },
     {
       id: "p1",
@@ -88,10 +88,10 @@ function makeFreshState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false,
+      isBankrupt: false
     },
   ];
   return {
@@ -106,7 +106,7 @@ function makeFreshState(): GameState {
     settings: { ...DEFAULT_SETTINGS },
     seed: "test-seed",
     createdAt: new Date().toISOString(),
-    lastActivityAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString()
   };
 }
 
@@ -131,11 +131,11 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       create: jest.fn(async (state: GameState) => ({
         id: state.id,
         rngSeed: state.seed,
-        stateSnapshot: state,
+        stateSnapshot: state
       })),
       updateSnapshot: jest.fn(async () => undefined),
       replaceSnapshot: jest.fn(async () => true),
-      findById: jest.fn(async () => null),
+      findById: jest.fn(async () => null)
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -154,7 +154,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
         TradeService,
         LogService,
         { provide: GameRepository, useValue: repoMock },
-      ],
+      ]
     }).compile();
 
     service = moduleRef.get(GamesService);
@@ -441,11 +441,12 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       deck: "chance",
       card: jailCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [jailCard.id], cursor: 0 },
       treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 10
@@ -491,11 +492,12 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       deck: "treasury",
       card: jailCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [], cursor: 0 },
       treasury: { cards: [jailCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD: анимация forward к клетке 10

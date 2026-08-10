@@ -374,6 +374,17 @@ export interface GameState {
      * `true`  — фаза CARD_EFFECT (модалка закрыта, эффект уже применён на сервере).
      */
     applied: boolean;
+    /**
+     * ID карты в DeckModule (`state.deckCards[].cardId`). Нужен серверу,
+     * чтобы после применения эффекта вернуть не-holdable карту в НИЗ
+     * исходной колоды (правило «discard to bottom» Монополии). Для
+     * holdable карт — она переходит в IN_HAND (см. `holdableCards`)
+     * и в колоду не возвращается.
+     *
+     * `null` для legacy-снапшотов, в которых cardContext был создан
+     * до введения DeckModule (такие карты НЕ возвращаются — fallback).
+     */
+    deckCardId: string | null;
   };
   /**
    * Контекст ренты (фаза `PAY_RENT`).
@@ -510,8 +521,8 @@ export interface GameState {
  * отличие от старой схемы, где «-X» означало «получить X». Теперь
  * «получить» = «противоположная сторона отдаёт».
  *
- * Карточки выхода из тюрьмы передаются как количество (`jailCards`).
- * Сервер сам уменьшает `jailCards` отправителя и увеличивает получателю.
+ * Количество holdable-карт выхода из тюрьмы в оффере.
+ * Сервер сам перемещает конкретные cardId через DeckService.transferCard().
  *
  * ВАЖНО (правила Монополии): в оффер можно включать ТОЛЬКО клетки
  * без зданий (`houses === 0`). Заложенные клетки передавать МОЖНО —
@@ -523,13 +534,13 @@ export interface TradeOffer {
   /** Деньги, которые отдаёт initiator (≥ 0). */
   fromCash: number;
   /** Карточки выхода из тюрьмы, которые отдаёт initiator (≥ 0). */
-  fromJailCards: number;
+  fromHoldableCardCount: number;
   /** ID клеток, которые initiator хочет получить. */
   toProperties: number[];
   /** Деньги, которые initiator хочет получить (≥ 0). */
   toCash: number;
   /** Карточки выхода из тюрьмы, которые initiator хочет получить (≥ 0). */
-  toJailCards: number;
+  toHoldableCardCount: number;
 }
 
 export const DEFAULT_SETTINGS: GameSettings = {

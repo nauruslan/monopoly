@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import Modal from "../Modal.vue";
 
+/**
+ * Количество holdable-карт выхода из тюрьмы в инвентаре игрока.
+ * Считается на стороне parent (game store) как Object.keys(player.holdableCards ?? {}).length.
+ */
 defineProps<{
   show: boolean;
-  jailCards: number;
+  holdableCardCount: number;
   money: number;
 }>();
 
@@ -23,8 +27,12 @@ const emit = defineEmits<{
       <button class="action-btn btn-buy" :disabled="money < 50" @click="emit('pay')">
         💸 Заплатить ₽50
       </button>
-      <button class="action-btn btn-buy" :disabled="jailCards === 0" @click="emit('use-card')">
-        🎫 Использовать карточку ({{ jailCards }})
+      <button
+        class="action-btn btn-buy"
+        :disabled="holdableCardCount === 0"
+        @click="emit('use-card')"
+      >
+        🎫 Использовать карточку ({{ holdableCardCount }})
       </button>
       <button class="action-btn btn-roll" @click="emit('try-double')">
         🎲 Попробовать выбросить дубль
@@ -48,7 +56,7 @@ const emit = defineEmits<{
   color: #fff;
 }
 .btn-roll {
-  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  background: linear-gradient(135deg, var(--gold), var(--orange));
   color: #fff;
 }
 .action-btn:disabled {

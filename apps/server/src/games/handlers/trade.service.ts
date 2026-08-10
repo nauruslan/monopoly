@@ -1,5 +1,16 @@
 import { Injectable, Logger } from "@nestjs/common";
 import type { Cell, GameState, Player, TradeOffer } from "@monopoly/shared";
+import {
+  countHoldableCards,
+  listHoldableCardIds,
+  syncHoldableCards,
+} from "../decks/holdable-cards.registry";
+import { pickHoldableCardIds } from "../decks/holdable-cards.registry";
+import { transferCard } from "../decks/deck.service";
+import { ensureDecksInitialized } from "../decks/deck-state-adapter";
+import type { CardTemplate } from "../decks/types";
+import { cardsToTemplates } from "../decks/card-template";
+import { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS } from "@monopoly/shared";
 
 /**
  * TradeService — сервис обмена собственностью, деньгами и карточками
@@ -12,7 +23,7 @@ import type { Cell, GameState, Player, TradeOffer } from "@monopoly/shared";
  *  - `offer`         — текущее активное предложение;
  *  - `counterCount`  — сколько counter-offer'ов уже было.
  *
- * Правила (house rules v2):
+ * Правила:
  *  1. Торговля доступна в фазе `BUILDING`.
  *  2. Counter-offer ограничен `settings.tradingMaxCounterOffers` (по умолчанию 3).
  *  3. При `TRADE_ACCEPT` — активы меняются местами (атомарно, с учётом
@@ -21,7 +32,9 @@ import type { Cell, GameState, Player, TradeOffer } from "@monopoly/shared";
  *  5. В оффер можно включать ТОЛЬКО клетки без зданий (`houses === 0`).
  *     Заложенные клетки передавать МОЖНО — получатель принимает их со
  *     статусом `isMortgaged = true`.
- *  6. Карточки выхода из тюрьмы передаются как количество (`jailCards`).
+ *  6. Карточки выхода из тюрьмы передаются как количество (`fromHoldableCardCount`/`toHoldableCardCount`).
+ *     Внутри через `transferHoldableCards` они переносятся как конкретные `cardId`
+ *     (DeckModule). Количество в оффере — это просто счётчик для UI/валидации.
  *  7. Блокировка: если `recipient.blockedPlayers.includes(initiator.id)` —
  *     сервер отклоняет `TRADE_OFFER` с ошибкой «Торговля заблокирована».
  *  8. Пустые сделки (всё по нулям) недопустимы.
@@ -103,8 +116,8 @@ export class TradeService {
       offer.toProperties.length === 0 &&
       offer.fromCash <= 0 &&
       offer.toCash <= 0 &&
-      offer.fromJailCards <= 0 &&
-      offer.toJailCards <= 0
+      offer.fromHoldableCardCount <= 0 &&
+      offer.toHoldableCardCount <= 0
     ) {
       throw new Error("Сделка не может быть пустой");
     }
@@ -142,13 +155,16 @@ export class TradeService {
     if (offer.fromCash < 0 || offer.toCash < 0) {
       throw new Error("Суммы денег не могут быть отрицательными");
     }
-    if (offer.fromJailCards < 0 || offer.toJailCards < 0) {
+    if (offer.fromHoldableCardCount < 0 || offer.toHoldableCardCount < 0) {
       throw new Error("Количество карточек не может быть отрицательным");
     }
     if (offer.fromCash > 0 && initiator.money < offer.fromCash) {
       throw new Error("Недостаточно денег у инициатора");
     }
-    if (offer.fromJailCards > 0 && initiator.jailCards < offer.fromJailCards) {
+    if (
+      offer.fromHoldableCardCount > 0 &&
+      countHoldableCards(initiator) < offer.fromHoldableCardCount
+    ) {
       throw new Error("У инициатора нет столько карточек выхода");
     }
   }
@@ -221,7 +237,7 @@ export class TradeService {
    * между сторонами с атомарной логикой погашения долга.
    *
    * ПОРЯДОК ВАЖЕН: сначала списываем с отправителя (инициатор платит
-   * fromCash, отдаёт fromJailCards), потом зачисляем получателю (через
+   * fromCash, отдаёт fromHoldableCardCount), потом зачисляем получателю (через
    * `addCashToPlayer` для авто-погашения его долга).
    */
   executeTrade(
@@ -269,21 +285,114 @@ export class TradeService {
       TradeService.addCashToPlayer(recipient, offer.fromCash);
     }
 
-    // 6) Карточки выхода: initiator отдаёт fromJailCards,
-    //    recipient получает toJailCards.
-    if (offer.fromJailCards > 0) {
-      initiator.jailCards -= offer.fromJailCards;
-      recipient.jailCards += offer.fromJailCards;
+    // 6) Карточки выхода: РЕАЛЬНЫЙ перенос holdable-карт через DeckService.
+    //    Инициатор отдаёт `fromHoldableCardCount` получателю; получатель отдаёт
+    //    `toHoldableCardCount` инициатору.
+    if (offer.fromHoldableCardCount > 0 || offer.toHoldableCardCount > 0) {
+      this.transferHoldableCards(
+        state,
+        initiator,
+        recipient,
+        offer.fromHoldableCardCount,
+        offer.toHoldableCardCount,
+      );
     }
-    if (offer.toJailCards > 0) {
-      recipient.jailCards -= offer.toJailCards;
-      initiator.jailCards += offer.toJailCards;
-    }
+    // Reference player variables to avoid unused warnings.
+    void initiator;
+    void recipient;
 
     this.logger.log(
-      `[TradeService] trade executed: ${initiator.displayName} ↔ ${recipient.displayName} (props: ${offer.fromProperties.length}+${offer.toProperties.length}, cash: ${offer.fromCash}+${offer.toCash}, jailCards: ${offer.fromJailCards}+${offer.toJailCards})`,
+      `[TradeService] trade executed: ${initiator.displayName} ↔ ${recipient.displayName} (props: ${offer.fromProperties.length}+${offer.toProperties.length}, cash: ${offer.fromCash}+${offer.toCash}, holdableCards: ${offer.fromHoldableCardCount}+${offer.toHoldableCardCount})`,
     );
     return { initiatorId, recipientId, totalDebtCovered: 0 };
+  }
+
+  /**
+   * Реальный перенос holdable-карт через DeckService.
+   *
+   * `fromCount` — сколько карт отдать от `from` (старого владельца).
+   * `toCount` — сколько карт получить из `to` (для `from`).
+   *
+   * Алгоритм:
+   *  1. Инициализируем DeckModule (lazy, idempotent).
+   *  2. Берём первые `fromCount` cardId из `from.holdableCards`.
+   *  3. Для каждого cardId вызываем `transferCard({ cardId, from: from.id, to: to.id })`.
+   *  4. Внутри `transferCard` через `syncHoldableCards` обновляются
+   *     `holdableCards` обеих сторон.
+   *
+   * Если меньше карт чем `fromCount` — переносим сколько есть.
+   * Все параметры в try/catch, чтобы не сломать весь трейд при ошибке.
+   */
+  private transferHoldableCards(
+    state: GameState,
+    from: Player,
+    to: Player,
+    fromCount: number,
+    toCount: number,
+  ): void {
+    if (fromCount <= 0 && toCount <= 0) return;
+    ensureDecksInitialized(state);
+
+    // Строим templatesById для DeckService.transferCard (нужен для проверки transferable).
+    const templatesById = new Map<string, CardTemplate>();
+    const allCards = [
+      ...cardsToTemplates(CHANCE_CARDS),
+      ...cardsToTemplates(TREASURY_CARDS),
+      ...cardsToTemplates(LUXURY_TAX_CARDS),
+    ];
+    for (const t of allCards) templatesById.set(t.templateId, t);
+
+    // 1) Отдаёт `from` → `to`.
+    if (fromCount > 0) {
+      const fromCardIds = listHoldableCardIds(from).slice(0, fromCount);
+      for (const cardId of fromCardIds) {
+        try {
+          const result = transferCard(
+            {
+              gameId: state.id,
+              decks: state.decks ?? [],
+              cards: state.deckCards ?? [],
+              templatesById,
+              emptyDeckPolicy: "SKIP_DRAW",
+            },
+            { cardId, fromPlayerId: from.id, toPlayerId: to.id },
+          );
+          // Применяем мутации обратно в state.
+          state.decks = result.decks;
+          state.deckCards = result.cards;
+        } catch (err) {
+          // Если карта не transferable или другая ошибка — пропускаем.
+          this.logger.warn(
+            `[TradeService] failed to transfer card ${cardId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+
+    // 2) Отдаёт `to` → `from` (обратное направление, `toCount` карт).
+    if (toCount > 0) {
+      const toCardIds = listHoldableCardIds(to).slice(0, toCount);
+      for (const cardId of toCardIds) {
+        try {
+          const result = transferCard(
+            {
+              gameId: state.id,
+              decks: state.decks ?? [],
+              cards: state.deckCards ?? [],
+              templatesById,
+              emptyDeckPolicy: "SKIP_DRAW",
+            },
+            { cardId, fromPlayerId: to.id, toPlayerId: from.id },
+          );
+          state.decks = result.decks;
+          state.deckCards = result.cards;
+        } catch (err) {
+          this.logger.warn(
+            `[TradeService] failed to transfer card back ${cardId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
   }
 
   /**

@@ -1,29 +1,3 @@
-/**
- * Регрессионные тесты: «бот + дубль + карточка Шанс/Казна → другая клетка».
- *
- * Сценарий бага (описан пользователем):
- *  1) Бот бросает дубль → mustRollAgain=true.
- *  2) Попадает на ШАНС/КАЗНУ → вытягивает карту с эффектом
- *     `move-relative` (назад на 3) или `move` (на другую клетку).
- *  3) После CONFIRM_CARD + CONFIRM_MOVE_ANIMATION + CONFIRM_LANDING
- *     фишка приземляется на пустой клетке PROPERTY (BUY_DECISION) или
- *     TAX.
- *  4) ДО ИСПРАВЛЕНИЯ: бот в BUY_DECISION возвращал решение "END_TURN"
- *     через `decideBuy`, что недопустимо в фазе BUY_DECISION
- *     (принимает только BUY_PROPERTY/DECLINE_BUY) → сервер бросал
- *     ForbiddenException, фаза не менялась, бот «зависал» и терял
- *     право на ещё один бросок.
- *  5) ДОПОЛНИТЕЛЬНЫЕ БАГИ: afterAuctionFinished (раньше
- *     `handleAuctionResolve`) и handleTradingNegotiate сбрасывали
- *     mustRollAgain=true при возврате в BUILDING после аукциона/торгов.
- *
- * ИСПРАВЛЕНИЕ:
- *  - `BotService.decideBuy` возвращает "DECLINE_BUY" вместо "END_TURN".
- *  - `afterAuctionFinished` сохраняет `player.mustRollAgain` и
- *    переходит в ROLLING при его наличии.
- *  - `handleTradingNegotiate` сохраняет `player.mustRollAgain` при
- *    TRADE_REJECT / TRADE_CANCEL / TRADE_ACCEPT.
- */
 import { Test } from "@nestjs/testing";
 import { GamesService } from "../games.service";
 import { GameRepository } from "../../db/repositories/game.repository";
@@ -57,10 +31,10 @@ function makeBotState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false,
+      isBankrupt: false
     },
     {
       id: "p1",
@@ -72,10 +46,10 @@ function makeBotState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false,
+      isBankrupt: false
     },
   ];
   return {
@@ -90,7 +64,7 @@ function makeBotState(): GameState {
     settings: { ...DEFAULT_SETTINGS, auctionEnabled: true },
     seed: "bot-test-seed",
     createdAt: new Date().toISOString(),
-    lastActivityAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString()
   };
 }
 
@@ -116,11 +90,11 @@ describe("GamesService.applyAction: regression дубль + карточка →
       create: jest.fn(async (state: GameState) => ({
         id: state.id,
         rngSeed: state.seed,
-        stateSnapshot: state,
+        stateSnapshot: state
       })),
       updateSnapshot: jest.fn(async () => undefined),
       replaceSnapshot: jest.fn(async () => true),
-      findById: jest.fn(async () => null),
+      findById: jest.fn(async () => null)
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -139,7 +113,7 @@ describe("GamesService.applyAction: regression дубль + карточка →
         TradeService,
         LogService,
         { provide: GameRepository, useValue: repoMock },
-      ],
+      ]
     }).compile();
 
     service = moduleRef.get(GamesService);
@@ -159,13 +133,6 @@ describe("GamesService.applyAction: regression дубль + карточка →
   }
 
   it("Бот в BUY_DECISION после move-relative карты на дубле: decideBuy → DECLINE_BUY, фаза → ROLLING (право на ещё один бросок сохранено)", async () => {
-    // Сценарий:
-    //  - бот стоит на клетке 11, бросает дубль, идёт на CHANCE (например, 15),
-    //    тянет «вернитесь на 3 назад» → попадает на 12 (PROPERTY, Railway или
-    //    другую клетку без владельца).
-    //  - В BUY_DECISION у бота не хватает денег с запасом → должно вернуться
-    //    "DECLINE_BUY", НЕ "END_TURN" (иначе ForbiddenException).
-    //  - Без аукциона (settings.auctionEnabled=false) → сразу ROLLING.
     const backCard = CHANCE_CARDS.find(
       (c) => c.effect.kind === "move-relative" && "steps" in c.effect && c.effect.steps === -3,
     );
@@ -188,11 +155,12 @@ describe("GamesService.applyAction: regression дубль + карточка →
       deck: backCard.deck,
       card: backCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [backCard.id], cursor: 0 },
       treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // 1) CONFIRM_CARD — move-relative не сбрасывает mustRollAgain,
@@ -251,11 +219,12 @@ describe("GamesService.applyAction: regression дубль + карточка →
       deck: backCard.deck,
       card: backCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [backCard.id], cursor: 0 },
       treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // CONFIRM_CARD → MOVE_ANIMATION → RESOLVING_LANDING → CONFIRM_LANDING.
@@ -330,12 +299,12 @@ describe("GamesService.applyAction: regression дубль + карточка →
       offer: {
         fromProperties: [],
         fromCash: 50,
-        fromJailCards: 0,
+        fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toJailCards: 0,
+        toHoldableCardCount: 0
       },
-      counterCount: 0,
+      counterCount: 0
     };
 
     await (service as any).handleTradingNegotiate(activeState, p, { type: "TRADE_REJECT" });
@@ -373,11 +342,12 @@ describe("GamesService.applyAction: regression дубль + карточка →
       deck: goCard.deck,
       card: goCard,
       applied: false,
+        deckCardId: null
     };
     activeState.cardDecks = {
       chance: { cards: [goCard.id], cursor: 0 },
       treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
+      "luxury-tax": { cards: [], cursor: 0 }
     };
 
     // move-карта «Идите на СТАРТ» → MOVE_ANIMATION → RESOLVING_LANDING
@@ -404,12 +374,12 @@ describe("GamesService.applyAction: regression дубль + карточка →
       offer: {
         fromProperties: [],
         fromCash: 50,
-        fromJailCards: 0,
+        fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toJailCards: 0,
+        toHoldableCardCount: 0
       },
-      counterCount: 0,
+      counterCount: 0
     };
 
     // Бот (p) отклоняет trade — mustRollAgain должен сохраниться.
@@ -440,20 +410,6 @@ describe("GamesService.applyAction: regression дубль + карточка →
     expect(p.consecutiveDoubles).toBe(1);
   });
 
-  /**
-   * Регрессия «preTradePhase теряется при counter-offer / неизвестных фазах».
-   *
-   * Сценарий бага: игрок в ROLLING инициирует trade → соперник делает
-   * counter-offer → инициатор отклоняет. До фикса `makeCounterOffer`
-   * пересоздавал `state.trade` БЕЗ поля `preTradePhase`, поэтому после
-   * TRADE_REJECT `resolvePhaseAfterTrade` видела undefined и фолбэчила
-   * в BUILDING. Кнопка «Бросить кубики» становилась неактивной, хотя
-   * игрок ещё не ходил.
-   */
-  // Вспомогательная: подготавливает state.trade с заданным preTradePhase
-  // и возвращает пару игроков. Используем прямой вызов handleTradingNegotiate
-  // (а не act), чтобы не зависеть от currentPlayerIndex (в торгах активная
-  // сторона определяется state.trade.currentPartyId, а не currentPlayerIndex).
   function setupTradeInNegotiate(preTradePhase: GameState["phase"]) {
     const p = activeState.players[activeState.currentPlayerIndex]!;
     const p1 = activeState.players[1]!;
@@ -465,13 +421,13 @@ describe("GamesService.applyAction: regression дубль + карточка →
       offer: {
         fromProperties: [],
         fromCash: 50,
-        fromJailCards: 0,
+        fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toJailCards: 0,
+        toHoldableCardCount: 0
       },
       counterCount: 0,
-      preTradePhase,
+      preTradePhase
     };
     return { p, p1 };
   }
@@ -502,13 +458,13 @@ describe("GamesService.applyAction: regression дубль + карточка →
       offer: {
         fromProperties: [],
         fromCash: 50,
-        fromJailCards: 0,
+        fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toJailCards: 0,
+        toHoldableCardCount: 0
       },
       counterCount: 0,
-      preTradePhase: "ROLLING",
+      preTradePhase: "ROLLING"
     };
 
     // Шаг 2: p1 делает counter-offer. preTradePhase НЕ должен пропасть.
@@ -519,10 +475,10 @@ describe("GamesService.applyAction: regression дубль + карточка →
     (service as any).trade.makeCounterOffer(activeState, {
       fromProperties: [],
       fromCash: 0,
-      fromJailCards: 0,
+      fromHoldableCardCount: 0,
       toProperties: [],
       toCash: 30,
-      toJailCards: 0,
+      toHoldableCardCount: 0
     });
     expect(activeState.trade?.preTradePhase).toBe("ROLLING");
     expect(activeState.trade?.counterCount).toBe(1);
@@ -562,10 +518,10 @@ describe("GamesService.applyAction: regression дубль + карточка →
       {
         fromProperties: [],
         fromCash: 50,
-        fromJailCards: 0,
+        fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toJailCards: 0,
+        toHoldableCardCount: 0
       },
       "ROLLING",
     );

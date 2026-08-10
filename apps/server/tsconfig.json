@@ -19,6 +19,7 @@
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": false,
     "resolveJsonModule": true,
+    "types": ["jest", "node"],
     "paths": {
       "@monopoly/shared": ["../../packages/shared/src/index.ts"],
       "@monopoly/shared/*": ["../../packages/shared/src/*"]

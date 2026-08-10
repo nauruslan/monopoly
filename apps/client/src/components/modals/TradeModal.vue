@@ -104,8 +104,8 @@ const fmt = (n: number): string => n.toLocaleString("ru-RU");
 const blockedByPartner = computed<boolean>(() => trade.isBlockedByPartner);
 const iBlocked = computed<boolean>(() => trade.iBlockedPartner);
 
-const recipientJailCards = computed<number>(() => recipient.value?.jailCards ?? 0);
-const myJailCards = computed<number>(() => trade.me?.jailCards ?? 0);
+const recipientHoldableCardCount = computed<number>(() => Object.keys(recipient.value?.holdableCards ?? {}).length);
+const myHoldableCardCount = computed<number>(() => Object.keys(trade.me?.holdableCards ?? {}).length);
 const myMoney = computed<number>(() => trade.me?.money ?? 0);
 
 function onClose() {
@@ -152,16 +152,16 @@ function onCounter() {
       ? [...activeOffer.value.fromProperties]
       : [...activeOffer.value.toProperties],
     fromCash: isInitiator.value ? activeOffer.value.fromCash : activeOffer.value.toCash,
-    fromJailCards: isInitiator.value
-      ? activeOffer.value.fromJailCards
-      : activeOffer.value.toJailCards,
+    fromHoldableCardCount: isInitiator.value
+      ? activeOffer.value.fromHoldableCardCount
+      : activeOffer.value.toHoldableCardCount,
     toProperties: isInitiator.value
       ? [...activeOffer.value.toProperties]
       : [...activeOffer.value.fromProperties],
     toCash: isInitiator.value ? activeOffer.value.toCash : activeOffer.value.fromCash,
-    toJailCards: isInitiator.value
-      ? activeOffer.value.toJailCards
-      : activeOffer.value.fromJailCards,
+    toHoldableCardCount: isInitiator.value
+      ? activeOffer.value.toHoldableCardCount
+      : activeOffer.value.fromHoldableCardCount,
   };
   trade.draft = draft;
   trade.selectedRecipientId = recipient.value?.id ?? null;
@@ -244,7 +244,7 @@ const modalSubtitle = computed<string>(() => {
                 (isInitiator ? activeOffer.fromProperties : activeOffer.toProperties).length ===
                   0 &&
                 (isInitiator ? activeOffer.fromCash : activeOffer.toCash) === 0 &&
-                (isInitiator ? activeOffer.fromJailCards : activeOffer.toJailCards) === 0
+                (isInitiator ? activeOffer.fromHoldableCardCount : activeOffer.toHoldableCardCount) === 0
               "
               class="empty"
             >
@@ -275,10 +275,10 @@ const modalSubtitle = computed<string>(() => {
                 ₽{{ isInitiator ? activeOffer.fromCash : activeOffer.toCash }}
               </div>
               <div
-                v-if="(isInitiator ? activeOffer.fromJailCards : activeOffer.toJailCards) > 0"
+                v-if="(isInitiator ? activeOffer.fromHoldableCardCount : activeOffer.toHoldableCardCount) > 0"
                 class="item jail"
               >
-                🎫 ×{{ isInitiator ? activeOffer.fromJailCards : activeOffer.toJailCards }}
+                🎫 ×{{ isInitiator ? activeOffer.fromHoldableCardCount : activeOffer.toHoldableCardCount }}
               </div>
             </div>
           </div>
@@ -289,7 +289,7 @@ const modalSubtitle = computed<string>(() => {
                 (isInitiator ? activeOffer.toProperties : activeOffer.fromProperties).length ===
                   0 &&
                 (isInitiator ? activeOffer.toCash : activeOffer.fromCash) === 0 &&
-                (isInitiator ? activeOffer.toJailCards : activeOffer.fromJailCards) === 0
+                (isInitiator ? activeOffer.toHoldableCardCount : activeOffer.fromHoldableCardCount) === 0
               "
               class="empty"
             >
@@ -320,10 +320,10 @@ const modalSubtitle = computed<string>(() => {
                 ₽{{ isInitiator ? activeOffer.toCash : activeOffer.fromCash }}
               </div>
               <div
-                v-if="(isInitiator ? activeOffer.toJailCards : activeOffer.fromJailCards) > 0"
+                v-if="(isInitiator ? activeOffer.toHoldableCardCount : activeOffer.fromHoldableCardCount) > 0"
                 class="item jail"
               >
-                🎫 ×{{ isInitiator ? activeOffer.toJailCards : activeOffer.fromJailCards }}
+                🎫 ×{{ isInitiator ? activeOffer.toHoldableCardCount : activeOffer.fromHoldableCardCount }}
               </div>
             </div>
           </div>
@@ -343,7 +343,7 @@ const modalSubtitle = computed<string>(() => {
                 (isInitiator ? activeOffer.toProperties : activeOffer.fromProperties).length ===
                   0 &&
                 (isInitiator ? activeOffer.toCash : activeOffer.fromCash) === 0 &&
-                (isInitiator ? activeOffer.toJailCards : activeOffer.fromJailCards) === 0
+                (isInitiator ? activeOffer.toHoldableCardCount : activeOffer.fromHoldableCardCount) === 0
               "
               class="empty"
             >
@@ -374,10 +374,10 @@ const modalSubtitle = computed<string>(() => {
                 ₽{{ isInitiator ? activeOffer.toCash : activeOffer.fromCash }}
               </div>
               <div
-                v-if="(isInitiator ? activeOffer.toJailCards : activeOffer.fromJailCards) > 0"
+                v-if="(isInitiator ? activeOffer.toHoldableCardCount : activeOffer.fromHoldableCardCount) > 0"
                 class="item jail"
               >
-                🎫 ×{{ isInitiator ? activeOffer.toJailCards : activeOffer.fromJailCards }}
+                🎫 ×{{ isInitiator ? activeOffer.toHoldableCardCount : activeOffer.fromHoldableCardCount }}
               </div>
             </div>
           </div>
@@ -442,7 +442,7 @@ const modalSubtitle = computed<string>(() => {
             <div class="partner-name">{{ p.displayName }}</div>
             <div class="partner-meta">
               {{ p.money }}₽ · {{ p.properties.length }} клеток
-              <span v-if="p.jailCards > 0"> · 🎫 ×{{ p.jailCards }}</span>
+              <span v-if="Object.keys(p.holdableCards ?? {}).length > 0"> · 🎫 ×{{ Object.keys(p.holdableCards ?? {}).length }}</span>
             </div>
             <div v-if="p.blockedPlayers?.includes(trade.myId ?? '')" class="blocked-note">
               ⛔ Заблокировал вас
@@ -505,22 +505,22 @@ const modalSubtitle = computed<string>(() => {
             <span class="cash-hint">/ {{ myMoney }}₽</span>
           </div>
 
-          <div v-if="myJailCards > 0" class="cash-row">
+          <div v-if="myHoldableCardCount > 0" class="cash-row">
             <label>Карточки тюрьмы:</label>
             <input
               type="number"
               min="0"
-              :max="myJailCards"
-              :value="trade.draft.fromJailCards"
+              :max="myHoldableCardCount"
+              :value="trade.draft.fromHoldableCardCount"
               @input="
                 (e) =>
-                  (trade.draft.fromJailCards = Math.min(
-                    myJailCards,
+                  (trade.draft.fromHoldableCardCount = Math.min(
+                    myHoldableCardCount,
                     Math.max(0, Number((e.target as HTMLInputElement).value)),
                   ))
               "
             />
-            <span class="cash-hint">/ {{ myJailCards }}</span>
+            <span class="cash-hint">/ {{ myHoldableCardCount }}</span>
           </div>
 
           <div class="section-label">Свойства (без зданий):</div>
@@ -565,22 +565,22 @@ const modalSubtitle = computed<string>(() => {
             <span class="cash-hint">/ {{ recipient.money }}₽ у него</span>
           </div>
 
-          <div v-if="recipientJailCards > 0" class="cash-row">
+          <div v-if="recipientHoldableCardCount > 0" class="cash-row">
             <label>Карточки тюрьмы:</label>
             <input
               type="number"
               min="0"
-              :max="recipientJailCards"
-              :value="trade.draft.toJailCards"
+              :max="recipientHoldableCardCount"
+              :value="trade.draft.toHoldableCardCount"
               @input="
                 (e) =>
-                  (trade.draft.toJailCards = Math.min(
-                    recipientJailCards,
+                  (trade.draft.toHoldableCardCount = Math.min(
+                    recipientHoldableCardCount,
                     Math.max(0, Number((e.target as HTMLInputElement).value)),
                   ))
               "
             />
-            <span class="cash-hint">/ {{ recipientJailCards }}</span>
+            <span class="cash-hint">/ {{ recipientHoldableCardCount }}</span>
           </div>
 
           <div class="section-label">Свойства:</div>

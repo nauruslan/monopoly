@@ -22,7 +22,7 @@ import {
   canBuyProperty,
   canTrade,
   canManageMortgage,
-  canOpenBuildingPhase,
+  canOpenBuildingPhase
 } from "../turn-permissions";
 import type { GameState, Player } from "@monopoly/shared";
 import { BOARD, DEFAULT_SETTINGS } from "@monopoly/shared";
@@ -38,12 +38,12 @@ function makePlayer(over: Partial<Player> = {}): Player {
     position: 0,
     inJail: false,
     jailTurns: 0,
-    jailCards: 0,
+    holdableCards: {},
     properties: [],
     consecutiveDoubles: 0,
     isBankrupt: false,
     mustRollAgain: false,
-    ...over,
+    ...over
   };
 }
 
@@ -63,7 +63,7 @@ function makeState(over: Partial<GameState> = {}): GameState {
     seed: "test-seed",
     createdAt: new Date().toISOString(),
     lastActivityAt: new Date().toISOString(),
-    ...over,
+    ...over
   };
 }
 
@@ -91,7 +91,7 @@ describe("turn-permissions", () => {
       // UI должен показывать «Бросить кубики» активной, а «Завершить» нет.
       const s = makeState({
         phase: "ROLLING",
-        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })]
       });
       const p = s.players[0]!;
       expect(canRollDice(s, p)).toBe(true);
@@ -144,7 +144,7 @@ describe("turn-permissions", () => {
       // UI не должен показывать «Завершить» активной.
       const s = makeState({
         phase: "BUILDING",
-        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })]
       });
       expect(canEndTurn(s, s.players[0]!)).toBe(false);
     });
@@ -274,7 +274,7 @@ describe("turn-permissions", () => {
     it("false если moveAnimation заполнен (анимация идёт)", () => {
       const s = makeState({
         phase: "BUILDING",
-        moveAnimation: { playerId: "p1", from: 0, to: 5, steps: 5, isDouble: false },
+        moveAnimation: { playerId: "p1", from: 0, to: 5, steps: 5, isDouble: false }
       });
       expect(canTrade(s, s.players[0]!)).toBe(false);
     });
@@ -307,7 +307,7 @@ describe("turn-permissions", () => {
         players: [
           makePlayer({ id: "p0", mustRollAgain: false, consecutiveDoubles: 0 }),
           makePlayer({ id: "p1" }),
-        ],
+        ]
       });
       // Игрок стоит на парковке (id=20), деньги не изменились.
       s.players[0]!.position = 20;
@@ -322,7 +322,7 @@ describe("turn-permissions", () => {
       // сценарий не возникает.
       const s = makeState({
         phase: "BUILDING",
-        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })]
       });
       expect(canEndTurn(s, s.players[0]!)).toBe(false);
       expect(canRollDice(s, s.players[0]!)).toBe(false);
@@ -348,7 +348,7 @@ describe("turn-permissions", () => {
       // mustRollAgain сохранён, игрок бросает ещё раз.
       const s = makeState({
         phase: "ROLLING",
-        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0", mustRollAgain: true }), makePlayer({ id: "p1" })]
       });
       expect(canRollDice(s, s.players[0]!)).toBe(true);
       expect(mustRollDiceNow(s, s.players[0]!)).toBe(true);
@@ -365,7 +365,7 @@ describe("turn-permissions", () => {
       const s = makeState({
         phase: "ROLLING",
         justArrivedAtParking: true,
-        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })]
       });
       expect(canRollDice(s, s.players[0]!)).toBe(false);
       expect(mustRollDiceNow(s, s.players[0]!)).toBe(false);
@@ -377,7 +377,7 @@ describe("turn-permissions", () => {
       const s = makeState({
         phase: "BUILDING",
         justArrivedAtParking: true,
-        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })]
       });
       expect(canEndTurn(s, s.players[0]!)).toBe(true);
     });
@@ -388,14 +388,14 @@ describe("turn-permissions", () => {
       // бросок разрешён в обычном режиме.
       const s1 = makeState({
         phase: "ROLLING",
-        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })]
       });
       expect(canRollDice(s1, s1.players[0]!)).toBe(true);
 
       const s2 = makeState({
         phase: "ROLLING",
         justArrivedAtParking: false,
-        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })],
+        players: [makePlayer({ id: "p0" }), makePlayer({ id: "p1" })]
       });
       expect(canRollDice(s2, s2.players[0]!)).toBe(true);
     });

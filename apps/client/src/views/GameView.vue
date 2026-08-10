@@ -417,8 +417,7 @@ onBeforeUnmount(() => {
 });
 
 /**
- * Клик по клетке: показываем тултип в «правильном» месте —
- * см. `computeTooltipPosition` ниже.
+ * Клик по клетке: показываем тултип в «правильном» месте
  */
 function onCellClick(payload: { cell: Cell; event: MouseEvent }) {
   hoveredCell.value = payload.cell;
@@ -1228,7 +1227,7 @@ function logout() {
 
       <JailModal
         :show="showJailModal"
-        :jail-cards="currentPlayer?.jailCards || 0"
+        :holdable-card-count="Object.keys(currentPlayer?.holdableCards ?? {}).length"
         :money="currentPlayer?.money || 0"
         @pay="onPayJailFine"
         @use-card="onUseJailCard"

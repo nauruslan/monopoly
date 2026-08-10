@@ -1,5 +1,5 @@
 /**
- * useTradeStore — Pinia-store для торговли на клиенте (v2).
+ * useTradeStore — Pinia-store для торговли на клиенте.
  *
  * Управляет двухэкранным UI:
  *  - Экран 1: «Выберите партнёра для обмена»
@@ -28,10 +28,10 @@ import type { GameState, Player, TradeOffer } from "@monopoly/shared";
 export interface TradeDraft {
   fromProperties: number[];
   fromCash: number;
-  fromJailCards: number;
+  fromHoldableCardCount: number;
   toProperties: number[];
   toCash: number;
-  toJailCards: number;
+  toHoldableCardCount: number;
 }
 
 /** Статус завершённой сделки (для экрана уведомления). */
@@ -52,10 +52,10 @@ function emptyDraft(): TradeDraft {
   return {
     fromProperties: [],
     fromCash: 0,
-    fromJailCards: 0,
+    fromHoldableCardCount: 0,
     toProperties: [],
     toCash: 0,
-    toJailCards: 0,
+    toHoldableCardCount: 0,
   };
 }
 
@@ -284,8 +284,8 @@ export const useTradeStore = defineStore("trade", () => {
       d.toProperties.length === 0 &&
       d.fromCash === 0 &&
       d.toCash === 0 &&
-      d.fromJailCards === 0 &&
-      d.toJailCards === 0
+      d.fromHoldableCardCount === 0 &&
+      d.toHoldableCardCount === 0
     );
   }
 
@@ -302,10 +302,10 @@ export const useTradeStore = defineStore("trade", () => {
     const offer: TradeOffer = {
       fromProperties: [...draft.value.fromProperties],
       fromCash: draft.value.fromCash,
-      fromJailCards: draft.value.fromJailCards,
+      fromHoldableCardCount: draft.value.fromHoldableCardCount,
       toProperties: [...draft.value.toProperties],
       toCash: draft.value.toCash,
-      toJailCards: draft.value.toJailCards,
+      toHoldableCardCount: draft.value.toHoldableCardCount,
     };
     game.sendAction({ type: "TRADE_OFFER", recipientId: selectedRecipientId.value, offer });
     return true;
@@ -336,10 +336,10 @@ export const useTradeStore = defineStore("trade", () => {
     const offer: TradeOffer = {
       fromProperties: [...draft.value.fromProperties],
       fromCash: draft.value.fromCash,
-      fromJailCards: draft.value.fromJailCards,
+      fromHoldableCardCount: draft.value.fromHoldableCardCount,
       toProperties: [...draft.value.toProperties],
       toCash: draft.value.toCash,
-      toJailCards: draft.value.toJailCards,
+      toHoldableCardCount: draft.value.toHoldableCardCount,
     };
     game.sendAction({ type: "TRADE_COUNTER", offer });
     return true;
@@ -352,10 +352,10 @@ export const useTradeStore = defineStore("trade", () => {
     draft.value = {
       fromProperties: [...o.fromProperties],
       fromCash: o.fromCash,
-      fromJailCards: o.fromJailCards,
+      fromHoldableCardCount: o.fromHoldableCardCount,
       toProperties: [...o.toProperties],
       toCash: o.toCash,
-      toJailCards: o.toJailCards,
+      toHoldableCardCount: o.toHoldableCardCount,
     };
   }
 

@@ -52,7 +52,7 @@ describe("BankruptcyService — продажа заложенных клеток
         id: 0,
         ownerId: "p0",
         isMortgaged: true,
-        mortgageValue: 0,
+        mortgageValue: 0
       });
       const state = makeState({ board: [cell], players: [player] });
 
@@ -66,7 +66,7 @@ describe("BankruptcyService — продажа заложенных клеток
         ownerId: "p0",
         isMortgaged: true,
         mortgageValue: 100,
-        houses: 2,
+        houses: 2
       });
       const state = makeState({ board: [cell], players: [player] });
 
@@ -91,7 +91,7 @@ describe("BankruptcyService — продажа заложенных клеток
         ownerId: "p0",
         isMortgaged: true,
         mortgageValue: 100,
-        price: 200,
+        price: 200
       });
       const state = makeState({ board: [cell], players: [player] });
 
@@ -121,7 +121,7 @@ describe("BankruptcyService — продажа заложенных клеток
         id: 0,
         ownerId: "p0",
         isMortgaged: true,
-        mortgageValue: 0,
+        mortgageValue: 0
       });
       const state = makeState({ board: [cell], players: [player] });
 
@@ -149,14 +149,14 @@ describe("BankruptcyService — продажа заложенных клеток
         ownerId: "p0",
         isMortgaged: true,
         mortgageValue: 100,
-        price: 200,
+        price: 200
       });
       const c1 = makeCell({
         id: 1,
         ownerId: "p0",
         isMortgaged: false,
         mortgageValue: 100,
-        price: 200,
+        price: 200
       });
       const state = makeState({ board: [c0, c1], players: [player] });
 
@@ -175,7 +175,7 @@ describe("BankruptcyService — продажа заложенных клеток
         houses: 2,
         housePrice: 100,
         price: 200,
-        mortgageValue: 100,
+        mortgageValue: 100
       });
       const state = makeState({ board: [cell], players: [player] });
 
@@ -198,14 +198,14 @@ describe("BankruptcyService — продажа заложенных клеток
         ownerId: "p0",
         isMortgaged: false,
         mortgageValue: 100,
-        price: 200,
+        price: 200
       });
       const c1 = makeCell({
         id: 1,
         ownerId: "p0",
         isMortgaged: true,
         mortgageValue: 100,
-        price: 200,
+        price: 200
       });
       const state = makeState({ board: [c0, c1], players: [player] });
 
@@ -220,7 +220,7 @@ describe("BankruptcyService — продажа заложенных клеток
         ownerId: "p0",
         isMortgaged: true,
         mortgageValue: 100,
-        price: 200,
+        price: 200
       });
       const state = makeState({ board: [cell], players: [player] });
 
@@ -237,17 +237,17 @@ describe("BankruptcyService — продажа заложенных клеток
         id: 0,
         ownerId: "p0",
         isMortgaged: true,
-        mortgageValue: 100,
+        mortgageValue: 100
       });
       const c1 = makeCell({
         id: 1,
         ownerId: "p0",
         isMortgaged: false,
-        houses: 2,
+        houses: 2
       });
       const state = makeState({
         board: [c0, c1],
-        players: [player, creditor],
+        players: [player, creditor]
       });
 
       service.handle(state, player, creditor, 200);
@@ -274,11 +274,11 @@ describe("BankruptcyService — продажа заложенных клеток
         id: 0,
         ownerId: "p0",
         isMortgaged: true,
-        mortgageValue: 100,
+        mortgageValue: 100
       });
       const state = makeState({
         board: [c0],
-        players: [player, creditor],
+        players: [player, creditor]
       });
 
       service.handle(state, player, creditor, 200);
@@ -295,7 +295,7 @@ describe("BankruptcyService — продажа заложенных клеток
       const c1 = makeCell({ id: 1, ownerId: "p0", mortgageValue: 30 });
       const state = makeState({
         board: [c0, c1],
-        players: [player, creditor],
+        players: [player, creditor]
       });
 
       // После распродажи имущества у игрока осталось -500,
@@ -315,7 +315,7 @@ describe("BankruptcyService — продажа заложенных клеток
         id: 0,
         ownerId: "p0",
         isMortgaged: true,
-        mortgageValue: 100,
+        mortgageValue: 100
       });
       const state = makeState({ board: [c0], players: [player] });
 
@@ -335,7 +335,7 @@ describe("BankruptcyService — продажа заложенных клеток
       const c0 = makeCell({ id: 0, ownerId: "p0" });
       const state = makeState({
         board: [c0],
-        players: [player, creditor],
+        players: [player, creditor]
       });
 
       service.handle(state, player, creditor, 0);
@@ -384,7 +384,7 @@ describe("BankruptcyService — правило лесенки при ликви�
     it("возвращает false, если клетка принадлежит другому игроку", () => {
       const player = makePlayer({ id: "p0" });
       const state = makeState({
-        board: [makeCell({ id: 0, ownerId: "p1", houses: 1 })],
+        board: [makeCell({ id: 0, ownerId: "p1", houses: 1 })]
       });
       expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
     });
@@ -392,7 +392,7 @@ describe("BankruptcyService — правило лесенки при ликви�
     it("возвращает false, если клетка не PROPERTY (RAILROAD/UTILITY)", () => {
       const player = makePlayer({ id: "p0" });
       const state = makeState({
-        board: [makeCell({ id: 0, type: "RAILROAD", ownerId: "p0", houses: 0 })],
+        board: [makeCell({ id: 0, type: "RAILROAD", ownerId: "p0", houses: 0 })]
       });
       expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
     });
@@ -400,7 +400,7 @@ describe("BankruptcyService — правило лесенки при ликви�
     it("возвращает false, если клетка заложена", () => {
       const player = makePlayer({ id: "p0" });
       const state = makeState({
-        board: [makeCell({ id: 0, ownerId: "p0", houses: 2, isMortgaged: true })],
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 2, isMortgaged: true })]
       });
       expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
     });
@@ -408,7 +408,7 @@ describe("BankruptcyService — правило лесенки при ликви�
     it("возвращает false, если на клетке 0 домов", () => {
       const player = makePlayer({ id: "p0" });
       const state = makeState({
-        board: [makeCell({ id: 0, ownerId: "p0", houses: 0 })],
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 0 })]
       });
       expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(false);
     });
@@ -424,7 +424,7 @@ describe("BankruptcyService — правило лесенки при ликви�
     it("возвращает true для одиночной клетки с домами (нет группы)", () => {
       const player = makePlayer({ id: "p0" });
       const state = makeState({
-        board: [makeCell({ id: 0, ownerId: "p0", houses: 3 })],
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 3 })]
       });
       expect(service.canSellHouseForLiquidation(state, player, 0)).toBe(true);
     });
@@ -548,7 +548,7 @@ describe("BankruptcyService — правило лесенки при ликви�
     it("возвращает пустой массив, если домов нет", () => {
       const player = makePlayer({ id: "p0" });
       const state = makeState({
-        board: [makeCell({ id: 0, ownerId: "p0", houses: 0 })],
+        board: [makeCell({ id: 0, ownerId: "p0", houses: 0 })]
       });
       expect(service.listHousesSellableForLiquidation(state, player)).toEqual([]);
     });

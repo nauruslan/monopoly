@@ -53,7 +53,7 @@ function makeFreshState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
       isBankrupt: false,
@@ -68,7 +68,7 @@ function makeFreshState(): GameState {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
       isBankrupt: false,
@@ -227,10 +227,10 @@ describe("GamesService.applyAction (FSM)", () => {
         offer: {
           fromProperties: [],
           fromCash: 0,
-          fromJailCards: 0,
+          fromHoldableCardCount: 0,
           toProperties: [],
           toCash: 0,
-          toJailCards: 0,
+          toHoldableCardCount: 0,
         },
       }),
     ).rejects.toThrow(/Сделка не может быть пустой|Пустой оффер/i);
@@ -338,32 +338,45 @@ describe("GamesService.applyAction (FSM)", () => {
   });
 
   it("Карточка с эффектом move → state.moveAnimation заполнен", async () => {
-    // Поставим игрока на клетку CHANCE.
-    const chanceCell = activeState.board.find((c) => c.type === "CHANCE");
-    if (!chanceCell) return;
+    // Инициализируем DeckModule (per-field колоды).
+    const { ensureDecksInitialized } = await import("../decks/deck-state-adapter");
+    ensureDecksInitialized(activeState);
+
+    // Находим move-карту в CHANCE и колоду, которой она принадлежит (originDeckId).
+    const { CHANCE_CARDS } = await import("@monopoly/shared");
+    // Берём конкретную «move»-карту ch1 (Идите на СТАРТ) — у неё target=0.
+    const moveCard = CHANCE_CARDS.find((c) => c.id === "ch1")!;
+    const moveCardInstance = activeState.deckCards!.find((c) => c.templateId === moveCard.id);
+    if (!moveCardInstance) throw new Error("moveCardInstance not found");
+    const ownerDeck = activeState.decks!.find((d) => d.deckId === moveCardInstance.originDeckId);
+    if (!ownerDeck) throw new Error("ownerDeck not found");
+
+    // Переходим на клетку, где лежит move-карта (originBoardFieldId).
+    const chanceCell = activeState.board.find(
+      (c) => c.type === "CHANCE" && c.id === ownerDeck.boardFieldId,
+    );
+    if (!chanceCell) throw new Error("chanceCell not found for owner deck");
     activeState.players[0]!.position = chanceCell.id;
     activeState.lastDice = { dice: [0, 0], isDouble: false };
     activeState.phase = "RESOLVING_LANDING";
 
-    // CONFIRM_LANDING → CARD_REVEAL (карта вытянута).
+    // Подменяем колоду: кладём moveCard на верх.
+    ownerDeck.topToBottom = [
+      moveCardInstance.cardId,
+      ...ownerDeck.topToBottom.filter((id) => id !== moveCardInstance.cardId),
+    ];
+    const idx = activeState.deckCards!.findIndex((c) => c.cardId === moveCardInstance.cardId);
+    if (idx >= 0) {
+      activeState.deckCards![idx] = {
+        ...activeState.deckCards![idx],
+        state: "IN_DECK",
+        drawnAt: undefined,
+      };
+    }
+
     await act({ type: "CONFIRM_LANDING" });
     expect(activeState.phase).toBe("CARD_REVEAL");
-
-    // Детерминированно подменим колоду так, чтобы вытянуть «move» карту.
-    const { CHANCE_CARDS } = await import("@monopoly/shared");
-    const moveCard = CHANCE_CARDS.find((c) => c.effect.kind === "move");
-    if (!moveCard) return;
-    activeState.cardDecks = {
-      chance: { cards: [moveCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
-    };
-    // Перевытягиваем карту.
-    activeState.phase = "RESOLVING_LANDING";
-    await act({ type: "CONFIRM_LANDING" });
-    expect(activeState.phase).toBe("CARD_REVEAL");
-    expect(activeState.cardContext?.card.id).toBe(moveCard.id);
-
+    expect(activeState.cardContext?.card.id).toBe("ch1");
     // CONFIRM_CARD → CARD_EFFECT → MOVE_ANIMATION.
     await act({ type: "CONFIRM_CARD" });
     expect(activeState.phase).toBe("MOVE_ANIMATION");
@@ -371,10 +384,8 @@ describe("GamesService.applyAction (FSM)", () => {
     // Главная проверка: state.moveAnimation заполнен и корректен.
     expect(activeState.moveAnimation).toBeDefined();
     expect(activeState.moveAnimation?.playerId).toBe("p0");
-    expect(activeState.moveAnimation?.from).toBe(chanceCell.id);
-    if (moveCard.effect.kind === "move") {
-      expect(activeState.moveAnimation?.to).toBe(moveCard.effect.target);
-    }
+    expect(activeState.moveAnimation?.from).toBe(chanceCell!.id);
+    expect(activeState.moveAnimation?.to).toBe(0);
     expect(activeState.moveAnimation?.steps).toBeGreaterThan(0);
     expect(activeState.moveAnimation?.steps).toBeLessThanOrEqual(40);
   });

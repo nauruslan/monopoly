@@ -33,7 +33,7 @@ export function makeCell(overrides: Partial<Cell> = {}): Cell {
     housePrice: overrides.housePrice ?? 50,
     mortgageValue: overrides.mortgageValue ?? 100,
     ...rest,
-    ...(ownerId !== undefined ? { ownerId } : {}),
+    ...(ownerId !== undefined ? { ownerId } : {})
   } as Cell;
 }
 
@@ -49,7 +49,7 @@ export function makeMonopolyBoard(count = 3, group: PropertyGroup = "brown"): Ce
       price: 200,
       rent: 20,
       housePrice: 50,
-      mortgageValue: 100,
+      mortgageValue: 100
     }),
   );
 }
@@ -64,12 +64,12 @@ export function makePlayer(overrides: Partial<Player> = {}): Player {
     position: overrides.position ?? 0,
     money: overrides.money ?? 1500,
     isBankrupt: overrides.isBankrupt ?? false,
-    jailCards: overrides.jailCards ?? 0,
+    holdableCards: {},
     inJail: overrides.inJail ?? false,
     jailTurns: overrides.jailTurns ?? 0,
     mustRollAgain: overrides.mustRollAgain ?? false,
     properties: overrides.properties ?? [],
-    ...overrides,
+    ...overrides
   } as Player;
 }
 
@@ -91,7 +91,7 @@ export function makeState(overrides: Partial<GameState> = {}): GameState {
     seed: overrides.seed ?? "test-seed",
     createdAt: overrides.createdAt ?? new Date().toISOString(),
     lastActivityAt: overrides.lastActivityAt ?? new Date().toISOString(),
-    ...overrides,
+    ...overrides
   } as GameState;
 }
 
@@ -99,10 +99,10 @@ export function makeTradeOffer(overrides: Partial<TradeOffer> = {}): TradeOffer 
   return {
     fromProperties: overrides.fromProperties ?? [],
     fromCash: overrides.fromCash ?? 0,
-    fromJailCards: overrides.fromJailCards ?? 0,
+    fromHoldableCardCount: overrides.fromHoldableCardCount ?? 0,
     toProperties: overrides.toProperties ?? [],
     toCash: overrides.toCash ?? 0,
-    toJailCards: overrides.toJailCards ?? 0,
+    toHoldableCardCount: overrides.toHoldableCardCount ?? 0
   };
 }
 

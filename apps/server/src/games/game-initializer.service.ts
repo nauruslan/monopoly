@@ -10,6 +10,7 @@ import {
   LUXURY_TAX_CARDS,
   shuffle,
 } from "@monopoly/shared";
+import { ensureDecksInitialized } from "./decks/deck-state-adapter";
 
 /**
  * Сервис инициализации новой партии.
@@ -61,7 +62,7 @@ export class GameInitializerService {
       position: 0,
       inJail: false,
       jailTurns: 0,
-      jailCards: 0,
+      holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
       isBankrupt: false,
@@ -100,7 +101,7 @@ export class GameInitializerService {
       createdAt: new Date().toISOString(),
       lastActivityAt: new Date().toISOString(),
       cardDecks,
-    };
+    } as GameState;
   }
 
   /**
@@ -132,8 +133,14 @@ export class GameInitializerService {
    * Перетасовать колоды заново с использованием АКТУАЛЬНОГО `state.seed`.
    * Вызывается из `GamesService.createGame` сразу после того, как БД
    * вернула настоящий seed (или из `loadSnapshot` если колоды пустые).
+   *
+   * Также инициализирует DeckModule (`state.decks`/`state.deckCards`)
+   * через {@link ensureDecksInitialized} — additive integration,
+   * не ломает legacy `state.cardDecks`.
    */
   reShuffleDecks(state: GameState): void {
     state.cardDecks = this.buildShuffledDecks(state.seed);
+    // Инициализация нового DeckModule (lazy, idempotent).
+    ensureDecksInitialized(state);
   }
 }

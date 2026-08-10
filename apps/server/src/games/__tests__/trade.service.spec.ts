@@ -6,7 +6,7 @@ import {
   makePlayer,
   makeState,
   makeTradeOffer,
-  resetCounters,
+  resetCounters
 } from "./factories";
 import type { GameState, Player } from "@monopoly/shared";
 
@@ -16,7 +16,7 @@ describe("TradeService", () => {
   beforeEach(async () => {
     resetCounters();
     const moduleRef = await Test.createTestingModule({
-      providers: [TradeService],
+      providers: [TradeService]
     }).compile();
     svc = moduleRef.get(TradeService);
   });
@@ -127,7 +127,7 @@ describe("TradeService", () => {
           fromProperties: [0],
           fromCash: 100,
           toProperties: [1],
-          toCash: 50,
+          toCash: 50
         }),
       );
 
@@ -228,7 +228,7 @@ describe("TradeService", () => {
           fromProperties: [0],
           fromCash: 0,
           toProperties: [1],
-          toCash: 200,
+          toCash: 200
         }),
       );
       svc.executeTrade(state);

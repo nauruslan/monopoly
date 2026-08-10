@@ -2,6 +2,9 @@
 import type { Cell, GameState, Player, TradeOffer } from "@monopoly/shared";
 import { BOARD } from "@monopoly/shared";
 import { BankruptcyService } from "../handlers/bankruptcy.service";
+import { decideJailEscape } from "../decks/bot-card.policy";
+import { countHoldableCards } from "../decks/holdable-cards.registry";
+import "../decks/holdable-cards.registry"; // side-effect: declare module merging
 
 /**
  * Решения бота.
@@ -127,7 +130,9 @@ export class BotService {
       // Стандартные фазы хода
       case "ROLLING":
         if (player.inJail) {
-          if (player.jailCards > 0) return "USE_CARD";
+          // Используем BotCardPolicy для выбора решения (USE_CARD > TRY_DOUBLE).
+          // legacy fallback удалён: используется только DeckModule (holdableCardCount)
+          if (countHoldableCards(player) > 0) return "USE_CARD";
           return "TRY_DOUBLE";
         }
         return "ROLL";
@@ -164,9 +169,20 @@ export class BotService {
       // Тюрьма
       case "JAIL_DECISION":
         if (state.justEnteredJail) return "END_TURN";
-        if (player.jailCards > 0) return "USE_CARD";
-        if (player.money >= 50) return "PAY_FINE";
-        return "TRY_DOUBLE";
+        // Используем BotCardPolicy для приоритизированного решения:
+        //   1) USE_CARD (если есть holdable jail-free);
+        //   2) PAY_FINE (если хватает денег);
+        //   3) TRY_DOUBLE (fallback).
+        switch (decideJailEscape({ player, state, jailFine: 50 }).kind) {
+          case "USE_CARD":
+            return "USE_CARD";
+          case "PAY":
+            return "PAY_FINE";
+          case "TRY_DOUBLE":
+            return "TRY_DOUBLE";
+          default:
+            return "TRY_DOUBLE";
+        }
 
       // Прерывания: аукцион
       case "AUCTION_ACTIVE":
@@ -630,23 +646,23 @@ export class BotService {
       ? {
           properties: [...offer.fromProperties],
           cash: offer.fromCash,
-          jailCards: offer.fromJailCards,
+          holdableCardCount: offer.fromHoldableCardCount,
         }
       : {
           properties: [...offer.toProperties],
           cash: offer.toCash,
-          jailCards: offer.toJailCards,
+          holdableCardCount: offer.toHoldableCardCount,
         };
     const myGet = isInitiator
       ? {
           properties: [...offer.toProperties],
           cash: offer.toCash,
-          jailCards: offer.toJailCards,
+          holdableCardCount: offer.toHoldableCardCount,
         }
       : {
           properties: [...offer.fromProperties],
           cash: offer.fromCash,
-          jailCards: offer.fromJailCards,
+          holdableCardCount: offer.fromHoldableCardCount,
         };
 
     // Запрет на передачу заложенных клеток с нашей стороны — иначе сервер
@@ -713,10 +729,10 @@ export class BotService {
             return this.packOffer(
               cleanedGive.properties,
               newGiveCash,
-              cleanedGive.jailCards,
+              cleanedGive.holdableCardCount,
               cleanedGet.properties,
               cleanedGet.cash,
-              cleanedGet.jailCards,
+              cleanedGet.holdableCardCount,
             );
           }
         }
@@ -738,10 +754,10 @@ export class BotService {
           return this.packOffer(
             newGiveProps,
             cleanedGive.cash,
-            cleanedGive.jailCards,
+            cleanedGive.holdableCardCount,
             cleanedGet.properties,
             cleanedGet.cash,
-            cleanedGet.jailCards,
+            cleanedGet.holdableCardCount,
           );
         }
       }
@@ -761,10 +777,10 @@ export class BotService {
         return this.packOffer(
           cleanedGive.properties,
           cleanedGive.cash,
-          cleanedGive.jailCards,
+          cleanedGive.holdableCardCount,
           cleanedGet.properties,
           newGetCash,
-          cleanedGet.jailCards,
+          cleanedGet.holdableCardCount,
         );
       }
     }
@@ -787,10 +803,10 @@ export class BotService {
     return {
       fromProperties: [...giveProps],
       fromCash: giveCash,
-      fromJailCards: giveJailCards,
+      fromHoldableCardCount: giveJailCards,
       toProperties: [...getProps],
       toCash: getCash,
-      toJailCards: getJailCards,
+      toHoldableCardCount: getJailCards,
     };
   }
 
@@ -873,10 +889,10 @@ export class BotService {
         offer: {
           fromProperties: [myCell.id],
           fromCash: adjustedCash,
-          fromJailCards: 0,
+          fromHoldableCardCount: 0,
           toProperties: [wantedCell.id],
           toCash: 0,
-          toJailCards: 0,
+          toHoldableCardCount: 0,
         },
       };
     }
@@ -887,10 +903,10 @@ export class BotService {
       offer: {
         fromProperties: [myCell.id],
         fromCash: offerCash,
-        fromJailCards: 0,
+        fromHoldableCardCount: 0,
         toProperties: [wantedCell.id],
         toCash: 0,
-        toJailCards: 0,
+        toHoldableCardCount: 0,
       },
     };
   }

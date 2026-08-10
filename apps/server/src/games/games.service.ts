@@ -1051,11 +1051,17 @@ export class GamesService {
         // флаги по правилам «попадание в тюрьму» (сбросить всё).
         player.mustRollAgain = false;
         player.consecutiveDoubles = 0;
+        // Для карточки GOTO_JAIL с клетки 30 мы НЕ вызываем DeckModule
+        // здесь: cardContext.card приходит из CHANCE_CARDS (это уже
+        // вытянутая карта). deckCardId ставим null — в
+        // applyCardEffectAndAdvance карта просто сгорает (DRAWN → USED)
+        // через логику goto-jail, без возврата в колоду.
         state.cardContext = {
           playerId: player.id,
           deck: "chance",
           card: jailCard,
           applied: false,
+          deckCardId: null,
         };
         state.phase = "CARD_REVEAL";
         return { card: jailCard };
@@ -1073,22 +1079,21 @@ export class GamesService {
     //                     НО НЕ применяет эффект. Клиент показывает модалку.
     //   2) CARD_EFFECT  — после CONFIRM_CARD эффект применяется.
     if (cell.type === "CHANCE" || cell.type === "TREASURY") {
-      const deck = cell.type === "CHANCE" ? "chance" : "treasury";
-      const card = this.cards.drawFromDeck(deck, state);
+      // Per-field: тянем из колоды, привязанной к КОНКРЕТНОЙ клетке (cell.id).
+      const drawResult = this.cards.drawFromCell(cell.id, state);
+      const card = drawResult.card;
+      const deckName = cell.type === "CHANCE" ? "chance" : "treasury";
       // Журнал: фиксируем, какая карточка была вытянута.
-      // «должна быть информация, какую карточку вытянул игрок».
-      // Регистрируем сразу при показе — так в журнале сначала идёт
-      // событие «бросок кубиков → попал на клетку → вытянул карту»,
-      // затем ниже (после CONFIRM_CARD) — событие с эффектом.
-      this.log.logCardDrawn(state, player, deck, card.text);
+      this.log.logCardDrawn(state, player, deckName, card.text);
       state.cardContext = {
         playerId: player.id,
-        deck,
-        card,
+        deck: deckName,
+        card: drawResult.card,
         applied: false,
+        deckCardId: drawResult.deckCardId || null,
       };
       state.phase = "CARD_REVEAL";
-      return { card };
+      return { card: drawResult.card };
     }
     // PROPERTY / RAILROAD / UTILITY.
     if (cell.type === "PROPERTY" || cell.type === "RAILROAD" || cell.type === "UTILITY") {
@@ -1128,7 +1133,8 @@ export class GamesService {
       // Сервер вытягивает карту, кладёт её в cardContext, фаза CARD_REVEAL
       // (модалка с описанием формулы; списывание — после CONFIRM_CARD в CARD_EFFECT).
       if (cell.taxVariant === "luxury") {
-        const card = this.cards.drawFromDeck("luxury-tax", state);
+        const drawResult = this.cards.drawFromDeck("luxury-tax", state);
+        const card = drawResult.card;
         // Журнал: фиксируем «вытянутую карточку-формулу».
         this.log.logCardDrawn(state, player, "luxury-tax", card.text);
         state.cardContext = {
@@ -1136,6 +1142,9 @@ export class GamesService {
           deck: "luxury-tax",
           card,
           applied: false,
+          // deckCardId нужен applyCardEffectAndAdvance для возврата карты
+          // в низ колоды (правило «discard to bottom»).
+          deckCardId: drawResult.deckCardId || null,
         };
         state.phase = "CARD_REVEAL";
         return { card };
@@ -1736,6 +1745,11 @@ export class GamesService {
         isDouble: false,
         direction,
       };
+      // Правило Монополии «discard to bottom»: возвращаем вытянутую
+      // не-holdable карту в НИЗ её исходной колоды (state.deckCards).
+      // Для holdable карт (ch7) — no-op: карта осталась бы в IN_HAND,
+      // но мы тут обрабатываем только move-эффекты, holdable их не имеют.
+      this.cards.returnDrawnCardIfNeeded(state, state.cardContext.deckCardId);
       // Очищаем cardContext — карта «съедена», эффект move применён.
       // Без этого клиент видел ту же карту в MOVE_ANIMATION и мог
       // повторно открыть модалку.
@@ -1805,6 +1819,8 @@ export class GamesService {
         isDouble: false,
         direction,
       };
+      // Правило «discard to bottom» (см. ветку `move`).
+      this.cards.returnDrawnCardIfNeeded(state, state.cardContext.deckCardId);
       // Очищаем cardContext (см. комментарий в ветке `move`).
       state.cardContext = undefined;
       state.phase = "MOVE_ANIMATION";
@@ -1847,6 +1863,8 @@ export class GamesService {
         isDouble: false,
         direction,
       };
+      // Правило «discard to bottom» (см. ветку `move`).
+      this.cards.returnDrawnCardIfNeeded(state, state.cardContext.deckCardId);
       state.cardContext = undefined;
       state.phase = "MOVE_ANIMATION";
       state.lastDice = {
@@ -1886,6 +1904,10 @@ export class GamesService {
       this.log.logLuxuryTaxPaid(state, player, total, houses, hotels, properties);
     }
 
+    // Правило «discard to bottom»: возвращаем не-holdable карту в
+    // НИЗ её колоды. Для holdable (jail-free / ch7) — no-op
+    // (карта уже в IN_HAND внутри grantJailFreeCard).
+    this.cards.returnDrawnCardIfNeeded(state, state.cardContext.deckCardId);
     if (this.shouldStartBankruptcy(state, player, null, 0)) {
       // shouldStartBankruptcy уже изменил фазу на BANKRUPTCY_LIQUIDATE
       // (или объявил банкрота) — возвращаемся, дальнейшие шаги не нужны.
@@ -2387,8 +2409,9 @@ export class GamesService {
     }
 
     if (action.type === "USE_JAIL_CARD") {
-      if (player.jailCards === 0) throw new ForbiddenException("Нет карточек выхода");
-      player.jailCards -= 1;
+      if (Object.keys(player.holdableCards ?? {}).length === 0)
+        throw new ForbiddenException("Нет карточек выхода");
+      delete (player.holdableCards ?? {})["legacy-jail-card"];
       player.inJail = false;
       player.jailTurns = 0;
       // Журнал: «Игрок использует карточку выхода из тюрьмы».

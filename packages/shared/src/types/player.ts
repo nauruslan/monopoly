@@ -4,6 +4,28 @@
 // guest — без регистрации
 export type PlayerKind = "human" | "bot" | "guest";
 
+/**
+ * HoldableCardEntry — метаданные одной карты в инвентаре игрока.
+ *
+ * Источник истины по состоянию карты (`IN_HAND` / `USED`) — в DeckModule
+ * (`state.deckCards`). Эта запись — лишь ЛЁГКИЙ кэш для UI, чтобы инвентарь
+ * рендерился без обращения к DeckModule на каждое нажатие.
+ */
+export interface HoldableCardEntry {
+  /** ID шаблона карты (например, "ch7" → Выход из тюрьмы бесплатно). */
+  templateId: string;
+  /** ISO-таймстемп, когда карта была вытянута. */
+  drawnAt: string;
+  /** ID исходной колоды (для trace'а). */
+  originDeckId: string;
+  /**
+   * Если `true` — эта запись создана backfill'ом из legacy-снапшота
+   * при миграции; реального `CardInstance` с этим ключом может не существовать.
+   * UI должна показывать такие как placeholder.
+   */
+  legacyOnly?: boolean;
+}
+
 // Player — основной интерфейс игрока
 export interface Player {
   // Уникальный ID (uuid, генерируем на сервере)
@@ -35,8 +57,10 @@ export interface Player {
   // После 3 ходов — вынужден заплатить 50₽
   jailTurns: number;
 
-  // Сколько карточек "выйди из тюрьмы бесплатно" у игрока
-  jailCards: number;
+  // Карты, удерживаемые игроком (get-out-of-jail-free и т.п.).
+  // Ключ — `cardId` из DeckModule (`state.deckCards`).
+  // Источник истины для UI/торговли/выхода из тюрьмы.
+  holdableCards?: Record<string, HoldableCardEntry>;
 
   // Массив ID клеток, принадлежащих игроку
   properties: number[];

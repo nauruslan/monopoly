@@ -5,7 +5,7 @@
 export type { Cell, CellType, PropertyGroup } from "./types/cell";
 
 // Типы: игроки
-export type { Player, PlayerKind } from "./types/player";
+export type { Player, PlayerKind, HoldableCardEntry } from "./types/player";
 
 // Типы: игра
 export type {

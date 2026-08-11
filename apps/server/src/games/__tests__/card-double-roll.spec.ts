@@ -162,11 +162,6 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [card.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
     return p;
   }
 
@@ -194,12 +189,6 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [], cursor: 0 },
-      treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 20
     //    (а не телепортируется мгновенно, как раньше — это был баг).
     //    `mustRollAgain` и `consecutiveDoubles` сбрасываются, фишка
@@ -265,12 +254,6 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [], cursor: 0 },
-      treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD: анимация к 20 ВПЕРЁД (forward, 2→...→20).
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(false);
@@ -306,12 +289,6 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [], cursor: 0 },
-      treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ backward (30→29→...→20, 10 шагов).
     //    ВАЖНО: НЕ через СТАРТ (это было бы 30 шагов вперёд, что
     //    бессмысленно и не соответствует правилам Монополии).
@@ -361,12 +338,6 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [], cursor: 0 },
-      treasury: { cards: [parkingCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD → MOVE_ANIMATION (анимация к 20, forward — from=2 < to=20).
     //    Здесь from=2 (Казна) < to=20, поэтому по правилу
     //    «кратчайший путь без прохода через СТАРТ» анимация идёт
@@ -485,12 +456,6 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [backCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD — move-relative не сбрасывает mustRollAgain,
     //    фаза MOVE_ANIMATION (перемещение через анимацию, не телепорт).
     await act({ type: "CONFIRM_CARD" });
@@ -538,11 +503,6 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       card: goCard,
       applied: false,
         deckCardId: null
-    };
-    activeState.cardDecks = {
-      chance: { cards: [goCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
     };
     const moneyBefore = p.money;
     const goSalary = activeState.settings.goSalary;

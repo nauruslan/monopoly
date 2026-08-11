@@ -1,12 +1,12 @@
 /**
  * BotCardPolicy — решения бота по holdable картам и карточным действиям.
  *
- * Заменяет hardcoded проверки `Object.keys(player.holdableCards ?? {}).length > 0` в [`bot.service.ts`](apps/server/src/games/bots/bot.service.ts:130)
- * на более умную логику, использующую DeckModule (когда доступен).
+ * Реализует правила принятия решений ботом на основе состояния DeckModule
+ * (`player.holdableCards`, `state.deckCards`).
  *
  * ТЕКУЩИЙ MVP:
  *  - `decideJailEscape(player, state)` — что делать, если игрок в тюрьме:
- *      * USE_CARD (consumeJailCard), если есть holdable jail-free
+ *      * USE_CARD (consumeHoldableJailCard), если есть holdable jail-free
  *      * PAY (заплатить 50₽)
  *      * TRY_DOUBLE (попробовать выйти по дублю)
  *  - `shouldUseHoldableCard(player, cardId)` — стоит ли использовать
@@ -17,7 +17,6 @@
  * Все решения работают на DeckModule (holdableCards).
  */
 import type { Player, GameState } from "@monopoly/shared";
-import { randomUUID } from "crypto";
 
 import {
   countHoldableCards,
@@ -83,24 +82,16 @@ export function decideJailEscape(ctx: BotCardContext): JailEscapeDecision {
 /**
  * Найти первую holdable jail-free карту у игрока.
  *
- * По новому реестру `player.holdableCards`:
+ * По реестру `player.holdableCards`:
  *   - итерируем `cardId` записи;
- *   - проверяем, что карта имеет `templateId === "ch7"` или подобный.
- *
- * По legacy `Object.keys(player.holdableCards ?? {}).length`:
- *   - возвращаем synthetic ID `legacy-jailfree-<uuid>`, который будет
- *     обработан через `consumeHoldableJailCard()` (fallback).
+ *   - возвращаем первую карту, у которой `templateId` соответствует
+ *     jail-free шаблону («ch7»).
  */
 export function findJailFreeCardInHand(player: Player): string | null {
   const ids = listHoldableCardIds(player);
-  if (ids.length === 0) {
-    // Legacy fallback.
-    if (Object.keys(player.holdableCards ?? {}).length > 0) {
-      return `legacy-jailfree-${randomUUID()}`;
-    }
-    return null;
-  }
-  // Если есть holdableCards — ищем среди них ch7 (или иной jail-free шаблон).
+  if (ids.length === 0) return null;
+
+  // Ищем карту с шаблоном jail-free (ch7).
   for (const cardId of ids) {
     const entry = player.holdableCards?.[cardId];
     if (!entry) continue;
@@ -108,6 +99,7 @@ export function findJailFreeCardInHand(player: Player): string | null {
       return cardId;
     }
   }
+
   // Если нашли хоть что-то holdable — возвращаем первую как fallback.
   return ids[0] ?? null;
 }
@@ -120,7 +112,7 @@ export function findJailFreeCardInHand(player: Player): string | null {
  * Сейчас бот использует карту, если:
  *  - карта — jail-free и игрок в тюрьме;
  *
- * Остальные типы эффектов пока НЕ реализованы (ШАГ 8+).
+ * Остальные типы эффектов пока НЕ реализованы.
  */
 export function shouldUseHoldableCard(ctx: BotCardContext, cardId: string): boolean {
   const { player, state } = ctx;
@@ -143,9 +135,7 @@ export function shouldUseHoldableCard(ctx: BotCardContext, cardId: string): bool
  */
 export function shouldTransferHoldableCard(
   _ctx: BotCardContext,
-
   _targetPlayerId: string,
-
   _cardId: string,
 ): boolean {
   // Бот не отдаёт jail-free сам — только продаёт за деньги.

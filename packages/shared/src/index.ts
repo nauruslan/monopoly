@@ -13,7 +13,6 @@ export type {
   GameSettings,
   Phase,
   TradeOffer,
-  CardDeckState,
   AuctionActionLogEntry,
 } from "./types/game";
 export { DEFAULT_SETTINGS } from "./types/game";

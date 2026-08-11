@@ -28,11 +28,6 @@ function makeState(): GameState {
     settings: {} as GameState["settings"],
     createdAt: "",
     lastActivityAt: "",
-    cardDecks: {
-      chance: { cards: [], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
-    },
   };
 }
 

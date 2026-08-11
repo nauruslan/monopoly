@@ -1,15 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { randomUUID } from "crypto";
-import seedrandom from "seedrandom";
-import type { GameState, Player, GameSettings, Cell, CardDeckState } from "@monopoly/shared";
-import {
-  BOARD,
-  DEFAULT_SETTINGS,
-  CHANCE_CARDS,
-  TREASURY_CARDS,
-  LUXURY_TAX_CARDS,
-  shuffle,
-} from "@monopoly/shared";
+import type { GameState, Player, GameSettings, Cell } from "@monopoly/shared";
+import { BOARD, DEFAULT_SETTINGS } from "@monopoly/shared";
 import { ensureDecksInitialized } from "./decks/deck-state-adapter";
 
 /**
@@ -20,11 +12,11 @@ import { ensureDecksInitialized } from "./decks/deck-state-adapter";
  *   - игроками, распределёнными по цветам/иконкам;
  *   - доской `BOARD` с очищенными `ownerId` / `houses` / `isMortgaged`;
  *   - настройками по умолчанию (можно переопределить через `customSettings`);
- *   - **перемешанными колодами карточек** (Шанс, Общественная казна,
- *     Роскошный налог) с курсором 0.
+ *   - перемешанными колодами карточек (Шанс, Общественная казна,
+ *     Роскошный налог) — DeckModule, `state.decks` / `state.deckCards`.
  *
  * Возвращаемый `id` — это локальный uuid, который в `GamesService.createGame`
- * будет заменён на реальный id из БД .
+ * будет заменён на реальный id из БД.
  */
 @Injectable()
 export class GameInitializerService {
@@ -68,22 +60,17 @@ export class GameInitializerService {
       isBankrupt: false,
     }));
 
-    // Колоды карточек (детерминированный shuffle по seed)
-    // ВАЖНО: `seed` ниже — placeholder. Реальный seed
-    // придёт из БД в GamesService.createGame, и тогда колоды будут
-    // Перемешаны заново. Здесь же используем
-    // временный seed, чтобы инициализатор оставался детерминированным и
-    // юнит-тестируемым без обращения к БД.
-    const tempSeed = randomUUID();
-    const cardDecks = this.buildShuffledDecks(tempSeed);
+    // `seed` — placeholder. Реальный криптостойкий seed генерируется
+    // в `GameRepository.create` и переписывается в snapshot уже оттуда.
+    const seed = randomUUID();
 
-    return {
+    // DeckModule: инициализируем колоды (по правилу «одна колода на
+    // клетку CHANCE/COMMUNITY_CHEST/LUXURY_TAX»). Идемпотентно —
+    // после `ensureDecksInitialized` state.decks/deckCards заполнены.
+    const state: GameState = {
       id: randomUUID(),
       version: 1,
-      // `seed` здесь — placeholder. Реальный криптостойкий seed
-      // генерируется в `GameRepository.create` и переписывается
-      // в snapshot уже оттуда.
-      seed: tempSeed,
+      seed,
       status: "waiting",
       currentPlayerIndex: 0,
       phase: "IDLE",
@@ -100,47 +87,20 @@ export class GameInitializerService {
       settings,
       createdAt: new Date().toISOString(),
       lastActivityAt: new Date().toISOString(),
-      cardDecks,
-    } as GameState;
-  }
-
-  /**
-   * Создаёт перемешанные колоды (Шанс / Казна / Роскошный налог)
-   * на основе `seed`. Возвращаемый объект кладётся в `state.cardDecks`.
-   *
-   * Карты в колодах хранятся как массив `id`-шников; на сервере при
-   * `drawFromDeck` мы ищем полный `Card` по id в соответствующей
-   * константе из shared.
-   */
-  buildShuffledDecks(seed: string): GameState["cardDecks"] {
-    const rngChance = seedrandom(`${seed}:deck:chance`);
-    const rngTreasury = seedrandom(`${seed}:deck:treasury`);
-    const rngLuxury = seedrandom(`${seed}:deck:luxury-tax`);
-
-    const makeDeck = (cards: readonly { id: string }[], rng: () => number): CardDeckState => ({
-      cards: shuffle(cards, rng).map((c) => c.id),
-      cursor: 0,
-    });
-
-    return {
-      chance: makeDeck(CHANCE_CARDS, rngChance),
-      treasury: makeDeck(TREASURY_CARDS, rngTreasury),
-      "luxury-tax": makeDeck(LUXURY_TAX_CARDS, rngLuxury),
     };
+
+    ensureDecksInitialized(state);
+
+    return state;
   }
 
   /**
-   * Перетасовать колоды заново с использованием АКТУАЛЬНОГО `state.seed`.
+   * Инициализирует DeckModule на уже существующем state.
+   *
    * Вызывается из `GamesService.createGame` сразу после того, как БД
    * вернула настоящий seed (или из `loadSnapshot` если колоды пустые).
-   *
-   * Также инициализирует DeckModule (`state.decks`/`state.deckCards`)
-   * через {@link ensureDecksInitialized} — additive integration,
-   * не ломает legacy `state.cardDecks`.
    */
   reShuffleDecks(state: GameState): void {
-    state.cardDecks = this.buildShuffledDecks(state.seed);
-    // Инициализация нового DeckModule (lazy, idempotent).
     ensureDecksInitialized(state);
   }
 }

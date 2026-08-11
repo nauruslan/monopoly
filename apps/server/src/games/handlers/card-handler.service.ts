@@ -3,15 +3,14 @@ import { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS, type Card } from "@mono
 import type { Player, GameState } from "@monopoly/shared";
 import { drawCard, returnCardToDeck } from "../decks/deck.service";
 import { cardsToTemplates } from "../decks/card-template";
-import { ensureDecksInitialized, findLegacyCardByTemplateId } from "../decks/deck-state-adapter";
-import { syncHoldableCards } from "../decks/holdable-cards.registry";
-import { grantJailFreeCard } from "../decks/holdable-cards.registry";
+import { ensureDecksInitialized } from "../decks/deck-state-adapter";
+import { grantJailFreeCard, findCardByTemplateId } from "../decks/holdable-cards.registry";
 import type { CardTemplate } from "../decks/types";
 // Side-effect import: расширяет Player/GameState через declaration merging.
 import "../decks/holdable-cards.registry";
 
 /**
- * Строит `Map<templateId, CardTemplate>` для DeckService из всех legacy-карт.
+ * Строит `Map<templateId, CardTemplate>` для DeckService из всех карт.
  *
  * Используется только в {@link CardHandlerService.drawFromDeck} для
  * удовлетворения обязательного поля `DeckContext.templatesById`.
@@ -31,7 +30,7 @@ function buildTemplatesById(): ReadonlyMap<string, CardTemplate> {
 /**
  * Результат вытягивания карты из колоды.
  *
- *  - `card`     — legacy `Card` для показа в CardModal и для applyEffect;
+ *  - `card`     — `Card` для показа в CardModal и для applyEffect;
  *  - `deckCardId` — ID в DeckModule (`state.deckCards[].cardId`), нужен
  *    вызывающему коду (GamesService), чтобы после применения эффекта
  *    вернуть НЕ-holdable карту в НИЗ колоды (правило Монополии
@@ -57,7 +56,7 @@ export interface DrawFromDeckResult {
  *     из deck.service. Если boardFieldId не совпадает (кастомная доска)
  *     — fallback на первый deck соответствующего типа.
  *     НЕ применяет эффект, НЕ мутирует state игрока.
- *     Возвращает `{ card, deckCardId, holdInHand }` — legacy `Card` плюс
+ *     Возвращает `{ card, deckCardId, holdInHand }` — `Card` плюс
  *     идентификатор DeckModule-карты, чтобы GamesService мог вернуть её
  *     в низ колоды (правило «discard to bottom»).
  *
@@ -86,13 +85,13 @@ export class CardHandlerService {
    *
    * Алгоритм:
    *  1) ensureDecksInitialized(state) — ленивая инициализация state.decks/deckCards
-   *     из legacy state.cardDecks (для совместимости со старыми снапшотами БД);
-   *  2) Преобразуем legacy deck-name в boardFieldId (7 / 2 / 38);
+   *     из shared-данных CHANCE_CARDS / TREASURY_CARDS / LUXURY_TAX_CARDS;
+   *  2) Преобразуем имя колоды в boardFieldId (7 / 2 / 38);
    *  3) drawCard(ctx, {boardFieldId, playerId}) — снимает верхнюю карту через DeckService;
    *  4) state.decks = result.decks; state.deckCards = result.cards;
-   *  5) Конвертируем CardInstance.templateId → legacy Card (для applyEffect + CardModal).
+   *  5) Конвертируем CardInstance.templateId → `Card` (для applyEffect + CardModal).
    *
-   * Если CHANCE/TREASURY/LUXURY_TAX клетка на boardFieldId=7/2/38 не
+   * Если CHANCE/COMMUNITY_CHEST/LUXURY_TAX клетка на boardFieldId=7/2/38 не
    * представлена в state.decks (тестовая кастомная доска), fallback на
    * первый deck соответствующего типа.
    *
@@ -108,8 +107,8 @@ export class CardHandlerService {
     // 1) Lazy init DeckModule (idempotent).
     const init = ensureDecksInitialized(state);
 
-    // 2) Маппинг legacy deck-name → boardFieldId на DEFAULT_BOARD.
-    const targetFieldId = this.legacyDeckFieldId(deck);
+    // 2) Маппинг deck-name → boardFieldId на DEFAULT_BOARD.
+    const targetFieldId = this.deckFieldId(deck);
 
     // 3) Ищем колоду: сначала точное совпадение boardFieldId, иначе —
     //    первый deck соответствующего типа (для кастомных досок).
@@ -119,8 +118,8 @@ export class CardHandlerService {
         deck === "chance" ? "CHANCE" : deck === "treasury" ? "COMMUNITY_CHEST" : "LUXURY_TAX";
       const fallback = init.decks.find((d) => d.deckType === targetType);
       if (!fallback) {
-        const legacy = this.fallbackLegacyCard(deck);
-        return { card: legacy, deckCardId: "", holdInHand: false };
+        const card = this.fallbackCard(deck);
+        return { card, deckCardId: "", holdInHand: false };
       }
       resolvedFieldId = fallback.boardFieldId;
     }
@@ -147,31 +146,114 @@ export class CardHandlerService {
     const template = templates.get(result.drawnCard.templateId);
     const holdInHand = template?.holdInHand ?? false;
 
-    // 7) Конвертируем CardInstance.templateId → legacy Card.
-    const legacy = findLegacyCardByTemplateId(result.drawnCard.templateId);
-    if (legacy) {
-      return { card: legacy, deckCardId: result.drawnCard.cardId, holdInHand };
+    // 7) Конвертируем CardInstance.templateId → `Card`.
+    const card = findCardByTemplateId(result.drawnCard.templateId);
+    if (card) {
+      return { card, deckCardId: result.drawnCard.cardId, holdInHand };
     }
 
-    // Шаблон не найден в legacy-источнике — fallback.
+    // Шаблон не найден — fallback.
     Logger.warn(
-      `[CardHandlerService] templateId=${result.drawnCard.templateId} не найден в legacy cards`,
+      `[CardHandlerService] templateId=${result.drawnCard.templateId} не найден в справочнике`,
       "CardHandlerService",
     );
     return {
-      card: this.fallbackLegacyCard(deck),
+      card: this.fallbackCard(deck),
       deckCardId: result.drawnCard.cardId,
       holdInHand,
     };
   }
 
   /**
-   * Legacy-метод для обратной совместимости. Возвращает только legacy `Card`.
-   * Не рекомендуется к использованию — `drawFromDeck` отдаёт ещё и
-   * `deckCardId` / `holdInHand`, которые нужны GamesService.
+   * Достать карту из колоды, привязанной к КОНКРЕТНОЙ клетке доски.
+   * Используется в GamesService, когда игрок попал на конкретную
+   * CHANCE/COMMUNITY_CHEST/LUXURY_TAX клетку.
+   *
+   * Если для клетки нет своей колоды (кастомная доска, клетка не из
+   * DEFAULT_*_FIELD_IDS) — fallback на первый deck того же типа.
    */
-  draw(deck: "chance" | "treasury", state: GameState): Card {
-    return this.drawFromDeck(deck, state).card;
+  drawFromCell(boardFieldId: number, state: GameState, playerId?: string): DrawFromDeckResult {
+    const init = ensureDecksInitialized(state);
+    const exact = init.decks.find((d) => d.boardFieldId === boardFieldId);
+    if (exact) {
+      return this.drawFromCellInternal(boardFieldId, state, playerId ?? "");
+    }
+    const cell = state.board[boardFieldId];
+    const targetType =
+      cell?.type === "CHANCE" ? "CHANCE" : cell?.type === "TREASURY" ? "COMMUNITY_CHEST" : null;
+    if (!targetType) {
+      // LUXURY_TAX и прочие — fallback на chance (drawFromDeck решит по типу).
+      if (cell?.type === "TAX") return this.drawFromDeck("luxury-tax", state, playerId);
+      return this.drawFromDeck("chance", state, playerId);
+    }
+    const fallback = init.decks.find((d) => d.deckType === targetType);
+    if (!fallback) {
+      const deckName = targetType === "CHANCE" ? "chance" : "treasury";
+      return { card: this.fallbackCard(deckName), deckCardId: "", holdInHand: false };
+    }
+    return this.drawFromCellInternal(fallback.boardFieldId, state, playerId ?? "");
+  }
+
+  /**
+   * Внутренний хелпер: фактически вызывает drawCard и обновляет state.
+   * Принимает уже РЕШЁННЫЙ boardFieldId (точно соответствующий колоде).
+   */
+  private drawFromCellInternal(
+    resolvedFieldId: number,
+    state: GameState,
+    playerId: string,
+  ): DrawFromDeckResult {
+    const init = ensureDecksInitialized(state);
+    const templates = buildTemplatesById();
+    const result = drawCard(
+      {
+        gameId: state.id,
+        decks: init.decks,
+        cards: init.cards,
+        templatesById: templates,
+        emptyDeckPolicy: "ERROR",
+      },
+      { boardFieldId: resolvedFieldId, playerId },
+    );
+    state.decks = result.decks as typeof state.decks;
+    state.deckCards = result.cards as typeof state.deckCards;
+    const template = templates.get(result.drawnCard.templateId);
+    const holdInHand = template?.holdInHand ?? false;
+    const card = findCardByTemplateId(result.drawnCard.templateId);
+    if (card) {
+      return { card, deckCardId: result.drawnCard.cardId, holdInHand };
+    }
+    Logger.warn(
+      `[CardHandlerService] templateId=${result.drawnCard.templateId} не найден в справочнике`,
+      "CardHandlerService",
+    );
+    const deck = init.decks.find((d) => d.boardFieldId === resolvedFieldId);
+    const fallbackDeckName =
+      deck?.deckType === "CHANCE"
+        ? "chance"
+        : deck?.deckType === "COMMUNITY_CHEST"
+          ? "treasury"
+          : "luxury-tax";
+    return {
+      card: this.fallbackCard(fallbackDeckName),
+      deckCardId: result.drawnCard.cardId,
+      holdInHand,
+    };
+  }
+
+  private deckFieldId(deck: "chance" | "treasury" | "luxury-tax"): number {
+    if (deck === "chance") return 7;
+    if (deck === "treasury") return 2;
+    return 38; // luxury-tax
+  }
+
+  /**
+   * Fallback: первая попавшаяся карта из источника.
+   */
+  private fallbackCard(deck: "chance" | "treasury" | "luxury-tax"): Card {
+    const allCards: readonly Card[] =
+      deck === "chance" ? CHANCE_CARDS : deck === "treasury" ? TREASURY_CARDS : LUXURY_TAX_CARDS;
+    return allCards[0]!;
   }
 
   /**
@@ -185,7 +267,7 @@ export class CardHandlerService {
    * реального использования через `useCardFromHand`.
    *
    * Идемпотентно: если карты уже нет в state.deckCards (например,
-   * `deckCardId === ""` для legacy-fallback), или её состояние уже
+   * `deckCardId === ""` для fallback), или её состояние уже
    * не DRAWN/RESOLVING — no-op.
    *
    * @param deckCardId ID DeckModule-карты (из `state.cardContext.deckCardId`)
@@ -227,114 +309,6 @@ export class CardHandlerService {
         "CardHandlerService",
       );
     }
-  }
-
-  /**
-   * Маппинг legacy deck-name → boardFieldId на DEFAULT_BOARD.
-   */
-
-  /**
-   * Per-field вариант: достать карту из колоды, привязанной к КОНКРЕТНОЙ
-   * клетке доски (boardFieldId). Используется в GamesService, когда игрок
-   * попал на конкретную CHANCE/TREASURY/LUXURY_TAX клетку.
-   *
-   * Если для клетки нет своей колоды (кастомная доска, клетка не из
-   * DEFAULT_*_FIELD_IDS) — fallback на первый deck того же типа.
-   *
-   * @param boardFieldId ID клетки, на которой стоит игрок
-   * @param state полный state партии
-   * @param playerId опционально: ID текущего игрока (для событий DeckModule)
-   */
-  drawFromCell(
-    boardFieldId: number,
-    state: GameState,
-    playerId?: string,
-  ): DrawFromDeckResult {
-    const init = ensureDecksInitialized(state);
-    const exact = init.decks.find((d) => d.boardFieldId === boardFieldId);
-    if (exact) {
-      return this.drawFromCellInternal(boardFieldId, state, playerId ?? "");
-    }
-    const cell = state.board[boardFieldId];
-    const targetType =
-      cell?.type === "CHANCE"
-        ? "CHANCE"
-        : cell?.type === "TREASURY"
-          ? "COMMUNITY_CHEST"
-          : null;
-    if (!targetType) {
-      // LUXURY_TAX и прочие — fallback на chance (drawFromDeck решит по типу).
-      if (cell?.type === "TAX") return this.drawFromDeck("luxury-tax", state, playerId);
-      return this.drawFromDeck("chance", state, playerId);
-    }
-    const fallback = init.decks.find((d) => d.deckType === targetType);
-    if (!fallback) {
-      const legacyDeck = targetType === "CHANCE" ? "chance" : "treasury";
-      return { card: this.fallbackLegacyCard(legacyDeck), deckCardId: "", holdInHand: false };
-    }
-    return this.drawFromCellInternal(fallback.boardFieldId, state, playerId ?? "");
-  }
-
-  /**
-   * Внутренний хелпер: фактически вызывает drawCard и обновляет state.
-   * Принимает уже РЕШЁННЫЙ boardFieldId (точно соответствующий колоде).
-   */
-  private drawFromCellInternal(
-    resolvedFieldId: number,
-    state: GameState,
-    playerId: string,
-  ): DrawFromDeckResult {
-    const init = ensureDecksInitialized(state);
-    const templates = buildTemplatesById();
-    const result = drawCard(
-      {
-        gameId: state.id,
-        decks: init.decks,
-        cards: init.cards,
-        templatesById: templates,
-        emptyDeckPolicy: "ERROR",
-      },
-      { boardFieldId: resolvedFieldId, playerId },
-    );
-    state.decks = result.decks as typeof state.decks;
-    state.deckCards = result.cards as typeof state.deckCards;
-    const template = templates.get(result.drawnCard.templateId);
-    const holdInHand = template?.holdInHand ?? false;
-    const legacy = findLegacyCardByTemplateId(result.drawnCard.templateId);
-    if (legacy) {
-      return { card: legacy, deckCardId: result.drawnCard.cardId, holdInHand };
-    }
-    Logger.warn(
-      `[CardHandlerService] templateId=${result.drawnCard.templateId} не найден в legacy cards`,
-      "CardHandlerService",
-    );
-    const deck = init.decks.find((d) => d.boardFieldId === resolvedFieldId);
-    const fallbackDeckName =
-      deck?.deckType === "CHANCE"
-        ? "chance"
-        : deck?.deckType === "COMMUNITY_CHEST"
-          ? "treasury"
-          : "luxury-tax";
-    return {
-      card: this.fallbackLegacyCard(fallbackDeckName),
-      deckCardId: result.drawnCard.cardId,
-      holdInHand,
-    };
-  }
-
-  private legacyDeckFieldId(deck: "chance" | "treasury" | "luxury-tax"): number {
-    if (deck === "chance") return 7;
-    if (deck === "treasury") return 2;
-    return 38; // luxury-tax
-  }
-
-  /**
-   * Fallback: первая попавшаяся legacy-карта из источника.
-   */
-  private fallbackLegacyCard(deck: "chance" | "treasury" | "luxury-tax"): Card {
-    const allCards: readonly Card[] =
-      deck === "chance" ? CHANCE_CARDS : deck === "treasury" ? TREASURY_CARDS : LUXURY_TAX_CARDS;
-    return allCards[0]!;
   }
 
   /**
@@ -425,24 +399,16 @@ export class CardHandlerService {
       }
 
       case "jail-free": {
-        // Выдаём карточку "выйди из тюрьмы бесплатно".
+        // Выдаём игроку карточку «выйди из тюрьмы бесплатно».
         //
         // Логика DeckModule:
-        //  1) Инициализируем DeckModule (lazy, idempotent);
-        //  2) Пробуем создать реальный CardInstance в IN_HAND (через DeckModule);
-        //  3) Синхронизируем holdable-карты (DeckModule)
-        //     `player.holdableCards` через {@link syncHoldableCards}.
-        //
-        // Если DeckModule по какой-то причине не смог выдать карту
-        // (например, ch7 уже вытянут ранее), fallback на legacy-счётчик.
+        //  1) Ленивая инициализация колод (idempotent).
+        //  2) Создаём реальный CardInstance в IN_HAND
+        //     и синхронизируем `player.holdableCards`
+        //     через {@link syncHoldableCards} (вызывается
+        //     внутри {@link grantJailFreeCard}).
         ensureDecksInitialized(state);
-        const result = grantJailFreeCard(player, state, card.id);
-        if (result) {
-          // syncHoldableCards уже выполнен внутри grantJailFreeCard.
-        } else {
-          // Fallback: только legacy-счётчик (на всякий случай).
-          syncHoldableCards(player, state, { delta: 1 });
-        }
+        grantJailFreeCard(player, state, card.id);
         return { kind: "stay" };
       }
 

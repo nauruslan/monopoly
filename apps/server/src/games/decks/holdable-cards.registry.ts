@@ -8,13 +8,14 @@
  *  - `syncHoldableCards(player, state, { delta, cardId, templateId })` — добавить/убрать карту;
  *  - `grantJailFreeCard(player, state, templateId)` — применить `jail-free` эффект через DeckService;
  *  - `consumeHoldableJailCard(player, state)` — использовать holdable jail-free карту;
- *  - `backfillHoldableCards(state)` — миграция legacy снапшотов;
- *  - `hasHoldableCard`, `listHoldableCardIds`, `getFirstHoldableLegacyCard`, `pickHoldableCardIds` — утилиты.
+ *  - `backfillHoldableCards(state)` — инициализация пустых `holdableCards` для всех игроков;
+ *  - `hasHoldableCard`, `listHoldableCardIds`, `pickHoldableCardIds` — утилиты.
  */
-import type { Player, GameState } from "@monopoly/shared";
+import type { Player, GameState, Card } from "@monopoly/shared";
+import { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS } from "@monopoly/shared";
 import type { CardInstance, HoldableCardEntry, CardTemplate } from "./types";
 import { findCardByIdSafe, holdCardInHand, useCardFromHand } from "./deck.service";
-import { ensureDecksInitialized, findLegacyCardByTemplateId } from "./deck-state-adapter";
+import { ensureDecksInitialized } from "./deck-state-adapter";
 
 // Расширение Player и GameState через declaration merging.
 
@@ -191,13 +192,13 @@ export function consumeHoldableJailCard(player: Player, state: GameState): strin
 }
 
 /**
- * Миграция: если у игрока НЕТ holdableCards, но DeckModule инициализирован —
- * создаём placeholder-запись. Это для старых снапшотов.
+ * Инициализация `holdableCards` для всех игроков (если поле отсутствует).
  *
- * Используется в `games.service.ts.loadSnapshot` / `getGameState`.
+ * Используется в `games.service.ts` сразу после восстановления состояния
+ * из БД, чтобы у всех игроков был инициализирован пустой объект
+ * `holdableCards` (а не `undefined`).
  */
 export function backfillHoldableCards(state: GameState): void {
-  if (!state.deckCards || state.deckCards.length === 0) return;
   for (const player of state.players) {
     if (!player.holdableCards) {
       player.holdableCards = {};
@@ -224,19 +225,18 @@ export function listHoldableCardIds(player: Player): string[] {
 }
 
 /**
- * Получить legacy `Card` для UI (CardModal.vue работает с legacy типом).
+ * Найти шаблон карты по её `templateId` в общем справочнике.
+ *
+ * Используется для отображения карточки в UI (CardModal.vue работает
+ * с `Card` из shared, а не с CardTemplate).
  */
-export function getFirstHoldableLegacyCard(
-  player: Player,
-): { cardId: string; card: ReturnType<typeof findLegacyCardByTemplateId> } | null {
-  if (!player.holdableCards) return null;
-  const cardIds = Object.keys(player.holdableCards);
-  if (cardIds.length === 0) return null;
-  const cardId = cardIds[0]!;
-  const entry = player.holdableCards[cardId]!;
-  const card = findLegacyCardByTemplateId(entry.templateId);
-  if (!card) return null;
-  return { cardId, card };
+export function findCardByTemplateId(templateId: string): Card | null {
+  const sources: readonly (readonly Card[])[] = [CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS];
+  for (const src of sources) {
+    const found = src.find((c) => c.id === templateId);
+    if (found) return found;
+  }
+  return null;
 }
 
 export function pickHoldableCardIds(state: GameState, playerId: string, count: number): string[] {

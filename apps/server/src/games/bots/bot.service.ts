@@ -131,7 +131,7 @@ export class BotService {
       case "ROLLING":
         if (player.inJail) {
           // Используем BotCardPolicy для выбора решения (USE_CARD > TRY_DOUBLE).
-          // legacy fallback удалён: используется только DeckModule (holdableCardCount)
+          // Решение принимается по наличию holdable-карт через DeckModule.
           if (countHoldableCards(player) > 0) return "USE_CARD";
           return "TRY_DOUBLE";
         }

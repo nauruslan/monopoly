@@ -318,11 +318,6 @@ describe("GamesService.applyAction (FSM)", () => {
     const { CHANCE_CARDS } = await import("@monopoly/shared");
     const moneyCard = CHANCE_CARDS.find((c) => c.effect.kind === "money");
     if (!moneyCard) return;
-    activeState.cardDecks = {
-      chance: { cards: [moneyCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 },
-    };
     // Перевытягиваем.
     activeState.phase = "RESOLVING_LANDING";
     await act({ type: "CONFIRM_LANDING" });

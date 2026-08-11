@@ -443,12 +443,6 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [jailCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 10
     //    (игрок был на 7 < 10, идём по часовой: 7→8→9→10).
     //    Флаги сбрасываются, фаза = MOVE_ANIMATION.
@@ -494,12 +488,6 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       applied: false,
         deckCardId: null
     };
-    activeState.cardDecks = {
-      chance: { cards: [], cursor: 0 },
-      treasury: { cards: [jailCard.id], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD: анимация forward к клетке 10
     //    (игрок был на 2 < 10, по часовой: 2→3→…→10).
     await act({ type: "CONFIRM_CARD" });

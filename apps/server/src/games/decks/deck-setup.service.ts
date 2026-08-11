@@ -33,12 +33,12 @@ export interface SetupDecksResult {
 }
 
 /**
- * Контейнер для колод и карт, который добавляется в `state` как
- * `state.decks` (legacy fallback: см. `GameInitializerService`).
+ * Контейнер для колод и карт по типу колоды (`chance`, `treasury`,
+ * `luxury-tax`). Каждый тип хранит массив `DeckInstance` — одну
+ * колоду на каждую клетку доски, к которой он привязан.
  *
- * Хранится как `Map<DeckType, DeckInstance[]>` для удобного поиска
- * по типу. Конвертация в `Record` для сериализации в JSON делается
- * в `publicState()`.
+ * Инициализируется через {@link setupDecks} и монтируется в `state`
+ * через `state.decks` / `state.deckCards` (см. {@link ensureDecksInitialized}).
  */
 export interface DecksContainer {
   chance: DeckInstance[];

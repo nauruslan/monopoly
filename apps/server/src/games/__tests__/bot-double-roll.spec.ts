@@ -34,7 +34,7 @@ function makeBotState(): GameState {
       holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false
+      isBankrupt: false,
     },
     {
       id: "p1",
@@ -49,7 +49,7 @@ function makeBotState(): GameState {
       holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false
+      isBankrupt: false,
     },
   ];
   return {
@@ -64,7 +64,7 @@ function makeBotState(): GameState {
     settings: { ...DEFAULT_SETTINGS, auctionEnabled: true },
     seed: "bot-test-seed",
     createdAt: new Date().toISOString(),
-    lastActivityAt: new Date().toISOString()
+    lastActivityAt: new Date().toISOString(),
   };
 }
 
@@ -90,11 +90,11 @@ describe("GamesService.applyAction: regression дубль + карточка →
       create: jest.fn(async (state: GameState) => ({
         id: state.id,
         rngSeed: state.seed,
-        stateSnapshot: state
+        stateSnapshot: state,
       })),
       updateSnapshot: jest.fn(async () => undefined),
       replaceSnapshot: jest.fn(async () => true),
-      findById: jest.fn(async () => null)
+      findById: jest.fn(async () => null),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -113,7 +113,7 @@ describe("GamesService.applyAction: regression дубль + карточка →
         TradeService,
         LogService,
         { provide: GameRepository, useValue: repoMock },
-      ]
+      ],
     }).compile();
 
     service = moduleRef.get(GamesService);
@@ -155,14 +155,8 @@ describe("GamesService.applyAction: regression дубль + карточка →
       deck: backCard.deck,
       card: backCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
-    activeState.cardDecks = {
-      chance: { cards: [backCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // 1) CONFIRM_CARD — move-relative не сбрасывает mustRollAgain,
     //    фаза MOVE_ANIMATION.
     await act({ type: "CONFIRM_CARD" });
@@ -219,14 +213,8 @@ describe("GamesService.applyAction: regression дубль + карточка →
       deck: backCard.deck,
       card: backCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
-    activeState.cardDecks = {
-      chance: { cards: [backCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // CONFIRM_CARD → MOVE_ANIMATION → RESOLVING_LANDING → CONFIRM_LANDING.
     await act({ type: "CONFIRM_CARD" });
     expect(activeState.phase).toBe("MOVE_ANIMATION");
@@ -302,9 +290,9 @@ describe("GamesService.applyAction: regression дубль + карточка →
         fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toHoldableCardCount: 0
+        toHoldableCardCount: 0,
       },
-      counterCount: 0
+      counterCount: 0,
     };
 
     await (service as any).handleTradingNegotiate(activeState, p, { type: "TRADE_REJECT" });
@@ -342,14 +330,8 @@ describe("GamesService.applyAction: regression дубль + карточка →
       deck: goCard.deck,
       card: goCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
-    activeState.cardDecks = {
-      chance: { cards: [goCard.id], cursor: 0 },
-      treasury: { cards: [], cursor: 0 },
-      "luxury-tax": { cards: [], cursor: 0 }
-    };
-
     // move-карта «Идите на СТАРТ» → MOVE_ANIMATION → RESOLVING_LANDING
     // на СТАРТ → двойная выплата 2× goSalary (НЕЗАВИСИМО от дубля),
     // фаза ROLLING (т.к. mustRollAgain=true).
@@ -377,9 +359,9 @@ describe("GamesService.applyAction: regression дубль + карточка →
         fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toHoldableCardCount: 0
+        toHoldableCardCount: 0,
       },
-      counterCount: 0
+      counterCount: 0,
     };
 
     // Бот (p) отклоняет trade — mustRollAgain должен сохраниться.
@@ -424,10 +406,10 @@ describe("GamesService.applyAction: regression дубль + карточка →
         fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toHoldableCardCount: 0
+        toHoldableCardCount: 0,
       },
       counterCount: 0,
-      preTradePhase
+      preTradePhase,
     };
     return { p, p1 };
   }
@@ -461,10 +443,10 @@ describe("GamesService.applyAction: regression дубль + карточка →
         fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toHoldableCardCount: 0
+        toHoldableCardCount: 0,
       },
       counterCount: 0,
-      preTradePhase: "ROLLING"
+      preTradePhase: "ROLLING",
     };
 
     // Шаг 2: p1 делает counter-offer. preTradePhase НЕ должен пропасть.
@@ -478,7 +460,7 @@ describe("GamesService.applyAction: regression дубль + карточка →
       fromHoldableCardCount: 0,
       toProperties: [],
       toCash: 30,
-      toHoldableCardCount: 0
+      toHoldableCardCount: 0,
     });
     expect(activeState.trade?.preTradePhase).toBe("ROLLING");
     expect(activeState.trade?.counterCount).toBe(1);
@@ -506,7 +488,7 @@ describe("GamesService.applyAction: regression дубль + карточка →
 
   it("regression: startTrade сохраняет preTradePhase в state.trade сразу (а не мутацией после)", () => {
     // Проверяем, что startTrade сразу пишет preTradePhase в создаваемый
-    // state.trade (а не требует пост-мутации, как раньше). Это
+    // state.trade. Это
     // страхует от потери при будущих рефакторингах.
     const p = activeState.players[activeState.currentPlayerIndex]!;
     const p1 = activeState.players[1]!;
@@ -521,7 +503,7 @@ describe("GamesService.applyAction: regression дубль + карточка →
         fromHoldableCardCount: 0,
         toProperties: [],
         toCash: 0,
-        toHoldableCardCount: 0
+        toHoldableCardCount: 0,
       },
       "ROLLING",
     );

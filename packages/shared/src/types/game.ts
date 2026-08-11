@@ -108,24 +108,6 @@ export interface GameSettings {
 }
 
 /**
- * CardDeckState — состояние одной колоды карточек.
- *
- * При инициализации партии каждая колода (`chance`, `treasury`, `luxury-tax`)
- * перемешивается детерминированно (через `state.seed`), и в дальнейшем
- * карты выдаются строго по индексу `cursor` — по кругу.
- *
- * При исчерпании колоды (`cursor >= cards.length`) сервер снова перемешивает
- * её тем же RNG и сбрасывает `cursor = 0`. Это и есть «в начале игры
- * случайно упорядочены — идут друг за другом».
- */
-export interface CardDeckState {
-  /** ID карточек в текущем порядке (после shuffle). */
-  cards: string[];
-  /** Следующий индекс для выдачи. */
-  cursor: number;
-}
-
-/**
  * AuctionActionLogEntry — одна запись в логе торгов аукциона.
  *
  * Сервер ведёт полный лог действий (ставка/пас/таймаут) и отдаёт его
@@ -381,8 +363,9 @@ export interface GameState {
      * holdable карт — она переходит в IN_HAND (см. `holdableCards`)
      * и в колоду не возвращается.
      *
-     * `null` для legacy-снапшотов, в которых cardContext был создан
-     * до введения DeckModule (такие карты НЕ возвращаются — fallback).
+     * `null` — карта была выдана напрямую из CardContext без привязки
+     * к DeckModule-инстансу (например, тюремная карточка-формула).
+     * В этом случае правило «discard to bottom» НЕ применяется.
      */
     deckCardId: string | null;
   };
@@ -436,17 +419,6 @@ export interface GameState {
     steps: number;
     isDouble: boolean;
     direction?: "forward" | "backward";
-  };
-  /**
-   * Состояние колод карточек (Шанс, Общественная казна, Роскошный налог).
-   * Заполняется при инициализации партии, обновляется на сервере при
-   * каждом `drawCard`. На клиент отдаётся как есть (нужно для синхронизации
-   * и потенциального отображения «счётчика» колоды).
-   */
-  cardDecks?: {
-    chance: CardDeckState;
-    treasury: CardDeckState;
-    "luxury-tax": CardDeckState;
   };
   /**
    * Свежее попадание в тюрьму (true) — игрок в ЭТОМ ходу только что

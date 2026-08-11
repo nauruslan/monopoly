@@ -2,7 +2,6 @@
  * Тесты HoldableCardsRegistry.
  */
 import type { Player, GameState } from "@monopoly/shared";
-import { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS } from "@monopoly/shared";
 import { ensureDecksInitialized } from "../deck-state-adapter";
 import {
   countHoldableCards,
@@ -10,7 +9,7 @@ import {
   backfillHoldableCards,
   hasHoldableCard,
   listHoldableCardIds,
-  getFirstHoldableLegacyCard,
+  findCardByTemplateId,
 } from "../holdable-cards.registry";
 import "../holdable-cards.registry"; // side-effect: register declarations
 
@@ -46,11 +45,6 @@ function makeState(): GameState {
     settings: {} as GameState["settings"],
     createdAt: new Date().toISOString(),
     lastActivityAt: new Date().toISOString(),
-    cardDecks: {
-      chance: { cards: CHANCE_CARDS.map((c) => c.id), cursor: 0 },
-      treasury: { cards: TREASURY_CARDS.map((c) => c.id), cursor: 0 },
-      "luxury-tax": { cards: LUXURY_TAX_CARDS.map((c) => c.id), cursor: 0 },
-    },
   } as GameState;
 }
 
@@ -244,22 +238,14 @@ describe("HoldableCardsRegistry.listHoldableCardIds", () => {
   });
 });
 
-describe("HoldableCardsRegistry.getFirstHoldableLegacyCard", () => {
-  it("возвращает первую карту и её legacy Card", () => {
-    const player = makePlayer({
-      holdableCards: {
-        "card-1": { templateId: "ch7", drawnAt: "", originDeckId: "" },
-      },
-    });
-    const result = getFirstHoldableLegacyCard(player);
-    expect(result).not.toBeNull();
-    expect(result!.cardId).toBe("card-1");
-    expect(result!.card).not.toBeNull();
-    expect(result!.card!.id).toBe("ch7");
+describe("HoldableCardsRegistry.findCardByTemplateId", () => {
+  it("возвращает Card по известному templateId", () => {
+    const card = findCardByTemplateId("ch7");
+    expect(card).not.toBeNull();
+    expect(card!.id).toBe("ch7");
   });
 
-  it("возвращает null, если нет карт", () => {
-    const player = makePlayer();
-    expect(getFirstHoldableLegacyCard(player)).toBeNull();
+  it("возвращает null для несуществующего templateId", () => {
+    expect(findCardByTemplateId("does-not-exist")).toBeNull();
   });
 });

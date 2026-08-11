@@ -18,12 +18,6 @@ export interface HoldableCardEntry {
   drawnAt: string;
   /** ID исходной колоды (для trace'а). */
   originDeckId: string;
-  /**
-   * Если `true` — эта запись создана backfill'ом из legacy-снапшота
-   * при миграции; реального `CardInstance` с этим ключом может не существовать.
-   * UI должна показывать такие как placeholder.
-   */
-  legacyOnly?: boolean;
 }
 
 // Player — основной интерфейс игрока

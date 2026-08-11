@@ -1,28 +1,22 @@
 /**
- * Доменные типы модуля колод карт.
+ * Доменные типы модуля колод карт (DeckModule).
  *
- * ВАЖНО: в текущей (legacy) реализации колоды — это просто `string[]` id-шников
- * с курсором (см. {@link CardDeckState} в `@monopoly/shared`).
- * Новый модуль DeckModule вводит полноценные:
- *  - {@link CardInstance} — конкретный экземпляр карты в конкретной партии
- *    с состоянием (`IN_DECK` | `DRAWN` | `RESOLVING` | `IN_HAND`)
- *    и привязкой к `originDeckId` / `originBoardFieldId`;
- *  - {@link DeckInstance} — колода, привязанная к ОДНОМУ полю доски
- *    (по умолчанию; общая колода для нескольких полей — отдельный режим,
- *    не используемый в MVP).
+ * Модуль вводит полноценную модель карт с состояниями:
+ *  - {@link CardInstance} — конкретный экземпляр карты в партии с состоянием
+ *    (`IN_DECK` | `DRAWN` | `RESOLVING` | `IN_HAND` | `USED`) и
+ *    привязкой к `originDeckId` / `originBoardFieldId`;
+ *  - {@link DeckInstance} — колода, привязанная к ОДНОМУ полю доски.
+ *  - {@link CardTemplate} — статическое описание карточки (title, text, effect,
+ *    флаги `holdInHand` / `transferable`).
  *
- * Эти типы НЕ заменяют существующий `Card` из shared, а работают
- * ПАРАЛЛЕЛЬНО для обратной совместимости со снапшотами БД.
+ * На доске по умолчанию:
+ *  - 3 клетки CHANCE (id=7, 22, 36) → 3 колоды CHANCE;
+ *  - 3 клетки COMMUNITY_CHEST (id=2, 17, 33) → 3 колоды COMMUNITY_CHEST;
+ *  - 1 клетка LUXURY_TAX (id=38) → 1 колода LUXURY_TAX.
  */
 import type { CardEffect } from "@monopoly/shared";
 
-/**
- * Тип колоды в новой (типизированной) нотации.
- *
- * Отличается от legacy `deck: "chance" | "treasury" | "luxury-tax"`
- * (см. {@link CardEffect} и {@link Card} в shared) только синтаксисом —
- * маппинг через {@link legacyToDeckType} / {@link deckTypeToLegacy}.
- */
+/** Тип колоды. */
 export type DeckType = "CHANCE" | "COMMUNITY_CHEST" | "LUXURY_TAX";
 
 /**
@@ -36,13 +30,13 @@ export type DeckType = "CHANCE" | "COMMUNITY_CHEST" | "LUXURY_TAX";
  *
  * Переходы:
  *  - `IN_DECK → DRAWN`: при вытягивании карты игроком (`drawCard`).
- *  - `DRAWN → RESOLVING`: при начале применения эффекта (`applyCardEffect`).
+ *  - `DRAWN → RESOLVING`: при начале применения эффекта (`markCardResolving`).
  *  - `RESOLVING → IN_DECK`: для обычной карты (возврат в колоду).
- *  - `RESOLVING → IN_HAND`: для спецкарты (`moveToHand`).
- *  - `IN_HAND → IN_DECK`: при использовании (`useCard`) или передаче
+ *  - `RESOLVING → IN_HAND`: для спецкарты (`holdCardInHand`).
+ *  - `IN_HAND → IN_DECK`: при использовании (`useCardFromHand`) или передаче
  *    с последующим использованием.
- *  - `IN_HAND → USED`: финальное состояние после `useCard` (для
- *    сценариев, когда карту не возвращают в колоду, а «сжигают»).
+ *  - `IN_HAND → USED`: финальное состояние после `useCardFromHand`
+ *    (для сценариев, когда карту не возвращают в колоду, а «сжигают»).
  *  - `USED → ...`: терминальное; переходов нет.
  */
 export type CardState = "IN_DECK" | "DRAWN" | "RESOLVING" | "IN_HAND" | "USED";
@@ -50,17 +44,13 @@ export type CardState = "IN_DECK" | "DRAWN" | "RESOLVING" | "IN_HAND" | "USED";
 /**
  * Шаблон карты — статическое описание, общее для всех партий.
  *
- * ВАЖНО: НЕ путать с `Card` из `@monopoly/shared/data/cards` — это
- * legacy-тип, который сейчас используется в UI и FSM напрямую.
- * CardTemplate — это надстройка с дополнительными флагами lifecycle.
+ * Создаётся через `cardToTemplate()` в {@link card-template.ts} на основе
+ * карточек из `@monopoly/shared/data/cards` (CHANCE_CARDS / TREASURY_CARDS /
+ * LUXURY_TAX_CARDS) с дефолтами:
+ *  - `holdInHand = false`
+ *  - `transferable = false`
  *
- * Миграция: для существующих карт из `CHANCE_CARDS` / `TREASURY_CARDS` /
- * `LUXURY_TAX_CARDS` создаётся обёртка через `cardToTemplate()` в
- * {@link card-template.ts} с дефолтами:
- *  - `holdInHand = false` (по умолчанию)
- *  - `transferable = false` (по умолчанию)
- *
- * Исключение: ch7 «Выход из тюрьмы бесплатно» → holdInHand=true, transferable=true.
+ * Исключение: ch7 «Выход из тюрьмы бесплатно» → `holdInHand=true`, `transferable=true`.
  */
 export interface CardTemplate {
   /** Уникальный ID шаблона. Совпадает с `Card.id` из shared. */
@@ -77,7 +67,7 @@ export interface CardTemplate {
    */
   holdInHand: boolean;
   /**
-   * Можно ли передавать карту другим игрокам через `TransferCardCommand`.
+   * Можно ли передавать карту другим игрокам через `transferCard`.
    * Пример: «Выход из тюрьмы бесплатно» (ch7) → true.
    */
   transferable: boolean;
@@ -122,12 +112,7 @@ export interface CardInstance {
 /**
  * Колода в конкретной партии.
  *
- * Правило по умолчанию: одна колода = одно поле. В {@link BOARD}
- * (см. `@monopoly/shared/data/board`) есть 3 клетки CHANCE (id=7, 22, 36)
- * и 3 клетки COMMUNITY_CHEST (id=2, 17, 33), плюс одна клетка LUXURY_TAX
- * (id=38). Значит дефолтная конфигурация — 3 CHANCE-колоды + 3
- * COMMUNITY_CHEST-колоды + 1 LUXURY_TAX-колода.
- *
+ * Правило по умолчанию: одна колода = одно поле доски.
  * `topToBottom[0]` — верхняя карта (следующая для добора).
  * `topToBottom[length-1]` — нижняя карта.
  */
@@ -145,7 +130,7 @@ export interface DeckInstance {
    * Изменяется ТОЛЬКО через:
    *  - `setupDecks` (полная инициализация / перетасовка);
    *  - `drawCard` (shift с начала);
-   *  - `returnToBottom` (push в конец);
+   *  - `returnCardToDeck` (push в конец);
    *  - `forceReturnHeldCards` (push в конец для IN_HAND карт).
    */
   topToBottom: string[];
@@ -170,9 +155,8 @@ export interface DeckPlacementConfig {
  *  - `WAIT` — ждать, пока освободятся карты в `DRAWN`/`RESOLVING` состояниях.
  *  - `RETURN_HELD_CARDS` — принудительно вернуть все `IN_HAND` карты этой
  *    колоды в её конец, затем повторить добор.
- *  - `SKIP_DRAW` — пропустить добор (вернуть `null` и эмитнуть
- *    `DECK_EMPTY_FALLBACK_TRIGGERED`).
- *  - `ERROR` — бросить {@link DeckEmptyError}.
+ *  - `SKIP_DRAW` — пропустить добор (вернуть ошибку `DeckEmptyError`).
+ *  - `ERROR` — выбросить `DeckEmptyError`.
  */
 export type EmptyDeckPolicy = "WAIT" | "RETURN_HELD_CARDS" | "SKIP_DRAW" | "ERROR";
 
@@ -198,62 +182,16 @@ export interface DeckSetupConfig {
 }
 
 /**
- * Маппинг legacy-нотации колод в новую.
- *
- * Legacy (используется в `Card.deck` и `state.cardDecks`):
- *   - "chance"
- *   - "treasury"
- *   - "luxury-tax"
- *
- * Новая (используется в DeckModule):
- *   - "CHANCE"
- *   - "COMMUNITY_CHEST" (вместо "treasury" — соответствует официальной нотации)
- *   - "LUXURY_TAX"
- */
-export type LegacyDeckId = "chance" | "treasury" | "luxury-tax";
-
-/** Маппер: legacy → DeckType. */
-export function legacyToDeckType(legacy: LegacyDeckId): DeckType {
-  switch (legacy) {
-    case "chance":
-      return "CHANCE";
-    case "treasury":
-      return "COMMUNITY_CHEST";
-    case "luxury-tax":
-      return "LUXURY_TAX";
-  }
-}
-
-/**
  * Метаданные holdable карты, лежащей у игрока.
  *
  * Хранится в `Player.holdableCards[cardId]`.
  * Содержит минимум для UI и для расчётов в DeckModule.
  */
 export interface HoldableCardEntry {
-  /** ID шаблона (для совместимости с legacy `Card.id`). */
+  /** ID шаблона (совпадает с `Card.id` из shared). */
   templateId: string;
   /** Когда карта была вытянута (ISO). */
   drawnAt: string;
   /** ID исходной колоды (для trace'а). */
   originDeckId: string;
-  /**
-   * Если `true` — эта запись создана backfill'ом из legacy
-   * `player.holdableCards: Record<...>` — кэш на UI. Реальный `CardInstance` с этим
-   * `cardId` может не существовать. UI должна показывать такие карты
-   * только как «placeholder: Выход из тюрьмы».
-   */
-  legacyOnly?: boolean;
-}
-
-/** Маппер: DeckType → legacy (для совместимости с `state.cardDecks`). */
-export function deckTypeToLegacy(deckType: DeckType): LegacyDeckId {
-  switch (deckType) {
-    case "CHANCE":
-      return "chance";
-    case "COMMUNITY_CHEST":
-      return "treasury";
-    case "LUXURY_TAX":
-      return "luxury-tax";
-  }
 }

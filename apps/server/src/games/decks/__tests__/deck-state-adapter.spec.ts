@@ -1,24 +1,14 @@
 /**
  * Тесты DeckStateAdapter (новый DeckModule, per-field колоды).
  */
-import {
-  CHANCE_CARDS,
-  TREASURY_CARDS,
-  LUXURY_TAX_CARDS,
-  type GameState,
-  type CardDeckState,
-} from "@monopoly/shared";
-import {
-  ensureDecksInitialized,
-  findLegacyCardByTemplateId,
-  setupDecksForBoardPerField,
-} from "../deck-state-adapter";
+import { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS, type GameState } from "@monopoly/shared";
+import { ensureDecksInitialized, setupDecksForBoardPerField } from "../deck-state-adapter";
 
-// Тестовая утилита: построить минимальный GameState с заданными колодами.
-// Используется только для совместимости с fixture; реальная инициализация
-// DeckModule НЕ зависит от state.cardDecks.
-function makeState(cardDecks: Record<"chance" | "treasury" | "luxury-tax", string[]>): GameState {
-  const mkDeck = (cards: string[]): CardDeckState => ({ cards, cursor: 0 });
+/**
+ * Тестовая утилита: построить минимальный GameState без колод.
+ * DeckModule инициализируется независимо.
+ */
+function makeState(): GameState {
   return {
     id: "g1",
     version: 1,
@@ -32,21 +22,12 @@ function makeState(cardDecks: Record<"chance" | "treasury" | "luxury-tax", strin
     settings: {} as GameState["settings"],
     createdAt: new Date().toISOString(),
     lastActivityAt: new Date().toISOString(),
-    cardDecks: {
-      chance: mkDeck(cardDecks.chance),
-      treasury: mkDeck(cardDecks.treasury),
-      "luxury-tax": mkDeck(cardDecks["luxury-tax"]),
-    },
   };
 }
 
 describe("DeckStateAdapter.ensureDecksInitialized", () => {
   it("инициализирует state.decks и state.deckCards из shared-данных (per-field)", () => {
-    const state = makeState({
-      chance: [],
-      treasury: [],
-      "luxury-tax": [],
-    });
+    const state = makeState();
     expect(state.decks).toBeUndefined();
     expect(state.deckCards).toBeUndefined();
 
@@ -61,7 +42,7 @@ describe("DeckStateAdapter.ensureDecksInitialized", () => {
   });
 
   it("создаёт по ОДНОЙ DeckInstance на КАЖДУЮ клетку доски", () => {
-    const state = makeState({ chance: [], treasury: [], "luxury-tax": [] });
+    const state = makeState();
     ensureDecksInitialized(state);
     const chanceDecks = state.decks!.filter((d) => d.deckType === "CHANCE");
     const treasuryDecks = state.decks!.filter((d) => d.deckType === "COMMUNITY_CHEST");
@@ -82,7 +63,7 @@ describe("DeckStateAdapter.ensureDecksInitialized", () => {
   });
 
   it("каждая карта принадлежит только своей колоде (нет «протекания»)", () => {
-    const state = makeState({ chance: [], treasury: [], "luxury-tax": [] });
+    const state = makeState();
     ensureDecksInitialized(state);
     const allTopToBottom = state.decks!.flatMap((d) => d.topToBottom);
     const uniqueCards = new Set(allTopToBottom);
@@ -95,7 +76,7 @@ describe("DeckStateAdapter.ensureDecksInitialized", () => {
   });
 
   it("ch10 «назад 5» попадает в CHANCE, а lt1 «налог» — в LUXURY_TAX", () => {
-    const state = makeState({ chance: [], treasury: [], "luxury-tax": [] });
+    const state = makeState();
     ensureDecksInitialized(state);
     const ch10 = state.deckCards!.find((c) => c.templateId === "ch10");
     const lt1 = state.deckCards!.find((c) => c.templateId === "lt1");
@@ -108,7 +89,7 @@ describe("DeckStateAdapter.ensureDecksInitialized", () => {
   });
 
   it("ИДЕНТИЧНЫЙ при повторном вызове (lazy+idempotent)", () => {
-    const state = makeState({ chance: [], treasury: [], "luxury-tax": [] });
+    const state = makeState();
     const r1 = ensureDecksInitialized(state);
     const r2 = ensureDecksInitialized(state);
     expect(r1.decks).toBe(r2.decks);
@@ -116,27 +97,9 @@ describe("DeckStateAdapter.ensureDecksInitialized", () => {
   });
 });
 
-describe("DeckStateAdapter.findLegacyCardByTemplateId", () => {
-  it("находит legacy Card по templateId (= legacy id)", () => {
-    const ch7 = findLegacyCardByTemplateId("ch7");
-    expect(ch7).not.toBeNull();
-    expect(ch7!.deck).toBe("chance");
-    expect(ch7!.text).toContain("тюрьм");
-  });
-
-  it("возвращает null для несуществующего templateId", () => {
-    expect(findLegacyCardByTemplateId("ghost")).toBeNull();
-  });
-});
-
 describe("DeckStateAdapter.setupDecksForBoardPerField", () => {
   it("строит per-field колоды (одна колода на клетку)", () => {
-    const state = makeState({
-      chance: [...CHANCE_CARDS.map((c) => c.id)],
-      treasury: [...TREASURY_CARDS.map((c) => c.id)],
-      "luxury-tax": [...LUXURY_TAX_CARDS.map((c) => c.id)],
-    });
-
+    const state = makeState();
     const result = setupDecksForBoardPerField(state);
     expect(result.decks.length).toBe(7);
     for (const d of result.decks) {
@@ -145,11 +108,11 @@ describe("DeckStateAdapter.setupDecksForBoardPerField", () => {
   });
 
   it("для 11 CHANCE-карт на 3 клетки: распределение [4, 4, 3]", () => {
-    const state = makeState({
-      chance: [...CHANCE_CARDS.map((c) => c.id)],
-      treasury: [],
-      "luxury-tax": [],
-    });
+    const state = makeState();
+    // Подменяем seed-управляемый источник через смену state.seed нельзя
+    // (используется seedrandom по нему), но мы хотим проверить, что
+    // распределение работает — заменяем CHANCE_CARDS через прямой вызов
+    // setupDecksForBoardPerField с шаблонами.
     const result = setupDecksForBoardPerField(state);
     const chanceDecks = result.decks.filter((d) => d.deckType === "CHANCE");
     expect(chanceDecks.length).toBe(3);
@@ -158,11 +121,7 @@ describe("DeckStateAdapter.setupDecksForBoardPerField", () => {
   });
 
   it("для 6 TREASURY-карт на 3 клетки: каждая получает ровно 2", () => {
-    const state = makeState({
-      chance: [],
-      treasury: [...TREASURY_CARDS.map((c) => c.id)],
-      "luxury-tax": [],
-    });
+    const state = makeState();
     const result = setupDecksForBoardPerField(state);
     const treasuryDecks = result.decks.filter((d) => d.deckType === "COMMUNITY_CHEST");
     expect(treasuryDecks.length).toBe(3);
@@ -172,11 +131,7 @@ describe("DeckStateAdapter.setupDecksForBoardPerField", () => {
   });
 
   it("для 4 LUXURY_TAX-карт на 1 клетку: все 4 карты в одной колоде", () => {
-    const state = makeState({
-      chance: [],
-      treasury: [],
-      "luxury-tax": [...LUXURY_TAX_CARDS.map((c) => c.id)],
-    });
+    const state = makeState();
     const result = setupDecksForBoardPerField(state);
     const luxuryDecks = result.decks.filter((d) => d.deckType === "LUXURY_TAX");
     expect(luxuryDecks.length).toBe(1);
@@ -185,32 +140,29 @@ describe("DeckStateAdapter.setupDecksForBoardPerField", () => {
   });
 
   it("детерминированный seed даёт одинаковый порядок", () => {
-    const state1 = makeState({
-      chance: ["ch1", "ch2", "ch3"],
-      treasury: [],
-      "luxury-tax": [],
-    });
-    const state2 = makeState({
-      chance: ["ch1", "ch2", "ch3"],
-      treasury: [],
-      "luxury-tax": [],
-    });
+    const state1 = makeState();
+    const state2 = makeState();
     const r1 = setupDecksForBoardPerField(state1);
     const r2 = setupDecksForBoardPerField(state2);
     expect(r1.decks[0]!.topToBottom).toEqual(r2.decks[0]!.topToBottom);
   });
 
   it("ch7 попадает ровно в ОДНУ CHANCE-колоду", () => {
-    const state = makeState({
-      chance: ["ch7"],
-      treasury: [],
-      "luxury-tax": [],
-    });
+    const state = makeState();
     const result = setupDecksForBoardPerField(state);
     const ch7Card = result.cards.find((c) => c.templateId === "ch7");
     expect(ch7Card).toBeDefined();
     const decksWithCh7 = result.decks.filter((d) => d.topToBottom.includes(ch7Card!.cardId));
     expect(decksWithCh7.length).toBe(1);
     expect([7, 22, 36]).toContain(decksWithCh7[0]!.boardFieldId);
+  });
+
+  it("загружает все три источника: CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS", () => {
+    // Sanity check: убеждаемся, что после init у нас ровно столько
+    // карт, сколько в исходных справочниках.
+    const expected = CHANCE_CARDS.length + TREASURY_CARDS.length + LUXURY_TAX_CARDS.length;
+    const state = makeState();
+    const result = setupDecksForBoardPerField(state);
+    expect(result.cards.length).toBe(expected);
   });
 });

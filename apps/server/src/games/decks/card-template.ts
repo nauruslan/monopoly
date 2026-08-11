@@ -1,18 +1,16 @@
 /**
- * Утилиты конвертации legacy `Card` (из `@monopoly/shared/data/cards`) →
+ * Утилиты конвертации карточек из `@monopoly/shared/data/cards` →
  * `CardTemplate` (DeckModule).
  *
- * ВАЖНО: legacy `Card` сейчас используется в UI ([`CardModal.vue`](apps/client/src/components/modals/CardModal.vue:1))
- * и FSM ([`games.service.ts`](apps/server/src/games/games.service.ts:1)). Мы не
- * ломаем этот контракт — просто оборачиваем каждый legacy-шаблон в `CardTemplate`
- * с дефолтными `holdInHand = false`, `transferable = false`.
+ * В DeckModule каждый шаблон дополнен флагами lifecycle
+ * (`holdInHand`, `transferable`) и заголовком для UI, которых нет
+ * в базовом `Card`. Все карточки создаются по единым правилам.
  *
  * Исключение явно прописано в коде: `ch7` «Выход из тюрьмы бесплатно» →
  * `holdInHand = true`, `transferable = true`.
  */
 import type { Card, CardEffect } from "@monopoly/shared";
-import type { CardTemplate, DeckType, LegacyDeckId } from "./types";
-import { legacyToDeckType } from "./types";
+import type { CardTemplate, DeckType } from "./types";
 
 /**
  * Маппинг: `templateId` → `holdInHand` / `transferable` override.
@@ -33,19 +31,12 @@ const TEMPLATE_OVERRIDES: Readonly<Record<string, TemplateOverride>> = {
 };
 
 /**
- * Маппинг legacy `deck` → `CardTemplate.deckType`.
- */
-function deckTypeFromLegacy(legacy: LegacyDeckId): DeckType {
-  return legacyToDeckType(legacy);
-}
-
-/**
- * Преобразует legacy `Card` в `CardTemplate`.
+ * Преобразует `Card` в `CardTemplate`.
  *
  * `templateId` берётся из `card.id`. `title` формируется как
  * короткое описание (для UI заголовка модалки), `text` — из `card.text`.
  *
- * @param card legacy `Card` (из `CHANCE_CARDS` / `TREASURY_CARDS` / `LUXURY_TAX_CARDS`)
+ * @param card `Card` (из `CHANCE_CARDS` / `TREASURY_CARDS` / `LUXURY_TAX_CARDS`)
  * @returns CardTemplate с дефолтными `holdInHand=false` / `transferable=false`
  *          (или override из {@link TEMPLATE_OVERRIDES}).
  */
@@ -53,9 +44,8 @@ export function cardToTemplate(card: Card): CardTemplate {
   const override = TEMPLATE_OVERRIDES[card.id];
   return {
     templateId: card.id,
-    deckType: deckTypeFromLegacy(card.deck),
-    // В legacy Card нет поля title, поэтому используем короткое имя по id.
-    title: formatTitle(card.id, card.text),
+    deckType: deckTypeFromCard(card),
+    title: formatTitle(card.text),
     text: card.text,
     holdInHand: override?.holdInHand ?? false,
     transferable: override?.transferable ?? false,
@@ -64,34 +54,42 @@ export function cardToTemplate(card: Card): CardTemplate {
 }
 
 /**
- * Преобразует массив legacy `Card` в массив `CardTemplate`.
+ * Преобразует массив `Card` в массив `CardTemplate`.
  */
 export function cardsToTemplates(cards: readonly Card[]): CardTemplate[] {
   return cards.map(cardToTemplate);
 }
 
 /**
- * Форматирует title карточки из id и text.
+ * Маппинг `card.deck` → `CardTemplate.deckType`.
+ */
+function deckTypeFromCard(card: Card): DeckType {
+  if (card.deck === "chance") return "CHANCE";
+  if (card.deck === "treasury") return "COMMUNITY_CHEST";
+  return "LUXURY_TAX";
+}
+
+/**
+ * Форматирует title карточки из её текста.
  *
- * Стратегия: берём первую строку `text` (до точки или переноса) и
- * делаем Title Case. Для однозначности сохраняем id.
+ * Стратегия: берём первую строку `text` (до точки или переноса).
  *
  * Пример:
- *   formatTitle("ch7", "Выйдите из тюрьмы бесплатно")
- *     → "Выйдите Из Тюрьмы Бесплатно"
+ *   formatTitle("Выйдите из тюрьмы бесплатно")
+ *     → "Выйдите из тюрьмы бесплатно"
  */
-function formatTitle(id: string, text: string): string {
+function formatTitle(text: string): string {
   // Берём первую строку до точки или переноса.
   const firstLine = text.split(/[.\n]/, 1)[0]?.trim() ?? text.trim();
   return firstLine;
 }
 
 /**
- * Проверяет, является ли legacy-карта `holdInHand` (по хардкод-правилам).
+ * Проверяет, является ли карта `holdInHand` (по хардкод-правилам).
  *
  * Используется в тестах и в `setupDecks` для валидации.
  */
-export function isLegacyCardHoldable(card: Card): boolean {
+export function isCardHoldable(card: Card): boolean {
   return TEMPLATE_OVERRIDES[card.id]?.holdInHand ?? false;
 }
 

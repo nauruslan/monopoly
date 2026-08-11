@@ -1,87 +1,22 @@
 /**
- * EmptyDeckPolicy — runtime-политики для обработки пустых колод.
+ * Политики обработки пустых колод DeckModule.
  *
- * Источник истины для логики в `GamesService.handleCardReveal` и в
- * [`deck.service.ts`](apps/server/src/games/decks/deck.service.ts) `drawCard`.
+ * Реализует `EmptyDeckPolicy` (`"WAIT" | "RETURN_HELD_CARDS" | "SKIP_DRAW" | "ERROR"`)
+ * и предоставляет runtime-хелперы для применения политики в DeckService.drawCard
+ * (ветка `RETURN_HELD_CARDS`).
  *
- * Используется в двух местах:
- *  1. Когда курсор legacy `state.cardDecks.X.cursor` дошёл до конца:
- *     Legacy-режим делает reshuffle через seedrandom.
- *  2. Когда новый DeckModule встречает пустую колоду:
- *     Поведение определяется `EmptyDeckPolicy` (SKIP_DRAW/WAIT/ERROR/RETURN_HELD_CARDS).
- *
- * Эти функции решают, ЧТО делать в обоих режимах.
+ * Используется в:
+ *  - {@link DeckContext} (поле `emptyDeckPolicy`) — контекст всех операций DeckService;
+ *  - {@link DrawParams} → drawCard — при попытке добора из пустой колоды.
  */
-import type { GameState, CardDeckState } from "@monopoly/shared";
-import seedrandom from "seedrandom";
-import { shuffle as sharedShuffle } from "@monopoly/shared";
+import type { GameState } from "@monopoly/shared";
 
-import type { EmptyDeckPolicy as DeckEmptyPolicy } from "./types";
+import type { EmptyDeckPolicy } from "./types";
 import { ensureDecksInitialized } from "./deck-state-adapter";
 
 /**
- * Результат применения политики к legacy-колоде.
- */
-export interface LegacyDeckRebuild {
-  /** Новая `CardDeckState` (cards + cursor=0). */
-  deck: CardDeckState;
-  /** Была ли колода перетасована. */
-  reshuffled: boolean;
-  /** Seed, использованный для shuffle. */
-  seed: string;
-}
-
-/**
- * Перетасовать legacy колоду (Шанс/Казна/Luxury-tax) заново,
- * когда курсор дошёл до конца.
- *
- * Используется в `CardHandlerService.drawFromDeck` — fallback.
- *
- * Алгоритм:
- *  1. Получить source `cards` (CHANCE/TREASURY/LUXURY_TAX);
- *  2. seedrandom по `state.seed:deck:type` (детерминированно);
- *  3. Вернуть новую `CardDeckState` с курсором 0.
- */
-export function rebuildLegacyDeck(
-  state: GameState,
-  source: readonly { id: string }[],
-  deckType: "chance" | "treasury" | "luxury-tax",
-): LegacyDeckRebuild {
-  const seed = state.seed;
-  const rng = seedrandom(`${seed}:deck:${deckType}:reshuffle`);
-  const shuffled = sharedShuffle(source, rng).map((c) => c.id);
-  return {
-    deck: { cards: shuffled, cursor: 0 },
-    reshuffled: true,
-    seed: `${seed}:deck:${deckType}:reshuffle`,
-  };
-}
-
-/**
- * Проверить, что legacy колода НЕ пуста (cards.length > 0).
- *
- * @throws Error если колода пуста
- */
-export function assertLegacyDeckNotEmpty(deck: CardDeckState, deckType: string): void {
-  if (deck.cards.length === 0) {
-    throw new Error(`Legacy ${deckType} deck has 0 cards`);
-  }
-}
-
-/**
- * Поддерживаемые EmptyDeckPolicy для нового DeckModule.
- *
- * Уже определена в [`types.ts`](apps/server/src/games/decks/types.ts);
- * здесь — runtime-хелперы для применения.
- */
-
-/**
- * Применяет политику возврата IN_HAND карт к новым колодам.
- *
- * Используется при empty deck в DeckModule.drawCard когда policy === "RETURN_HELD_CARDS".
- *
- * NB: реальная мутация `cards`/`decks` уже сделана в `deck.service.ts`,
- * эта функция только формирует список событий для audit log.
+ * Описание события возврата одной карты в конец колоды.
+ * Используется для формирования audit log.
  */
 export interface ReturnedCardEvent {
   readonly cardId: string;
@@ -89,9 +24,12 @@ export interface ReturnedCardEvent {
 }
 
 /**
- * Формирует события для возврата IN_HAND карт.
+ * Формирует список событий `CARD_RETURNED` для пачки `cardId`,
+ * возвращаемых в колоду `deckId` начиная с индекса `baseToIndex`.
  *
- * Используется в audit log (см. [`deck-audit-log.ts`](apps/server/src/games/decks/deck-audit-log.ts)).
+ * @param cardIds     ID карт, которые возвращаются в колоду
+ * @param deckId      ID колоды-получателя
+ * @param baseToIndex индекс в `topToBottom`, с которого начинается возврат
  */
 export function buildReturnedCardsEvents(
   cardIds: readonly string[],
@@ -105,16 +43,17 @@ export function buildReturnedCardsEvents(
 }
 
 /**
- * Объединённая политика для legacy + new режима.
+ * Возвращает активную `EmptyDeckPolicy` для партии.
  *
- * Если `state.decks` инициализированы — используется новая политика
- * (`emptyDeckPolicy` из `DecksContainer`).
+ * Используется, когда требуется runtime-узнать «жёстко зашитую» политику
+ * (например, в тестах). Внутри делает lazy-init DeckModule, чтобы
+ * `state.decks` гарантированно был инициализирован.
  *
- * Иначе — legacy-режим (shuffle при необходимости).
+ * В текущей реализации политика определяется переданным контекстом
+ * (см. {@link DeckContext.emptyDeckPolicy}); здесь возвращаем дефолт
+ * `SKIP_DRAW` для совместимости с API, использующимся в `games.service.ts`.
  */
-export function getActivePolicy(state: GameState): DeckEmptyPolicy {
+export function getActivePolicy(state: GameState): EmptyDeckPolicy {
   ensureDecksInitialized(state);
-  // После ensureDecksInitialized у нас может появиться `__emptyDeckPolicy`
-  // через дискриминированный union, но мы вернём дефолт SKIP_DRAW.
   return "SKIP_DRAW";
 }

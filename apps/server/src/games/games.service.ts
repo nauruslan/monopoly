@@ -16,7 +16,6 @@ import {
   TradeOffer,
   Phase,
   Card,
-  CardDeckState,
   Cell,
   CHANCE_CARDS,
 } from "@monopoly/shared";
@@ -222,8 +221,8 @@ export class GamesService {
     const game = await this.repo.findById(gameId);
     if (!game) return null;
     const state = game.stateSnapshot as GameState;
-    // Backfill: старые снапшоты могли не иметь cardDecks.
-    if (!state.cardDecks) {
+    // Backfill: для старых снапшотов DeckModule ещё не инициализирован.
+    if (!state.decks || !state.deckCards || state.decks.length === 0) {
       this.initializer.reShuffleDecks(state);
     }
     this.activeGames.set(gameId, state);
@@ -2411,7 +2410,13 @@ export class GamesService {
     if (action.type === "USE_JAIL_CARD") {
       if (Object.keys(player.holdableCards ?? {}).length === 0)
         throw new ForbiddenException("Нет карточек выхода");
-      delete (player.holdableCards ?? {})["legacy-jail-card"];
+      // Удаляем первую попавшуюся holdable jail-free карту.
+      const firstJailFreeId = Object.keys(player.holdableCards ?? {}).find(
+        (cid) => player.holdableCards?.[cid]?.templateId === "ch7",
+      );
+      if (firstJailFreeId) {
+        delete player.holdableCards![firstJailFreeId];
+      }
       player.inJail = false;
       player.jailTurns = 0;
       // Журнал: «Игрок использует карточку выхода из тюрьмы».
@@ -3757,7 +3762,7 @@ export class GamesService {
   async loadSnapshot(gameId: string, state: GameState, expectedVersion: number): Promise<boolean> {
     const ok = await this.repo.replaceSnapshot(gameId, state, expectedVersion);
     if (ok) {
-      if (!state.cardDecks) {
+      if (!state.decks || !state.deckCards || state.decks.length === 0) {
         this.initializer.reShuffleDecks(state);
       }
       this.activeGames.set(gameId, state);

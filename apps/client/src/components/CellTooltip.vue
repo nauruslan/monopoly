@@ -11,24 +11,26 @@ import {
  * CellTooltip — расширенный тултип клетки при наведении/клике.
  *
  * Состав секций зависит от типа клетки:
- *  - PROPERTY: базовая рента, рента с монополией (×2), таблица
- *    [1дом..4дома, отель], цена покупки дома, возврат при продаже,
- *    залог, выкуп;
- *  - RAILROAD: таблица ренты в зависимости от числа станций у владельца
- *    (1/2/3/4 → 25/50/100/200);
- *  - UTILITY: множитель для 1 (×4) и 2 (×10) предприятий;
+ *  - PROPERTY: цена, единый блок ренты (базовая, ×2 при монополии,
+ *    1..4 дома, отель), цена покупки дома, возврат при продаже, залог,
+ *    выкуп, бейдж монополии;
+ *  - RAILROAD: цена, таблица ренты в зависимости от числа станций у
+ *    владельца (1/2/3/4 → 25/50/100/200);
+ *  - UTILITY: цена, таблица формул (×4 для одной, ×10 для двух);
  *  - TAX: фиксированная сумма либо пометка о luxury-карточках;
  *  - CHANCE / TREASURY / JAIL / GOTO_JAIL / PARKING / GO: краткое описание.
  *
- * Владелец подсвечивается цветом (если передан) и текущий счёт домов
- * (для PROPERTY) — отдельной строкой.
+ * Подсветка текущей ренты (`.rent-row.rent-current`) устанавливается
+ * ДИНАМИЧЕСКИ на основании `cell.houses` и `hasMonopoly`, чтобы игрок
+ * видел, какую сумму он получит/заплатит ПРЯМО СЕЙЧАС, а не всегда
+ * строку «Отель».
  *
  * Замечание: тултип носит чисто СПРАВОЧНЫЙ характер. Вся валидация
  * финансовых операций и финальные суммы считаются на сервере
  * (BuildService / MortgageService). Здесь мы показываем то, что
  * посчитал клиент (на основании `state.board`).
  *
- * ПОЗИЦИОНИРОВАНИЕ (GDD §1.1 — hover-тултип):
+ * ПОЗИЦИОНИРОВАНИЕ (hover-тултип):
  *  - `x` / `y` — координаты левого-верхнего угла тултипа В VIEWPORT
  *    (fixed-координаты). Их считает GameView, учитывая:
  *      1. Сторону клетки (top/bottom/left/right) — чтобы тултип
@@ -94,33 +96,8 @@ const hasMonopoly = computed<boolean>(
   () => groupSize.value > 0 && ownedInGroup.value === groupSize.value,
 );
 
-/** Базовая рента без монополии (без удвоения). */
-const baseRent = computed<number | undefined>(() => props.cell?.rent);
-
-/** Рента при полной монополии (обычно ×2). */
-const monopolyRent = computed<number | undefined>(() => {
-  if (baseRent.value === undefined) return undefined;
-  if (!hasMonopoly.value) return undefined;
-  return baseRent.value * 2;
-});
-
 /** Возврат при продаже одного дома = housePrice / 2. */
 const houseRefund = computed<number | undefined>(() => {
-  if (props.cell?.housePrice === undefined) return undefined;
-  return Math.floor(props.cell.housePrice / 2);
-});
-
-/**
- * Возврат при продаже отеля (классические правила).
- *
- * Отель = 5 домов (houses=5). При продаже «распадается» на 4 дома
- * (5 → 4): игрок получает refund как за 1 дом = `housePrice / 2`.
- * Оставшиеся 4 дома можно продать далее по одному (по лесенке).
- *
- * Пример: housePrice = 50 → возврат за сам отель = 25
- *         (а 4 оставшихся дома потом: 4 × 25 = 100).
- */
-const hotelRefund = computed<number | undefined>(() => {
   if (props.cell?.housePrice === undefined) return undefined;
   return Math.floor(props.cell.housePrice / 2);
 });
@@ -132,16 +109,75 @@ const unmortgageCost = computed<number | undefined>(() => {
 });
 
 /**
+ * Базовая рента из `rentTable[0]` (гарантированно number при наличии
+ * таблицы). Используется в шаблоне как безопасный источник значения
+ * для строки «Рента ×2 (монополия)» — умножение на 2 не упрётся в
+ * `undefined`, на что ругается TS-плагин при прямом доступе к
+ * `cell.rentTable[0]`.
+ */
+const baseRentFromTable = computed<number>(() => {
+  const rt = props.cell?.rentTable;
+  if (rt && rt.length === 6 && typeof rt[0] === "number") return rt[0];
+  return props.cell?.rent ?? 0;
+});
+
+/**
+ * Какая именно строка блока рент сейчас активна.
+ *
+ * Возвращает «индекс» в логическом массиве строк:
+ *  - 0 — базовая рента (без домов, без монополии)
+ *  - 1 — рента ×2 (без домов, но есть монополия)
+ *  - 2 — 1 дом
+ *  - 3 — 2 дома
+ *  - 4 — 3 дома
+ *  - 5 — 4 дома
+ *  - 6 — отель
+ *  - null — клетка не PROPERTY / нет rentTable (нечего подсвечивать)
+ *
+ * Используется в шаблоне для простановки класса `.rent-current`.
+ */
+const currentRentIndex = computed<number | null>(() => {
+  const c = props.cell;
+  if (!c || c.type !== "PROPERTY") return null;
+  if (!c.rentTable || c.rentTable.length !== 6) return null;
+  if (c.houses === 5) return 6;
+  if (c.houses >= 1 && c.houses <= 4) return 1 + c.houses; // 1..4 → 2..5
+  // 0 домов
+  return hasMonopoly.value ? 1 : 0;
+});
+
+/**
+ * Нужно ли показывать блок «Владелец» в футере.
+ *
+ * Скрываем для клеток, у которых владельца быть не может:
+ *  - GO          — стартовая клетка, банковская;
+ *  - JAIL        — обычный «визит» (а не тюрьма-резиденция);
+ *  - GOTO_JAIL   — клетка-указатель, недвижимости нет;
+ *  - PARKING     — бесплатная стоянка;
+ *  - CHANCE      — колода;
+ *  - TREASURY    — колода;
+ *  - TAX         — банковская клетка.
+ *
+ * Для PROPERTY / RAILROAD / UTILITY — показываем всегда: либо
+ * конкретного владельца, либо «Нет», если клетка ничейная.
+ */
+const showOwner = computed<boolean>(() => {
+  const t = props.cell?.type;
+  if (!t) return false;
+  return t === "PROPERTY" || t === "RAILROAD" || t === "UTILITY";
+});
+
+/**
  * Описание клетки-действия (Шанс, Казна, Тюрьма, GO, ...).
  * Используется в тултипе вместо финансовой информации.
  */
 const SPECIAL_DESCRIPTIONS: Partial<Record<string, string>> = {
-  GO: "Старт. Получите ₽200 при проходе (или ₽400 по правилам GDD).",
+  GO: "Получите ₽200 при проходе или ₽400 при остановке на этом поле.",
   CHANCE: "Карточка Шанс: случайное событие из колоды.",
   TREASURY: "Общественная казна: случайное событие из колоды.",
-  JAIL: "Просто визит (вы не в тюрьме).",
-  GOTO_JAIL: "Отправляет в тюрьму (см. карточку).",
-  PARKING: "Бесплатная стоянка. В этой версии без бонусов.",
+  JAIL: "Место для арестованных игроков и их посетителей.",
+  GOTO_JAIL: "Отправляйтесь в тюрьму.",
+  PARKING: "Отдохните на бесплатной стоянке.",
 };
 
 /** Описание для налоговых клеток. */
@@ -190,64 +226,91 @@ const sideClass = computed<string>(() => {
     :class="sideClass"
     :style="{ left: x + 'px', top: y + 'px' }"
   >
-    <!-- Цветная полоска группы -->
-    <div v-if="cell.color" class="tooltip-color-bar" :style="{ background: cell.color }"></div>
-
-    <!-- Заголовок: иконка + название + тип-бейдж -->
+    <!-- Заголовок: иконка + название -->
     <div class="tooltip-header">
       <span class="tooltip-name">{{ cell.icon }} {{ cell.name }}</span>
-      <span
-        v-if="cell.type === 'RAILROAD'"
-        class="tooltip-badge badge-railroad"
-        title="Железная дорога"
-      >
-        Ж/Д
-      </span>
-      <span
-        v-else-if="cell.type === 'UTILITY'"
-        class="tooltip-badge badge-utility"
-        title="Коммунальное предприятие"
-      >
-        Утилита
-      </span>
     </div>
 
-    <!-- ============ PROPERTY ============ -->
+    <!-- PROPERTY -->
     <template v-if="cell.type === 'PROPERTY'">
       <div v-if="cell.price" class="tooltip-row">
         <span class="lbl">Цена</span>
         <span class="val gold">₽{{ cell.price }}</span>
       </div>
 
-      <div v-if="baseRent !== undefined" class="tooltip-row">
-        <span class="lbl">Рента</span>
-        <span class="val">₽{{ baseRent }}</span>
-      </div>
-
-      <div v-if="monopolyRent !== undefined" class="tooltip-row highlight">
-        <span class="lbl">Рента (монополия ×2)</span>
-        <span class="val gold">₽{{ monopolyRent }}</span>
-      </div>
-
-      <!-- Полная таблица ренты -->
-      <div v-if="cell.rentTable && cell.rentTable.length === 6" class="rent-table">
-        <div class="rent-row">
+      <!--
+        Единый блок ренты: базовая → ×2 (монополия) → 1дом → 2дома →
+        3дома → 4дома → отель. Без рамки и разделителей; подсветка
+        динамически указывает на АКТУАЛЬНУЮ ренту для этой клетки.
+      -->
+      <div v-if="cell.rentTable && cell.rentTable.length === 6" class="rent-list">
+        <div
+          class="rent-row"
+          :class="{
+            'rent-current': currentRentIndex === 0,
+            'rent-dimmed': currentRentIndex !== 0 && currentRentIndex !== null,
+          }"
+        >
+          <span class="rent-label">Рента</span>
+          <span class="rent-val">₽{{ cell.rentTable[0] }}</span>
+        </div>
+        <div
+          class="rent-row"
+          :class="{
+            'rent-current': currentRentIndex === 1,
+            'rent-dimmed': currentRentIndex !== 1 && currentRentIndex !== null,
+          }"
+        >
+          <span class="rent-label">Рента ×2 (монополия)</span>
+          <span class="rent-val">₽{{ baseRentFromTable * 2 }}</span>
+        </div>
+        <div
+          class="rent-row"
+          :class="{
+            'rent-current': currentRentIndex === 2,
+            'rent-dimmed': currentRentIndex !== 2 && currentRentIndex !== null,
+          }"
+        >
           <span class="rent-label">1 дом</span>
           <span class="rent-val">₽{{ cell.rentTable[1] }}</span>
         </div>
-        <div class="rent-row">
+        <div
+          class="rent-row"
+          :class="{
+            'rent-current': currentRentIndex === 3,
+            'rent-dimmed': currentRentIndex !== 3 && currentRentIndex !== null,
+          }"
+        >
           <span class="rent-label">2 дома</span>
           <span class="rent-val">₽{{ cell.rentTable[2] }}</span>
         </div>
-        <div class="rent-row">
+        <div
+          class="rent-row"
+          :class="{
+            'rent-current': currentRentIndex === 4,
+            'rent-dimmed': currentRentIndex !== 4 && currentRentIndex !== null,
+          }"
+        >
           <span class="rent-label">3 дома</span>
           <span class="rent-val">₽{{ cell.rentTable[3] }}</span>
         </div>
-        <div class="rent-row">
+        <div
+          class="rent-row"
+          :class="{
+            'rent-current': currentRentIndex === 5,
+            'rent-dimmed': currentRentIndex !== 5 && currentRentIndex !== null,
+          }"
+        >
           <span class="rent-label">4 дома</span>
           <span class="rent-val">₽{{ cell.rentTable[4] }}</span>
         </div>
-        <div class="rent-row hotel-row">
+        <div
+          class="rent-row"
+          :class="{
+            'rent-current': currentRentIndex === 6,
+            'rent-dimmed': currentRentIndex !== 6 && currentRentIndex !== null,
+          }"
+        >
           <span class="rent-label">🏨 Отель</span>
           <span class="rent-val">₽{{ cell.rentTable[5] }}</span>
         </div>
@@ -262,24 +325,6 @@ const sideClass = computed<string>(() => {
         <span class="lbl">Возврат за дом</span>
         <span class="val">₽{{ houseRefund }}</span>
       </div>
-      <!--
-        Возврат за отель показываем сразу, как только у клетки известна
-        цена дома (даже если сейчас 0 домов — это плановая стоимость
-        продажи, когда игрок дорастёт до отеля). Это то, о чём просил
-        пользователь: «при ховере на карточках недвижимости всплывает
-        окно, нужно добавить стоимость продажи отеля».
-      -->
-      <div v-if="hotelRefund !== undefined" class="tooltip-row">
-        <span class="lbl">Возврат за отель</span>
-        <span class="val">₽{{ hotelRefund }} + 4 дома</span>
-      </div>
-      <div
-        v-if="cell.housePrice !== undefined && cell.houses === 4"
-        class="tooltip-note"
-        title="При продаже отель «распадается» на 4 дома (5 → 4), refund как за 1 дом"
-      >
-        🏨 Отель = 5 → 4 (остаётся 4 дома), возврат ₽{{ hotelRefund }}
-      </div>
 
       <!-- Залог / выкуп -->
       <div v-if="cell.mortgageValue !== undefined" class="tooltip-row">
@@ -291,7 +336,7 @@ const sideClass = computed<string>(() => {
         <span class="val">₽{{ unmortgageCost }}</span>
       </div>
 
-      <!-- Бейдж монополии / текущий счёт домов -->
+      <!-- Бейдж монополии -->
       <div
         v-if="hasMonopoly"
         class="tooltip-monopoly-badge"
@@ -299,25 +344,22 @@ const sideClass = computed<string>(() => {
       >
         👑 Монополия
       </div>
-      <div v-else-if="cell.group" class="tooltip-note">
-        Группа «{{ cell.group }}»: {{ ownedInGroup }}/{{ groupSize }} у владельца
-      </div>
     </template>
 
-    <!-- ============ RAILROAD ============ -->
+    <!-- RAILROAD -->
     <template v-else-if="cell.type === 'RAILROAD'">
       <div v-if="cell.price" class="tooltip-row">
         <span class="lbl">Цена</span>
         <span class="val gold">₽{{ cell.price }}</span>
       </div>
-      <div class="rent-table">
+      <div class="rent-list">
         <div
           v-for="n in 4"
           :key="n"
           class="rent-row"
           :class="{
             'rent-current': ownedRailroadCount === n,
-            'rent-dimmed': ownedRailroadCount !== n,
+            'rent-dimmed': ownedRailroadCount !== n && ownedRailroadCount > 0,
           }"
         >
           <span class="rent-label"
@@ -334,42 +376,35 @@ const sideClass = computed<string>(() => {
         <span class="lbl">Выкуп (+10%)</span>
         <span class="val">₽{{ unmortgageCost }}</span>
       </div>
-      <div v-if="ownedRailroadCount > 0" class="tooltip-note">
-        У владельца станций: <b>{{ ownedRailroadCount }}/4</b>
-      </div>
     </template>
 
-    <!-- ============ UTILITY ============ -->
+    <!-- UTILITY -->
     <template v-else-if="cell.type === 'UTILITY'">
       <div v-if="cell.price" class="tooltip-row">
         <span class="lbl">Цена</span>
         <span class="val gold">₽{{ cell.price }}</span>
       </div>
-      <div class="rent-table">
+      <div class="rent-list">
         <div
           class="rent-row"
           :class="{
             'rent-current': ownedUtilityCount === 1,
-            'rent-dimmed': ownedUtilityCount !== 1,
+            'rent-dimmed': ownedUtilityCount !== 1 && ownedUtilityCount > 0,
           }"
         >
           <span class="rent-label">1 предприятие</span>
-          <span class="rent-val">сумма кубиков × 4</span>
+          <span class="rent-val">кубики × 4</span>
         </div>
         <div
           class="rent-row"
           :class="{
             'rent-current': ownedUtilityCount === 2,
-            'rent-dimmed': ownedUtilityCount !== 2,
+            'rent-dimmed': ownedUtilityCount !== 2 && ownedUtilityCount > 0,
           }"
         >
-          <span class="rent-label">2 предприятия (комплект)</span>
-          <span class="rent-val">сумма кубиков × 10</span>
+          <span class="rent-label">2 предприятия</span>
+          <span class="rent-val">кубики × 10</span>
         </div>
-      </div>
-      <div v-if="utilityMultiplier !== undefined" class="tooltip-row highlight">
-        <span class="lbl">Текущая рента</span>
-        <span class="val gold">сумма кубиков × {{ utilityMultiplier }}</span>
       </div>
       <div v-if="cell.mortgageValue !== undefined" class="tooltip-row">
         <span class="lbl">Залог</span>
@@ -379,26 +414,28 @@ const sideClass = computed<string>(() => {
         <span class="lbl">Выкуп (+10%)</span>
         <span class="val">₽{{ unmortgageCost }}</span>
       </div>
-      <div v-if="ownedUtilityCount > 0" class="tooltip-note">
-        У владельца предприятий: <b>{{ ownedUtilityCount }}/2</b>
-      </div>
     </template>
 
-    <!-- ============ TAX ============ -->
+    <!-- TAX -->
     <template v-else-if="cell.type === 'TAX'">
       <div v-if="taxDescription" class="tooltip-note">{{ taxDescription }}</div>
     </template>
 
-    <!-- ============ CHANCE / TREASURY / JAIL / ... ============ -->
+    <!-- CHANCE / TREASURY / JAIL / ... -->
     <template v-else-if="SPECIAL_DESCRIPTIONS[cell.type]">
       <div class="tooltip-note">{{ SPECIAL_DESCRIPTIONS[cell.type] }}</div>
     </template>
 
-    <!-- ============ Owner + Houses footer ============ -->
-    <div v-if="owner" class="tooltip-footer">
-      <span class="owner-dot" :style="{ background: owner.color }"></span>
-      <span class="owner-name">👤 {{ owner.displayName }}</span>
+    <!-- Owner footer (Владелец) — только для собственности  -->
+    <div v-if="showOwner" class="tooltip-footer">
+      <span class="lbl">Владелец:</span>
+      <span v-if="owner" class="owner-block">
+        <span class="owner-dot" :style="{ background: owner.color }"></span>
+        <span class="owner-name">{{ owner.displayName }}</span>
+      </span>
+      <span v-else class="owner-empty">Нет</span>
     </div>
+
     <div v-if="cell.type === 'PROPERTY' && cell.houses > 0" class="tooltip-footer houses-footer">
       <span v-if="cell.houses === 5" class="hotel-marker">🏨 Отель</span>
       <span v-else class="houses-marker"> 🏠 × {{ cell.houses }} </span>
@@ -423,14 +460,8 @@ const sideClass = computed<string>(() => {
   min-width: 200px;
   font-size: 11px;
   line-height: 1.4;
-  color: var(--text1, #fff);
-}
-
-.tooltip-color-bar {
-  height: 4px;
-  border-radius: 2px;
-  margin-bottom: 8px;
-  box-shadow: 0 2px 8px currentColor;
+  font-family: inherit;
+  color: #fff;
 }
 
 .tooltip-header {
@@ -444,115 +475,83 @@ const sideClass = computed<string>(() => {
   font-size: 13px;
   font-weight: 700;
   flex: 1;
+  color: #fff;
 }
-
-.tooltip-badge {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: rgba(149, 114, 218, 0.25);
-  color: var(--accent2, #b18ff0);
-  white-space: nowrap;
-}
-
-.badge-railroad {
-  background: rgba(180, 130, 60, 0.25);
-  color: #f0c878;
-}
-
-.badge-utility {
-  background: rgba(80, 180, 220, 0.25);
-  color: #88d8f0;
-}
-
 .tooltip-row {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
-  padding: 2px 0;
-  border-top: 1px dashed rgba(149, 114, 218, 0.15);
+  padding: 3px 0;
   font-size: 11px;
+  line-height: 1.4;
+  color: #fff;
 }
-
 .tooltip-row .lbl {
-  color: var(--text2, #b8b0d0);
-  font-size: 10px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
 }
-
 .tooltip-row .val {
-  font-weight: 700;
+  font-weight: 600;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: var(--text1, #fff);
+  color: #fff;
+  text-align: right;
 }
-
 .tooltip-row .val.gold {
   color: var(--gold, #f5d56a);
 }
-
-.tooltip-row.highlight {
-  background: linear-gradient(90deg, rgba(245, 213, 106, 0.1), transparent);
-  margin: 0 -6px;
-  padding: 3px 6px;
-  border-radius: 4px;
-  border-top: none;
+.rent-list {
+  margin: 0;
 }
-
-.rent-table {
-  margin: 6px 0;
-  border: 1px solid rgba(149, 114, 218, 0.2);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
 .rent-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 3px 8px;
-  font-size: 10px;
-  background: rgba(149, 114, 218, 0.05);
-  border-top: 1px solid rgba(149, 114, 218, 0.1);
-}
-
-.rent-row:first-child {
-  border-top: none;
+  padding: 3px 0;
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: inherit;
+  color: #fff;
+  border-radius: 4px;
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease;
 }
 
 .rent-label {
-  color: var(--text2, #b8b0d0);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .rent-val {
-  font-weight: 700;
+  font-weight: 600;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: var(--text1, #fff);
+  color: #fff;
 }
-
-.rent-row.hotel-row {
-  background: linear-gradient(90deg, rgba(245, 213, 106, 0.15), rgba(149, 114, 218, 0.05));
-}
-
 .rent-row.rent-current {
-  background: linear-gradient(90deg, rgba(80, 220, 130, 0.18), rgba(149, 114, 218, 0.05));
-  box-shadow: inset 2px 0 0 #50dc82;
+  background: linear-gradient(90deg, rgba(149, 114, 218, 0.32), rgba(149, 114, 218, 0.12));
+  padding: 5px 8px;
+  margin: 0 -8px;
+  color: #fff;
 }
 
+.rent-row.rent-current .rent-label,
+.rent-row.rent-current .rent-val {
+  color: #fff;
+  font-weight: 700;
+}
 .rent-row.rent-dimmed {
-  opacity: 0.55;
+  background: transparent;
 }
-
 .tooltip-note {
-  font-size: 10px;
-  color: var(--text2, #b8b0d0);
+  font-size: 11px;
+  color: #fff;
   margin-top: 4px;
-  font-style: italic;
 }
-
 .tooltip-monopoly-badge {
   display: inline-block;
   margin-top: 6px;
@@ -564,18 +563,25 @@ const sideClass = computed<string>(() => {
   color: #1a0930;
   box-shadow: 0 2px 6px rgba(245, 213, 106, 0.4);
 }
-
 .tooltip-footer {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px solid rgba(149, 114, 218, 0.2);
+  border-top: 1px dashed rgba(149, 114, 218, 0.2);
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
-  color: var(--text2, #b8b0d0);
+  font-size: 11px;
+  color: #fff;
 }
-
+.tooltip-footer .lbl {
+  color: #fff;
+  font-size: 11px;
+}
+.owner-block {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .owner-dot {
   display: inline-block;
   width: 8px;
@@ -583,18 +589,18 @@ const sideClass = computed<string>(() => {
   border-radius: 50%;
   box-shadow: 0 0 4px currentColor;
 }
-
 .owner-name {
-  color: var(--text1, #fff);
+  color: #fff;
   font-weight: 600;
 }
-
+.owner-empty {
+  color: #fff;
+}
 .houses-footer .houses-marker,
 .houses-footer .hotel-marker {
   color: var(--gold, #f5d56a);
   font-weight: 700;
 }
-
 .mortgaged-footer {
   color: #ff7a7a;
   font-weight: 600;

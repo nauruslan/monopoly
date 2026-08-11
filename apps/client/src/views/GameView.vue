@@ -341,7 +341,15 @@ const boardRef = ref<InstanceType<typeof Board> | null>(null);
 const TOOLTIP_GAP = 8;
 
 const currentCell = computed<Cell | null>(() => game.currentCell);
-const cellOwner = computed(() => players.value.find((p) => p.id === currentCell.value?.ownerId));
+/**
+ * Владелец клетки, на которую сейчас наведён тултип.
+ * ВАЖНО: берём `hoveredCell`, а не `currentCell` — иначе при наведении
+ * на «чужую» клетку в тултипе всегда будет владелец клетки текущего
+ * игрока, что вводит в заблуждение.
+ */
+const cellOwner = computed(() =>
+  players.value.find((p) => p.id === hoveredCell.value?.ownerId),
+);
 
 // BANKRUPTCY: вычисляемые данные для модалки ликвидации
 const bankruptcyPlayer = computed(

@@ -339,24 +339,26 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Попадание на 30: модалка-объявление через CARD_REVEAL.
-    expect(activeState.phase).toBe("CARD_REVEAL");
-    expect(activeState.cardContext?.card.effect.kind).toBe("goto-jail");
-    expect(activeState.cardContext?.applied).toBe(false);
+    // Попадание на 30: показывается информационное окно JAIL_NOTICE.
+    // Клетка 30 — НЕ колода ШАНС, поэтому никаких cardContext нет.
+    expect(activeState.phase).toBe("JAIL_NOTICE");
+    expect(activeState.cardContext).toBeUndefined();
+    expect(activeState.jailNotice).toEqual({ playerId: p.id, reason: "cell" });
     // ВАЖНО: mustRollAgain уже сброшен ДО показа модалки — иначе
-    // был бы конфликт флагов на фазе CARD_REVEAL.
+    // был бы конфликт флагов на фазе JAIL_NOTICE.
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
 
-    // Подтверждаем карточку: фишка АНИМИРУЕТСЯ backward к 10
+    // Подтверждаем модальное окно: фишка АНИМИРУЕТСЯ backward к 10
     // (от 30 → 29 → ... → 10), фаза = MOVE_ANIMATION.
-    await act({ type: "CONFIRM_CARD" });
+    await act({ type: "CONFIRM_JAIL_NOTICE" });
     expect(p.position).toBe(10);
     expect(p.inJail).toBe(false);
     expect(p.mustRollAgain).toBe(false);
     expect(activeState.phase).toBe("MOVE_ANIMATION");
     expect(activeState.moveAnimation?.direction).toBe("backward");
     expect(activeState.moveAnimation?.steps).toBe(20);
+    expect(activeState.jailNotice).toBeUndefined();
 
     // CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
     await act({ type: "CONFIRM_MOVE_ANIMATION" });
@@ -390,20 +392,22 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
 
     // Главная проверка: даже при дубле попадание на 30
     // (GOTO_JAIL) забирает право на ещё один бросок.
-    expect(activeState.phase).toBe("CARD_REVEAL");
-    expect(activeState.cardContext?.card.effect.kind).toBe("goto-jail");
+    expect(activeState.phase).toBe("JAIL_NOTICE");
+    expect(activeState.cardContext).toBeUndefined();
+    expect(activeState.jailNotice).toEqual({ playerId: p.id, reason: "cell" });
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
 
-    // Подтверждаем карточку: фишка АНИМИРУЕТСЯ backward к 10
+    // Подтверждаем модальное окно: фишка АНИМИРУЕТСЯ backward к 10
     // (от 30 → 29 → ... → 10), фаза = MOVE_ANIMATION.
-    await act({ type: "CONFIRM_CARD" });
+    await act({ type: "CONFIRM_JAIL_NOTICE" });
     expect(p.position).toBe(10);
     expect(p.inJail).toBe(false);
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
     expect(activeState.phase).toBe("MOVE_ANIMATION");
     expect(activeState.moveAnimation?.direction).toBe("backward");
+    expect(activeState.jailNotice).toBeUndefined();
 
     // CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
     await act({ type: "CONFIRM_MOVE_ANIMATION" });

@@ -1,4 +1,4 @@
-﻿import {
+import {
   Injectable,
   Logger,
   ForbiddenException,
@@ -72,6 +72,17 @@ export class GamesService {
     string,
     { phase: Phase; playerId: string; setAt: number }
   >();
+
+  /**
+   * Короткие таймеры (~2.5с) для авто-confirm ботом в модальных фазах
+   * (JAIL_NOTICE, CARD_REVEAL, TAX_PAYMENT, PAY_RENT). Не зависят от
+   * наличия клиента в комнате — бот сам закрывает модалку через
+   * фиксированное время, как если бы человек нажал «ОК» / «ПРИНЯТЬ».
+   * Без этого бот-партия «зависает» на модалке до срабатывания
+   * 60-секундного `scheduleBotConfirmFallback`.
+   */
+  private botModalTimers = new Map<string, NodeJS.Timeout>();
+  private botModalContexts = new Map<string, { phase: Phase; playerId: string; setAt: number }>();
   /** Таймеры аукционных ставок. */
   private auctionTimers = new Map<string, NodeJS.Timeout>();
   /** Таймеры ответа в торговле. */
@@ -455,12 +466,23 @@ export class GamesService {
       // Ждущая фаза для бота — обновляем fallback-таймер.
       // (Внутри метода старый таймер уже сбрасывается.)
       this.scheduleBotConfirmFallback(state, gameId, player);
+      // МОДАЛЬНЫЕ окна (JAIL_NOTICE / CARD_REVEAL / PAY_RENT / TAX_PAYMENT)
+      // требуют более быстрого авто-confirm от бота (2-3 секунды), чем
+      // универсальный 60-секундный fallback, иначе партия с ботами «висит»
+      // слишком долго. Для остальных визуальных фаз (DICE_ANIMATION,
+      // MOVE_ANIMATION, RESOLVING_LANDING, END_TURN) клиент обычно сам
+      // шлёт confirm в темпе анимации — ботскому таймеру достаточно 60с
+      // как страховки.
+      if (this.isBotModalPhase(state.phase)) {
+        this.scheduleBotModalConfirm(state, gameId, player);
+      }
     } else {
       // Фаза больше не требует клиентского подтверждения
       // (например, после CONFIRM_LANDING приземлились на свою клетку
       // и фаза стала BUILDING, или после CONFIRM_END_TURN ход
       // перешёл к следующему игроку) — снимаем fallback.
       this.clearBotConfirmFallback(gameId);
+      this.clearBotModalConfirm(gameId);
     }
 
     // Broadcast клиентам
@@ -578,6 +600,8 @@ export class GamesService {
       // Special
       case "JAIL_DECISION":
         return this.handleJailDecision(state, player, action);
+      case "JAIL_NOTICE":
+        return this.handleJailNotice(state, player, action);
 
       // Interrupt: Auction
       case "AUCTION_AWAITING_START":
@@ -712,26 +736,101 @@ export class GamesService {
   }
 
   /**
+   * JAIL_NOTICE — фаза показа информационного модального окна
+   * «Вы арестованы! Отправляйтесь в тюрьму!». Сервер уже положил
+   * причину ареста в `state.jailNotice.reason` (`cell` / `card` /
+   * `double`) и сделал запись в журнале. Только после того, как
+   * игрок/бот закроет окно (`CONFIRM_JAIL_NOTICE`), сервер построит
+   * анимацию фишки к клетке 10 (JAIL) и перейдёт в MOVE_ANIMATION.
+   *
+   * Почему анимация строится здесь, а НЕ в месте входа в JAIL_NOTICE:
+   *  - к моменту показа окна игрок ещё НЕ «приземлился» — фишка
+   *    стоит на исходной клетке (клетка 30 для GOTO_JAIL, или
+   *    поле события для 3-го дубля).
+   *  - анимация должна отражать реальное движение фишки по доске
+   *    (назад/вперёд), и это движение должно следовать правилу
+   *    «не проходить через СТАРТ» — то же, что и для карточек
+   *    «В тюрьму» / goto-jail outcome.
+   *  - для карточек это уже реализовано в `applyCardEffectAndAdvance`
+   *    (ветка `outcome.kind === "goto-jail"`) и в `handleDiceAnimation`
+   *    (3-й дубль, до рефакторинга). Здесь мы вынесли общую логику
+   *    построения moveAnimation в одно место.
+   *
+   * Допустимое action: CONFIRM_JAIL_NOTICE.
+   */
+  private async handleJailNotice(
+    state: GameState,
+    player: Player,
+    action: GameAction,
+  ): Promise<{ event?: GameEvent }> {
+    if (action.type !== "CONFIRM_JAIL_NOTICE") {
+      throw new ForbiddenException(`Недопустимое действие ${action.type} в фазе JAIL_NOTICE`);
+    }
+    const notice = state.jailNotice;
+    if (!notice) {
+      throw new BadRequestException("Нет контекста окна ареста");
+    }
+    if (notice.playerId !== player.id) {
+      throw new ForbiddenException("Это уведомление не для вас");
+    }
+    // Правило «не через СТАРТ»: выбираем кратчайший путь до 10.
+    //   - from < 10  → forward  (напр., 7→10);
+    //   - from >= 10 → backward (напр., 30→10, 25→10).
+    const from = player.position;
+    const to = 10;
+    let direction: "forward" | "backward";
+    let steps: number;
+    if (from < to) {
+      direction = "forward";
+      steps = to - from;
+    } else {
+      direction = "backward";
+      steps = from - to;
+    }
+    // КРИТИЧНО: обновляем позицию сразу, чтобы `handleMoveAnimation`
+    // (ветка isCardMove=true) НЕ пытался сдвинуть её повторно.
+    // Это имитирует поведение карточных веток, которые мутируют
+    // `player.position` ДО входа в MOVE_ANIMATION.
+    player.position = to;
+    // `isDouble=true` для случая 3-го дубля (UI показывает индикатор
+    // «⚂⚂ дубль» в логе). Для cell/card — `isDouble=false`,
+    // т.к. это не дубль, а отдельное правило.
+    const isDouble = notice.reason === "double";
+    state.moveAnimation = {
+      playerId: player.id,
+      from,
+      to,
+      steps,
+      isDouble,
+      direction,
+    };
+    // Маркер для handleResolvingLanding: это «отложенный» арест,
+    // а не обычный JAIL-visit через кубики. Без этого маркера
+    // `handleResolvingLanding` не отличит реальный арест от простого
+    // проезда через клетку 10.
+    state.pendingJailFromCard = true;
+    // Причина для журнала: "cell" (поле 30), "card" (из колоды;
+    // сейчас зарезервировано) или "double" (3-й дубль).
+    // После показа окна JAIL_NOTICE запись в журнал уже сделана
+    // (в `handleDiceAnimation` или `handleResolvingLanding`), здесь
+    // мы только прокидываем причину дальше в `handleResolvingLanding`,
+    // где `sendToJail` финализирует состояние игрока.
+    state.pendingJailReason = notice.reason === "double" ? "double" : "card";
+    // Очищаем контекст окна — он больше не нужен.
+    state.jailNotice = undefined;
+    state.phase = "MOVE_ANIMATION";
+    return {};
+  }
+
+  /**
    * DICE_ANIMATION — клиентская фаза анимации кубиков.
    * Допустимое action: CONFIRM_DICE_ANIMATION.
-   * После подтверждения: MOVE_ANIMATION (если не в тюрьме) или ROLLING для следующего.
-   *
-   * Особый случай — попытка выхода из тюрьмы (TRY_DOUBLE):
-   *   Если `state.jailRollOutcome` задан, значит этот бросок был сделан
-   *   через `TRY_DOUBLE` (а не обычный ROLL_DICE). В этом случае
-   *   финальный результат определяется этим outcome'ом, а не текущими
-   *   `consecutiveDoubles`/`mustRollAgain`:
-   *     - "escape" (дубль)         — игрок вышел, движется как обычно,
-   *                                   но `mustRollAgain` НЕ ставится
-   *                                   (правило «выход дублем — без
-   *                                   повторного броска»).
-   *     - "pay"    (3 попытки)     — игрок вышел после принудительной
-   *                                   оплаты, движется как обычно,
-   *                                   `mustRollAgain` не ставится.
-   *     - "stay"   (промах)        — игрок остаётся в тюрьме,
-   *                                   фишка НЕ двигается, фаза BUILDING
-   *                                   (игрок завершает ход).
-   *   Поле `state.jailRollOutcome` сбрасывается после обработки.
+   * После подтверждения:
+   *  - если был `jailRollOutcome` (попытка выхода из тюрьмы) — обработка
+   *    stay/escape/pay в текущем ходу;
+   *  - иначе — обработка обычного броска (включая серию дублей:
+   *    1-й и 2-й дубль → mustRollAgain, 3-й дубль → отправка в тюрьму
+   *    через информационное окно JAIL_NOTICE).
    */
   private async handleDiceAnimation(
     state: GameState,
@@ -825,22 +924,97 @@ export class GamesService {
     if (isDouble) {
       player.consecutiveDoubles += 1;
       if (player.consecutiveDoubles >= 3) {
-        // Три дубля подряд → мгновенный телепорт в тюрьму.
-        // `JailHandlerService.sendToJail` сам сбрасывает:
-        //  - position=10 (JAIL);
-        //  - inJail=true, jailTurns=0;
-        //  - consecutiveDoubles=0;
-        //  - mustRollAgain=false (правило дубля не действует —
-        //    в текущем ходу игрок уже не бросает).
-        // В этом ходу игрок может только «Завершить ход», поэтому
-        // выставляем `justEnteredJail=true` — модалка тюрьмы с тремя
-        // способами выхода появится в начале СЛЕДУЮЩЕГО хода, когда
-        // `handleStartTurn` сбросит флаг.
-        this.jail.sendToJail(player);
-        state.justEnteredJail = true;
-        // Журнал: попадание в тюрьму через 3 дубля подряд.
-        this.log.logJailEntered(state, player, "double");
-        state.phase = "JAIL_DECISION";
+        // Три дубля подряд → отправка в тюрьму.
+        //
+        // АНИМАЦИЯ: в отличие от старого «мгновенного телепорта»,
+        // теперь фишка АНИМИРУЕТСЯ к клетке 10 (JAIL) по правилу
+        // «кратчайший путь без прохода через СТАРТ» (как и для
+        // карточек «В тюрьму» / goto-jail outcome, см. ветку
+        // `outcome.kind === "goto-jail"`). Это даёт визуальную
+        // согласованность с обычным движением фишки и исключает
+        // «прыжок» между клетками.
+        //
+        // Алгоритм:
+        //  1) Сохраняем from = player.position (текущая клетка, до
+        //     приземления на новую).
+        //  2) Заполняем `state.moveAnimation` с direction="backward"
+        //     (или "forward" если from < 10 — короче идти вперёд),
+        //     аналогично карточной логике.
+        //  3) Ставим `state.pendingJailFromCard = true` — это
+        //     маркер для `handleResolvingLanding`: приземление на
+        //     JAIL через 3 дубля (а не через visit).
+        //  4) Сбрасываем mustRollAgain / consecutiveDoubles (правило
+        //     дублей обрывается — игрок уже не бросает).
+        //  5) НЕ вызываем `sendToJail` здесь — он сработает
+        //     ПОСЛЕ анимации в `handleResolvingLanding` (как и для
+        //     карточек «В тюрьму»). Это централизует финальное
+        //     состояние игрока (position=10, inJail=true) в одном
+        //     месте, и фишка приземляется ровно на 10.
+        //  6) Фаза = MOVE_ANIMATION — клиент анимирует фишку через
+        //     стандартный `animatePlayerTo`, по завершении
+        //     отправляется CONFIRM_MOVE_ANIMATION → handleResolvingLanding
+        //     → ветка для JAIL+pendingJailFromCard → sendToJail +
+        //     JAIL_DECISION.
+        //
+        // ВАЖНО (фикс регрессии): В `handleMoveAnimation` есть
+        // ветка `isCardMove` — если `state.moveAnimation.direction`
+        // задан, сервер НЕ сдвигает `player.position` (считая, что
+        // позиция уже изменена в `applyCardEffectAndAdvance`). В
+        // нашем случае 3 дублей — это НЕ карточный эффект, и до
+        // этого мы `player.position` НЕ обновляли. Без явного
+        // `player.position = 10` здесь:
+        //  - `handleMoveAnimation` пропустит обновление позиции;
+        //  - `handleResolvingLanding` возьмёт `state.board[player.position]`
+        //    — а это по-прежнему клетка 9, не 10;
+        //  - ветка `JAIL + pendingJailFromCard` НЕ сработает;
+        //  - `sendToJail` НЕ вызовется, `inJail` останется `false`,
+        //    и на следующем ходу игрок просто бросит кубики и пойдёт
+        //    по полю как обычно (регрессия, обнаружена 2026-08).
+        // Поэтому здесь явно обновляем `player.position = 10` ДО
+        // `handleMoveAnimation` (точно так же, как в карточных
+        // ветках `move target=10` / `goto-jail` в `applyCardEffectAndAdvance`).
+        // «Поле события» — from: клетка, на которой игрок бросил
+        // 3-й дубль. «Целевое поле» — to=10 (JAIL/«Тюрьма»).
+        // Выбираем направление так, чтобы фишка НЕ проходила через
+        // СТАРТ (клетку 0) — это правило действует и для других
+        // событий в игре (напр., карточки «move target=10» /
+        // «goto-jail» в applyCardEffectAndAdvance):
+        //   from < 10  → direction="forward"  (по часовой, без 0);
+        //   from >= 10 → direction="backward" (против часовой, без 0).
+        const from = player.position;
+        const to = 10;
+        let direction: "forward" | "backward";
+        let steps: number;
+        if (from < to) {
+          // Напр., 7→10: короче ВПЕРЁД по часовой.
+          direction = "forward";
+          steps = to - from;
+        } else {
+          // Напр., 30→10: короче НАЗАД против часовой (не через 0).
+          direction = "backward";
+          steps = from - to;
+        }
+        // Правило дублей обрывается: в текущем ходу игрок уже
+        // не бросает кубики, флаг «mustRollAgain» не действует.
+        player.mustRollAgain = false;
+        player.consecutiveDoubles = 0;
+        // Заполняем `state.lastDice` для расчёта длительности
+        // анимации (moveStepMs × N) на стороне бота и для
+        // синхронизации UI. `isDouble=true` нужен для индикации
+        // «⚂⚂ дубль» в логе/UI.
+        state.lastDice = { dice, isDouble: true };
+        // Журнал: «Игрок выкинул три дубля подряд и попал в тюрьму».
+        // Зовём ДО показа модального окна, чтобы запись в логе
+        // появилась одновременно с открытием `JailNoticeModal`.
+        this.log.logJailEnteredByTriples(state, player);
+        // Контекст информационного окна + переход в фазу JAIL_NOTICE.
+        // Реальная анимация фишки (`state.moveAnimation`,
+        // `player.position=to`, маркеры pendingJail*) будет построена
+        // в `handleJailNotice` после `CONFIRM_JAIL_NOTICE` — игрок/бот
+        // СНАЧАЛА должны увидеть модалку «Вы арестованы!» и нажать
+        // «ПРИНЯТЬ», и только тогда начнётся движение фишки к 10.
+        state.jailNotice = { playerId: player.id, reason: "double" };
+        state.phase = "JAIL_NOTICE";
         return {};
       }
       player.mustRollAgain = true;
@@ -1041,36 +1215,23 @@ export class GamesService {
     // и для карточки «Отправляйтесь в тюрьму» (Ch ch4, Tr tr4). Это
     // единая точка истины: sendToJail() в JailHandlerService.
     if (cell.type === "GOTO_JAIL") {
-      const jailCard = CHANCE_CARDS.find((c) => c.effect.kind === "goto-jail");
-      if (jailCard) {
-        // Сбрасываем mustRollAgain/consecutiveDoubles СРАЗУ при попадании
-        // на 30 — иначе на фазе CARD_REVEAL флаг «обязан бросить ещё раз»
-        // висит, и при подтверждении CONFIRM_CARD поведение было бы
-        // неконсистентным. Здесь же, до показа модалки, мы выравниваем
-        // флаги по правилам «попадание в тюрьму» (сбросить всё).
-        player.mustRollAgain = false;
-        player.consecutiveDoubles = 0;
-        // Для карточки GOTO_JAIL с клетки 30 мы НЕ вызываем DeckModule
-        // здесь: cardContext.card приходит из CHANCE_CARDS (это уже
-        // вытянутая карта). deckCardId ставим null — в
-        // applyCardEffectAndAdvance карта просто сгорает (DRAWN → USED)
-        // через логику goto-jail, без возврата в колоду.
-        state.cardContext = {
-          playerId: player.id,
-          deck: "chance",
-          card: jailCard,
-          applied: false,
-          deckCardId: null,
-        };
-        state.phase = "CARD_REVEAL";
-        return { card: jailCard };
-      }
-      // fallback (если карточка не найдена в деке — теоретически невозможно)
-      this.jail.sendToJail(player);
-      state.justEnteredJail = true;
-      // Журнал: попадание в тюрьму через клетку 30 (fallback).
+      // Сбрасываем mustRollAgain/consecutiveDoubles СРАЗУ при попадании
+      // на 30 — правило «попадание в тюрьму» обрывает любую серию дублей
+      // и право на ещё один бросок. Эти флаги сбрасываются здесь, ДО
+      // показа информационного окна, чтобы при последующей обработке
+      // (в `handleJailNotice` → `MOVE_ANIMATION` → `RESOLVING_LANDING`)
+      // состояние игрока было консистентным.
+      player.mustRollAgain = false;
+      player.consecutiveDoubles = 0;
+      // Журнал: попадание в тюрьму через клетку 30 (GOTO_JAIL).
+      // Эта запись появляется ОДНОВРЕМЕННО с показом окна JAIL_NOTICE,
+      // чтобы другие игроки сразу в логе увидели причину ареста.
       this.log.logJailEntered(state, player, "cell");
-      state.phase = "JAIL_DECISION";
+      // Контекст информационного окна + переход в фазу JAIL_NOTICE.
+      // Сама анимация фишки к 10 будет построена в `handleJailNotice`
+      // после `CONFIRM_JAIL_NOTICE`.
+      state.jailNotice = { playerId: player.id, reason: "cell" };
+      state.phase = "JAIL_NOTICE";
       return {};
     }
     // CHANCE / TREASURY — двухфазная обработка:
@@ -1215,8 +1376,17 @@ export class GamesService {
     if (cell.type === "JAIL" && !player.inJail && state.pendingJailFromCard) {
       this.jail.sendToJail(player);
       state.justEnteredJail = true;
-      this.log.logJailEntered(state, player, "card");
+      // ВАЖНО: запись в журнал «попал в тюрьму» уже сделана РАНЬШЕ:
+      //   - для клетки 30 (GOTO_JAIL) — в `handleResolvingLanding`
+      //     (см. ветку `cell.type === "GOTO_JAIL"`), reason="cell";
+      //   - для правила 3 дублей — в `handleDiceAnimation` через
+      //     `logJailEnteredByTriples`, reason="double";
+      //   - для карточки «Отправляйтесь в тюрьму» — в
+      //     `applyCardEffectAndAdvance` (старый код, не трогаем).
+      // Здесь мы НЕ дублируем запись — это был баг №1
+      // (журнал выводил «попал в тюрьму» дважды).
       state.pendingJailFromCard = false;
+      state.pendingJailReason = undefined;
       state.phase = "JAIL_DECISION";
       return {};
     }
@@ -1733,6 +1903,8 @@ export class GamesService {
         // Маркер для handleResolvingLanding: приземление через
         // карточку, а не обычный JAIL-visit через кубики.
         state.pendingJailFromCard = true;
+        // Причина для лога: "card" (move to=10).
+        state.pendingJailReason = "card";
       }
 
       // Заполняем moveAnimation — клиент использует его для анимации фишки.
@@ -1854,6 +2026,8 @@ export class GamesService {
       player.mustRollAgain = false;
       player.consecutiveDoubles = 0;
       state.pendingJailFromCard = true;
+      // Причина для лога: "card" (goto-jail outcome).
+      state.pendingJailReason = "card";
       state.moveAnimation = {
         playerId: player.id,
         from,
@@ -3064,6 +3238,7 @@ export class GamesService {
     "BUY_DECISION",
     "CARD_REVEAL",
     "CARD_EFFECT",
+    "JAIL_NOTICE",
     "JAIL_DECISION",
     "PAY_RENT",
     "TAX_PAYMENT",
@@ -3230,6 +3405,7 @@ export class GamesService {
       this.botTimers,
       this.botThinkingTimers,
       this.botConfirmFallbackTimers,
+      this.botModalTimers,
       this.auctionTimers,
       this.tradeTimers,
       this.turnTimers,
@@ -3239,6 +3415,7 @@ export class GamesService {
       map.delete(gameId);
     }
     this.botConfirmFallbackContexts.delete(gameId);
+    this.botModalContexts.delete(gameId);
   }
 
   /**
@@ -3314,6 +3491,7 @@ export class GamesService {
       "MOVE_ANIMATION",
       "CARD_REVEAL",
       "CARD_EFFECT",
+      "JAIL_NOTICE",
       "TAX_PAYMENT",
       "RESOLVING_LANDING",
       "END_TURN",
@@ -3408,6 +3586,7 @@ export class GamesService {
       phase === "MOVE_ANIMATION" ||
       phase === "CARD_REVEAL" ||
       phase === "CARD_EFFECT" ||
+      phase === "JAIL_NOTICE" ||
       phase === "TAX_PAYMENT" ||
       phase === "PAY_RENT" ||
       phase === "RESOLVING_LANDING" ||
@@ -3432,6 +3611,8 @@ export class GamesService {
       case "CARD_REVEAL":
       case "CARD_EFFECT":
         return { type: "CONFIRM_CARD" };
+      case "JAIL_NOTICE":
+        return { type: "CONFIRM_JAIL_NOTICE" };
       case "TAX_PAYMENT":
         return { type: "CONFIRM_TAX" };
       case "PAY_RENT":
@@ -3445,6 +3626,25 @@ export class GamesService {
       default:
         return null;
     }
+  }
+
+  /**
+   * `true` для модальных фаз, где бот должен закрыть окно автоматически
+   * через ~2.5 секунды (как человек нажимает «ОК» / «ПРИНЯТЬ» / «Оплатить»).
+   *
+   * Универсальный 60-секундный fallback из `scheduleBotConfirmFallback`
+   * слишком долгий для этих фаз: при партии с ботами партия будет
+   * «висеть» на модалке, и зрители будут ждать завершения хода
+   * неоправданно долго. Поэтому для них выставляется отдельный,
+   * короткий серверный таймер.
+   */
+  private isBotModalPhase(phase: Phase): boolean {
+    return (
+      phase === "JAIL_NOTICE" ||
+      phase === "CARD_REVEAL" ||
+      phase === "TAX_PAYMENT" ||
+      phase === "PAY_RENT"
+    );
   }
 
   /**
@@ -3527,6 +3727,49 @@ export class GamesService {
       this.botConfirmFallbackTimers.delete(gameId);
     }
     this.botConfirmFallbackContexts.delete(gameId);
+  }
+
+  private clearBotModalConfirm(gameId: string) {
+    const t = this.botModalTimers.get(gameId);
+    if (t) {
+      clearTimeout(t);
+      this.botModalTimers.delete(gameId);
+    }
+    this.botModalContexts.delete(gameId);
+  }
+
+  private scheduleBotModalConfirm(state: GameState, gameId: string, current: Player) {
+    this.clearBotModalConfirm(gameId);
+    const action = this.confirmActionForPhase(state.phase);
+    if (!action) {
+      return;
+    }
+    this.botModalContexts.set(gameId, {
+      phase: state.phase,
+      playerId: current.id,
+      setAt: Date.now(),
+    });
+    const MODAL_MS = 2500;
+    const timer = setTimeout(() => {
+      this.botModalTimers.delete(gameId);
+      try {
+        const s = this.activeGames.get(gameId);
+        if (!s) return;
+        if (s.phase !== state.phase) return;
+        if (s.players[s.currentPlayerIndex]?.id !== current.id) return;
+        if (s.status !== "active") return;
+        void this.applyAction(gameId, current.id, action).catch((err) => {
+          this.logger.error(
+            `Bot modal confirm failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      } catch (err) {
+        this.logger.error(
+          `Bot modal confirm setup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, MODAL_MS);
+    this.botModalTimers.set(gameId, timer);
   }
 
   private botDecisionToAction(d: BotDecision, state: GameState): GameAction | null {

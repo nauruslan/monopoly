@@ -37,6 +37,12 @@ export type GameAction =
   | { type: "CONFIRM_MOVE_ANIMATION" }
   /** Клиент/бот подтвердил, что фишка приземлилась (RESOLVING_LANDING → следующая фаза). */
   | { type: "CONFIRM_LANDING" }
+  /**
+   * Клиент/бот закрыл информационное модальное окно «Вы арестованы!
+   * Отправляйтесь в тюрьму!» (JAIL_NOTICE → MOVE_ANIMATION). После
+   * подтверждения сервер начинает анимацию фишки к клетке 10.
+   */
+  | { type: "CONFIRM_JAIL_NOTICE" }
   /** Клиент закрыл модалку карточки Шанс/Казна/Роскошный налог (CARD_REVEAL → CARD_EFFECT). */
   | { type: "CONFIRM_CARD" }
   /** Клиент закрыл модалку фиксированного налога (TAX_PAYMENT). */

@@ -18,6 +18,7 @@ import MortgageModal from "../components/modals/MortgageModal.vue";
 import BuildModal from "../components/modals/BuildModal.vue";
 import BankruptcyModal from "../components/modals/BankruptcyModal.vue";
 import PlayerBankruptNoticeModal from "../components/modals/PlayerBankruptNoticeModal.vue";
+import JailNoticeModal from "../components/modals/JailNoticeModal.vue";
 import SettingsPanel from "../components/SettingsPanel.vue";
 import LogPanel from "../components/LogPanel.vue";
 import { useAuthStore } from "../stores/auth";
@@ -287,6 +288,15 @@ const showRentModal = ref(false);
 const rentAmount = ref(0);
 const rentOwnerName = ref("");
 const rentCellName = ref("");
+
+// Модальное окно «Вы арестованы! Отправляйтесь в тюрьму.» (фаза JAIL_NOTICE).
+// Показывается в двух сценариях:
+//   1) игрок приземлился на клетку 30 (GOTO_JAIL) — state.jailNotice.reason="cell";
+//   2) игрок выбросил три дубля подряд — state.jailNotice.reason="double".
+// После нажатия «ПРИНЯТЬ» (или авто-CONfirm для бота через 2.5с) клиент
+// шлёт `CONFIRM_JAIL_NOTICE` — сервер начинает анимацию фишки к клетке 10.
+const showJailNoticeModal = ref(false);
+const jailNoticeReason = ref<"cell" | "card" | "double">("cell");
 
 // Модалка тюрьмы теперь живёт в `useJailStore` (см. stores/jail.ts).
 // Единый источник правды для открытия/закрытия, чтобы не было
@@ -749,6 +759,36 @@ watch(
       showCardModal.value = false;
     }
 
+    // JAIL_NOTICE — модальное окно «Вы арестованы! Отправляйтесь в тюрьму!».
+    // Сервер выставляет phase="JAIL_NOTICE" в двух сценариях:
+    //   1) попадание на клетку 30 (GOTO_JAIL) — reason="cell";
+    //   2) три дубля подряд — reason="double";
+    //   3) (резерв) карточка «Отправляйтесь в тюрьму» — reason="card".
+    // Сервер НЕ перемещает фишку и НЕ заполняет state.moveAnimation —
+    // это делает handleJailNotice на сервере только ПОСЛЕ получения
+    // CONFIRM_JAIL_NOTICE. Поэтому модальное окно должно быть
+    // обязательно показано (а не «пролистано» автоматически) и
+    // закрыто по кнопке «ПРИНЯТЬ» либо авто-таймером для бота.
+    // Показываем модалку ВСЕМ клиентам (как PlayerBankruptNoticeModal),
+    // чтобы зрители тоже видели, что произошло с игроком.
+    if (newPhase === "JAIL_NOTICE" && state.value.jailNotice) {
+      const reason = state.value.jailNotice.reason;
+      jailNoticeReason.value = reason;
+      showJailNoticeModal.value = true;
+      // Если ходит бот — авто-CONFIRM_JAIL_NOTICE через 2.5с (как CARD_REVEAL).
+      // 2-3с — требование пользователя: дать зрителям увидеть окно.
+      if (currentPlayer.value?.kind === "bot") {
+        setTimeout(() => {
+          if (state.value.phase === "JAIL_NOTICE") {
+            sendConfirmForCurrentPhase("JAIL_NOTICE", { type: "CONFIRM_JAIL_NOTICE" });
+          }
+        }, 2500);
+      }
+    }
+    if (newPhase !== "JAIL_NOTICE") {
+      showJailNoticeModal.value = false;
+    }
+
     // MOVE_ANIMATION — запускаем визуальное перемещение фишки.
     // Сервер прислал `state.moveAnimation = { from, to, ... }`. Запускаем
     // animatePlayerTo от `from` к `to`; внутри по завершении отправится
@@ -853,64 +893,32 @@ function onTradeCancel() {
   dispatchAction({ type: "TRADE_CANCEL" });
 }
 
-// Анимация хода фишки (фаза MOVE_ANIMATION)
-// ВАЖНО: на промежуточных клетках НИЧЕГО не срабатывает.
-// Анимация идёт по stepDelay × N шагов.
-// По завершении — отправляем CONFIRM_MOVE_ANIMATION → сервер
-// финально перемещает игрока в handleMoveAnimation, и мы получаем
-// обновлённый state с новой позицией.
-// Мгновенный телепорт в тюрьму: когда сервер только что отправил игрока
-// в тюрьму (картой/3 дублями/клеткой), state.justEnteredJail=true,
-// фаза JAIL_DECISION, но MOVE_ANIMATION не запускается. Синхронизируем
-// displayPositions с реальной player.position (тюрьма = 10), чтобы
-// фишка «прыгнула» без анимации.
-// ВАЖНО: watcher регистрируется ВНУТРИ setup как самостоятельный
-// top-level watch — иначе он не будет реактивным (раньше был вложен
-// внутрь phase watcher'а, что приводило к пересозданию и потере
-// срабатывания, а также к TDZ-ошибке из-за `let animTimers` ниже).
+/**
+ * Анимация хода фишки (фаза MOVE_ANIMATION).
+ *
+ * ВАЖНО: на промежуточных клетках НИЧЕГО не срабатывает.
+ * Анимация идёт по stepDelay × N шагов.
+ * По завершении — отправляем CONFIRM_MOVE_ANIMATION → сервер
+ * финально перемещает игрока в handleMoveAnimation, и мы получаем
+ * обновлённый state с новой позицией.
+ *
+ * АНИМАЦИЯ В ТЮРЬМУ (правило 3 дублей): в отличие от старого
+ * «мгновенного телепорта», теперь фишка тоже АНИМИРУЕТСЯ к клетке 10
+ * (JAIL) через стандартный MOVE_ANIMATION flow. Сервер заполняет
+ * `state.moveAnimation` с direction="backward" (или "forward" если
+ * from < 10) на стороне `handleDiceAnimation`, и phase-watcher
+ * автоматически вызывает `animatePlayerTo` ниже. Никаких
+ * дополнительных watcher'ов на `justEnteredJail` / `position` больше
+ * НЕ НУЖНО — анимация полностью идёт через стандартный пайплайн.
+ *
+ * ВАЖНО: watcher на phase регистрируется ВНУТРИ setup как
+ * самостоятельный top-level watch — иначе он не будет реактивным
+ * (раньше был вложен внутрь phase watcher'а, что приводило к
+ * пересозданию и потере срабатывания, а также к TDZ-ошибке из-за
+ * `let animTimers` ниже).
+ */
 const displayPositions = ref<Record<string, number>>({});
 let animTimers: Record<string, number> = {};
-
-watch(
-  () => state.value.justEnteredJail,
-  (justEntered) => {
-    if (!justEntered) return;
-    const p = currentPlayer.value;
-    if (!p) return;
-    // Очистим активный таймер анимации, если он был.
-    if (animTimers[p.id]) {
-      clearInterval(animTimers[p.id]);
-      delete animTimers[p.id];
-    }
-    displayPositions.value = {
-      ...displayPositions.value,
-      [p.id]: p.position,
-    };
-  },
-);
-
-// Подстраховка: если сервер прислал state с уже justEnteredJail=true
-// (например, при reconnect/mount), watcher на phase мог не сработать.
-// Следим за изменением currentPlayer.position пока justEnteredJail=true
-// — если позиция поменялась (телепорт на 10), мгновенно синхронизируем.
-watch(
-  () => [currentPlayer.value?.id, currentPlayer.value?.position] as const,
-  ([, pos], [, oldPos]) => {
-    if (pos === undefined || oldPos === undefined) return;
-    if (pos === oldPos) return;
-    if (!state.value.justEnteredJail) return;
-    const p = currentPlayer.value;
-    if (!p) return;
-    if (animTimers[p.id]) {
-      clearInterval(animTimers[p.id]);
-      delete animTimers[p.id];
-    }
-    displayPositions.value = {
-      ...displayPositions.value,
-      [p.id]: pos,
-    };
-  },
-);
 
 // Анимация на парковку (id=20) и в тюрьму (id=10) для карточек
 //
@@ -1068,6 +1076,19 @@ function onCloseCard() {
   sendConfirmForCurrentPhase("CARD_REVEAL", { type: "CONFIRM_CARD" });
 }
 
+/**
+ * Закрытие модалки «Вы арестованы! Отправляйтесь в тюрьму.» (фаза JAIL_NOTICE).
+ * Шлёт на сервер CONFIRM_JAIL_NOTICE, после чего сервер (handleJailNotice)
+ * построит state.moveAnimation и переключит phase в MOVE_ANIMATION — фишка
+ * АНИМИРУЕТСЯ к клетке 10. До этого момента фишка остаётся на прежней
+ * клетке (30 при попадании или 30 при трёх дублях).
+ */
+function onCloseJailNotice() {
+  if (!showJailNoticeModal.value) return; // защита от двойного onClose
+  showJailNoticeModal.value = false;
+  sendConfirmForCurrentPhase("JAIL_NOTICE", { type: "CONFIRM_JAIL_NOTICE" });
+}
+
 // Модалка фиксированного налога (фаза TAX_PAYMENT)
 function onCloseTax() {
   showTaxModal.value = false;
@@ -1206,6 +1227,22 @@ function logout() {
         :card-text="cardText"
         :deck="cardDeck"
         @close="onCloseCard"
+      />
+
+      <!--
+        Информационная модалка «Вы арестованы! Отправляйтесь в тюрьму.»
+        (фаза JAIL_NOTICE). Показывается:
+          1) при попадании на клетку 30 (GOTO_JAIL);
+          2) при выпадении трёх дублей подряд (правило Монополии).
+        Закрывается по кнопке «ПРИНЯТЬ» (отправляется CONFIRM_JAIL_NOTICE);
+        бот авто-закрывает через 2.5с (см. phase-watcher выше).
+        После закрытия сервер (handleJailNotice) строит state.moveAnimation
+        и фишка АНИМИРУЕТСЯ к клетке 10.
+      -->
+      <JailNoticeModal
+        :show="showJailNoticeModal"
+        :reason="jailNoticeReason"
+        @close="onCloseJailNotice"
       />
 
       <TaxModal

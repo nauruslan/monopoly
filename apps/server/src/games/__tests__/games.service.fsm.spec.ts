@@ -446,7 +446,7 @@ describe("GamesService.applyAction (FSM)", () => {
       (state as GameState & { _forceRoll?: [number, number] })._forceRoll = dice;
     }
 
-    it("GOTO_JAIL cell: попадание на клетку «В тюрьму» идёт через CARD_REVEAL, затем CONFIRM_CARD → телепорт на 10, inJail=true, justEnteredJail=true", async () => {
+    it("GOTO_JAIL cell: попадание на клетку «В тюрьму» идёт через JAIL_NOTICE (модалка «Вы арестованы!»), затем CONFIRM_JAIL_NOTICE → анимация к 10, inJail=true, justEnteredJail=true", async () => {
       // GOTO_JAIL = id 30 на стандартной доске.
       const goto = activeState.board.find((c) => c.type === "GOTO_JAIL");
       if (!goto) return;
@@ -454,22 +454,30 @@ describe("GamesService.applyAction (FSM)", () => {
       p.position = goto.id;
       p.mustRollAgain = false;
       p.consecutiveDoubles = 0;
+      // В реальной игре игрок попадает на 30 после броска кубиков —
+      // state.lastDice заполняется в handleRolling. Здесь ставим
+      // напрямую, чтобы handleMoveAnimation (CONFIRM_MOVE_ANIMATION)
+      // не упал на проверке `!state.lastDice`.
+      activeState.lastDice = { dice: [6, 6], isDouble: true };
       activeState.phase = "RESOLVING_LANDING";
 
-      // 1) CONFIRM_LANDING: сервер кладёт «тюремную» Chance-карточку в
-      // cardContext и переводит фазу в CARD_REVEAL (модалка-объявление).
+      // 1) CONFIRM_LANDING: сервер НЕ использует фейковую Chance-карточку.
+      // Клетка 30 — это НЕ колода ШАНС, поэтому фаза переходит в
+      // JAIL_NOTICE — показ информационного модального окна.
       await act({ type: "CONFIRM_LANDING" });
-      expect(activeState.phase).toBe("CARD_REVEAL");
-      expect(activeState.cardContext?.card?.effect?.kind).toBe("goto-jail");
+      expect(activeState.phase).toBe("JAIL_NOTICE");
+      expect(activeState.jailNotice).toEqual({
+        playerId: p.id,
+        reason: "cell",
+      });
       // На этом этапе игрок ещё на клетке 30, флаги тюрьмы не выставлены.
       expect(p.position).toBe(30);
       expect(p.inJail).toBe(false);
       expect(activeState.justEnteredJail).toBeFalsy();
 
-      // 2) CONFIRM_CARD: теперь фишка АНИМИРУЕТСЯ backward к клетке 10
-      // (от 30 → 29 → ... → 10), фаза = MOVE_ANIMATION. После
-      // анимации handleResolvingLanding → sendToJail + JAIL_DECISION.
-      await act({ type: "CONFIRM_CARD" });
+      // 2) CONFIRM_JAIL_NOTICE: сервер строит анимацию backward
+      // (30 → 29 → ... → 10), фаза = MOVE_ANIMATION.
+      await act({ type: "CONFIRM_JAIL_NOTICE" });
       expect(p.position).toBe(10);
       expect(p.inJail).toBe(false);
       expect(activeState.phase).toBe("MOVE_ANIMATION");
@@ -485,6 +493,88 @@ describe("GamesService.applyAction (FSM)", () => {
       expect(p.consecutiveDoubles).toBe(0);
       expect(activeState.justEnteredJail).toBe(true);
       expect(activeState.phase).toBe("JAIL_DECISION");
+    });
+
+    /**
+     * Регресс-тест: при попадании на клетку GOTO_JAIL (id=30) в журнале
+     * должна появиться РОВНО ОДНА запись «попал в тюрьму» — а не две,
+     * как было до фикса (один и тот же `logJailEntered` вызывался
+     * сначала в `handleResolvingLanding` (ветка `cell.type === "GOTO_JAIL"`),
+     * а потом ещё раз в ветке `cell.type === "JAIL" && pendingJailFromCard`
+     * после `CONFIRM_MOVE_ANIMATION`).
+     */
+    it("GOTO_JAIL cell: в журнале РОВНО ОДНА запись «попал в тюрьму» (регресс: раньше было два дубля)", async () => {
+      const goto = activeState.board.find((c) => c.type === "GOTO_JAIL");
+      if (!goto) return;
+      const p = activeState.players[activeState.currentPlayerIndex]!;
+      p.position = goto.id;
+      p.mustRollAgain = false;
+      p.consecutiveDoubles = 0;
+      activeState.lastDice = { dice: [6, 6], isDouble: true };
+      activeState.phase = "RESOLVING_LANDING";
+
+      // 1) Запись в журнал появляется в ветке GOTO_JAIL при CONFIRM_LANDING.
+      await act({ type: "CONFIRM_LANDING" });
+      expect(activeState.phase).toBe("JAIL_NOTICE");
+
+      const jailEnteredAfterConfirmLanding = (activeState.events ?? []).filter(
+        (e) => e.type === "jail",
+      );
+      expect(jailEnteredAfterConfirmLanding).toHaveLength(1);
+
+      // 2) Полный цикл до JAIL_DECISION — больше записей появляться не должно.
+      await act({ type: "CONFIRM_JAIL_NOTICE" });
+      await act({ type: "CONFIRM_MOVE_ANIMATION" });
+      await act({ type: "CONFIRM_LANDING" });
+      expect(activeState.phase).toBe("JAIL_DECISION");
+
+      const jailEnteredAfterFullFlow = (activeState.events ?? []).filter((e) => e.type === "jail");
+      expect(jailEnteredAfterFullFlow).toHaveLength(1);
+    });
+
+    /**
+     * Регресс-тест для бага №2: бот, попавший в фазу JAIL_NOTICE,
+     * должен автоматически выйти из неё примерно через 2.5 секунды
+     * благодаря серверному `scheduleBotModalConfirm`. Раньше бот
+     * «висел» в JAIL_NOTICE до срабатывания 60-секундного
+     * `scheduleBotConfirmFallback` (или вечно, если клиент был
+     * подключен, но никто не отправлял confirm).
+     */
+    it("JAIL_NOTICE для бота: через ~2.5с фаза автоматически переходит в MOVE_ANIMATION (без участия клиента)", async () => {
+      // Сделаем текущим игроком БОТА (p1), иначе scheduleBotModalConfirm
+      // не вызывается (бота-человека сервер не авто-confirm'ит).
+      activeState.currentPlayerIndex = 1;
+      const p = activeState.players[1]!;
+      expect(p.kind).toBe("bot");
+
+      const goto = activeState.board.find((c) => c.type === "GOTO_JAIL");
+      if (!goto) return;
+      p.position = goto.id;
+      p.mustRollAgain = false;
+      p.consecutiveDoubles = 0;
+      activeState.lastDice = { dice: [6, 6], isDouble: true };
+      activeState.phase = "RESOLVING_LANDING";
+
+      // CONFIRM_LANDING → JAIL_NOTICE. При фазе JAIL_NOTICE applyAction
+      // должен поставить короткий setTimeout через scheduleBotModalConfirm.
+      await act({ type: "CONFIRM_LANDING" });
+      expect(activeState.phase).toBe("JAIL_NOTICE");
+
+      // До истечения таймера фаза не меняется.
+      jest.advanceTimersByTime(1000);
+      expect(activeState.phase).toBe("JAIL_NOTICE");
+
+      // Через 2.5с таймер срабатывает, бот шлёт CONFIRM_JAIL_NOTICE,
+      // фаза переходит в MOVE_ANIMATION.
+      await Promise.resolve(); // даём микрозадачам из setTimeout(catch(...)) уйти
+      jest.advanceTimersByTime(2000);
+      // Даём promise'ам внутри setTimeout'а разрешиться.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(activeState.phase).toBe("MOVE_ANIMATION");
+      expect(p.position).toBe(10);
     });
 
     it("justEnteredJail=true → в JAIL_DECISION разрешён ТОЛЬКО END_TURN", async () => {
@@ -528,6 +618,209 @@ describe("GamesService.applyAction (FSM)", () => {
       await act({ type: "PAY_JAIL_FINE" });
       expect(p.money).toBe(moneyBefore - 50);
       expect(p.inJail).toBe(false);
+    });
+
+    /**
+     * Регресс-тест: правило «3 дубля подряд» должно
+     * АНИМИРОВАТЬ фишку к клетке 10 (JAIL), а не телепортировать
+     * мгновенно. Это исправляет давний UX-баг (фишка
+     * «исчезала» с текущей клетки и «появлялась» в тюрьме).
+     *
+     * Поток для 3-го дубля:
+     *  1) ROLL_DICE (дубль) →
+     *     - consecutiveDoubles становится 3;
+     *     - сервер НЕ телепортирует, а заполняет `state.moveAnimation`
+     *       с direction="backward" (или "forward" если from < 10)
+     *       и target=10;
+     *     - фаза = MOVE_ANIMATION (НЕ JAIL_DECISION);
+     *     - position игрока ОБНОВЛЯЕТСЯ сразу до 10 (как в
+     *       карточных ветках «move target=10» и «goto-jail»);
+     *       иначе isCardMove-ветка в handleMoveAnimation пропустит
+     *       обновление позиции, и sendToJail не сработает;
+     *     - state.moveAnimation.from хранит ИСХОДНУЮ позицию
+     *       (поле события), а player.position уже равен to (10).
+     *  2) CONFIRM_MOVE_ANIMATION → handleResolvingLanding →
+     *     ветка для JAIL+pendingJailFromCard → sendToJail +
+     *     justEnteredJail=true + phase=JAIL_DECISION.
+     */
+    it("3 дубля подряд: сначала модальное окно JAIL_NOTICE, затем анимация к 10 (а не телепорт), потом sendToJail", async () => {
+      const p = activeState.players[activeState.currentPlayerIndex]!;
+      // Поставим игрока на клетку 30 (GOTO_JAIL) — оттуда до 10
+      // короче всего идти НАЗАД (20 клеток) — direction="backward".
+      // Это даёт нетривиальную дистанцию для анимации.
+      p.position = 30;
+      p.consecutiveDoubles = 2; // два предыдущих дубля
+      p.mustRollAgain = true;
+      p.money = 1500;
+      activeState.phase = "DICE_ANIMATION";
+      activeState.lastDice = { dice: [6, 6], isDouble: true };
+      activeState.moveAnimation = undefined;
+      activeState.pendingJailFromCard = false;
+      activeState.justEnteredJail = false;
+      activeState.jailNotice = undefined;
+
+      // 1) CONFIRM_DICE_ANIMATION с 3-м дублём:
+      //    сервер НЕ переходит сразу в JAIL_NOTICE — фишка ещё
+      //    не двинулась, и в журнале уже есть запись
+      //    «Игрок выкинул три дубля подряд и попал в тюрьму».
+      //    Позиция игрока НЕ обновляется здесь, mustRollAgain/
+      //    consecutiveDoubles сбрасываются — правило обрывается.
+      await act({ type: "CONFIRM_DICE_ANIMATION" });
+      // Позиция всё ещё 30 — анимация ещё не строилась.
+      expect(p.position).toBe(30);
+      // state.moveAnimation пока НЕ заполнен — он будет построен
+      // только после закрытия информационного модального окна.
+      expect(activeState.moveAnimation).toBeUndefined();
+      // Флаги дублей сброшены (правило обрывается).
+      expect(p.mustRollAgain).toBe(false);
+      expect(p.consecutiveDoubles).toBe(0);
+      // Контекст информационного окна + фаза JAIL_NOTICE.
+      expect(activeState.phase).toBe("JAIL_NOTICE");
+      expect(activeState.jailNotice).toEqual({
+        playerId: p.id,
+        reason: "double",
+      });
+      // inJail ещё не выставлен — sendToJail сработает ПОСЛЕ анимации.
+      expect(p.inJail).toBe(false);
+      expect(activeState.justEnteredJail).toBe(false);
+
+      // 2) CONFIRM_JAIL_NOTICE → handleJailNotice строит анимацию
+      //    backward (30 → 29 → ... → 10), позиция обновляется сразу
+      //    до 10 (как в card-ветках), фаза = MOVE_ANIMATION.
+      await act({ type: "CONFIRM_JAIL_NOTICE" });
+      // Позиция уже 10 (как при card-ветках); анимация «бежит» по
+      // сохранённому from=30 → to=10.
+      expect(p.position).toBe(10);
+      // state.moveAnimation заполнен для анимации к 10 (from=30, to=10).
+      const ma1 = activeState.moveAnimation as unknown as {
+        playerId: string;
+        from: number;
+        to: number;
+        steps: number;
+        isDouble: boolean;
+        direction: "forward" | "backward";
+      };
+      expect(ma1).toBeDefined();
+      expect(ma1.playerId).toBe(p.id);
+      expect(ma1.from).toBe(30);
+      expect(ma1.to).toBe(10);
+      expect(ma1.direction).toBe("backward");
+      expect(ma1.steps).toBe(20);
+      expect(ma1.isDouble).toBe(true);
+      // Фаза — MOVE_ANIMATION (а НЕ JAIL_DECISION).
+      expect(activeState.phase).toBe("MOVE_ANIMATION");
+      // Маркер отложенной отправки в тюрьму + причина "double".
+      expect(activeState.pendingJailFromCard).toBe(true);
+      expect(activeState.pendingJailReason).toBe("double");
+      // Контекст окна очищен.
+      expect(activeState.jailNotice).toBeUndefined();
+      // inJail ещё не выставлен.
+      expect(p.inJail).toBe(false);
+      expect(activeState.justEnteredJail).toBe(false);
+
+      // 3) CONFIRM_MOVE_ANIMATION → handleMoveAnimation (ветка
+      //    isCardMove=true): очищает state.moveAnimation и переводит
+      //    фазу в RESOLVING_LANDING. Сам sendToJail здесь НЕ
+      //    вызывается — он сработает на следующем шаге в
+      //    handleResolvingLanding при обработке CONFIRM_LANDING.
+      await act({ type: "CONFIRM_MOVE_ANIMATION" });
+      // Позиция остаётся 10 (она уже была 10 после шага 1).
+      expect(p.position).toBe(10);
+      // Фаза переключилась в RESOLVING_LANDING.
+      expect(activeState.phase).toBe("RESOLVING_LANDING");
+      // Маркер pendingJailFromCard ещё НЕ сброшен — sendToJail
+      // произойдёт в handleResolvingLanding при CONFIRM_LANDING.
+      expect(activeState.pendingJailFromCard).toBe(true);
+      // state.moveAnimation очищен после анимации.
+      expect(activeState.moveAnimation).toBeUndefined();
+      // inJail/justEnteredJail пока НЕ выставлены.
+      expect(p.inJail).toBe(false);
+      expect(p.jailTurns).toBe(0);
+      expect(activeState.justEnteredJail).toBe(false);
+
+      // 4) CONFIRM_LANDING → handleResolvingLanding →
+      //    ветка для JAIL+pendingJailFromCard → sendToJail +
+      //    JAIL_DECISION.
+      await act({ type: "CONFIRM_LANDING" });
+      // Отправка в тюрьму сработала.
+      expect(p.inJail).toBe(true);
+      expect(p.jailTurns).toBe(0);
+      expect(p.consecutiveDoubles).toBe(0);
+      expect(p.mustRollAgain).toBe(false);
+      expect(activeState.justEnteredJail).toBe(true);
+      // Фаза — JAIL_DECISION.
+      expect(activeState.phase).toBe("JAIL_DECISION");
+      // Маркер pendingJailFromCard сброшен после отправки.
+      expect(activeState.pendingJailFromCard).toBe(false);
+
+      // 5) В этом ходу можно только завершить ход (justEnteredJail=true).
+      const idx = activeState.currentPlayerIndex;
+      await act({ type: "END_TURN" });
+      expect(activeState.currentPlayerIndex).not.toBe(idx);
+    });
+
+    /**
+     * Дополнение: для 3-го дубля, когда from < 10 (напр., игрок
+     * на клетке 7), сервер должен выбрать direction="forward" —
+     * короче идти ВПЕРЁД по часовой (3 клетки), чем назад (37).
+     */
+    it("3 дубля подряд: from<10 → direction=forward (кратчайший путь)", async () => {
+      const p = activeState.players[activeState.currentPlayerIndex]!;
+      p.position = 7; // from < 10
+      p.consecutiveDoubles = 2;
+      p.mustRollAgain = true;
+      activeState.phase = "DICE_ANIMATION";
+      activeState.lastDice = { dice: [3, 3], isDouble: true };
+      activeState.moveAnimation = undefined;
+      activeState.pendingJailFromCard = false;
+      activeState.jailNotice = undefined;
+
+      // После 3-го дубля сначала показывается окно JAIL_NOTICE;
+      // анимация НЕ строится, пока игрок не нажмёт ПРИНЯТЬ.
+      await act({ type: "CONFIRM_DICE_ANIMATION" });
+      expect(p.position).toBe(7);
+      expect(activeState.moveAnimation).toBeUndefined();
+      expect(activeState.phase).toBe("JAIL_NOTICE");
+      expect(activeState.jailNotice).toEqual({
+        playerId: p.id,
+        reason: "double",
+      });
+
+      // CONFIRM_JAIL_NOTICE: сервер выбирает forward (3 клетки),
+      // заполняет state.moveAnimation и обновляет позицию до 10.
+      await act({ type: "CONFIRM_JAIL_NOTICE" });
+      const ma2 = activeState.moveAnimation as unknown as {
+        from: number;
+        to: number;
+        direction: "forward" | "backward";
+        steps: number;
+      };
+      expect(ma2.from).toBe(7);
+      expect(ma2.to).toBe(10);
+      expect(ma2.direction).toBe("forward");
+      expect(ma2.steps).toBe(3);
+      expect(p.position).toBe(10);
+      expect(activeState.phase).toBe("MOVE_ANIMATION");
+      expect(activeState.jailNotice).toBeUndefined();
+
+      // Завершаем анимацию — фаза переходит в RESOLVING_LANDING,
+      // но sendToJail ещё не вызван.
+      await act({ type: "CONFIRM_MOVE_ANIMATION" });
+      expect(p.position).toBe(10);
+      expect(activeState.phase).toBe("RESOLVING_LANDING");
+      expect(p.inJail).toBe(false);
+      expect(activeState.pendingJailFromCard).toBe(true);
+      expect(activeState.moveAnimation).toBeUndefined();
+
+      // CONFIRM_LANDING → handleResolvingLanding →
+      //    ветка для JAIL+pendingJailFromCard → sendToJail +
+      //    JAIL_DECISION.
+      await act({ type: "CONFIRM_LANDING" });
+      expect(p.inJail).toBe(true);
+      expect(p.jailTurns).toBe(0);
+      expect(activeState.justEnteredJail).toBe(true);
+      expect(activeState.phase).toBe("JAIL_DECISION");
+      expect(activeState.pendingJailFromCard).toBe(false);
     });
   });
 

@@ -10,7 +10,7 @@ describe("BotService.decide", () => {
   beforeEach(async () => {
     resetCounters();
     const moduleRef = await Test.createTestingModule({
-      providers: [BotService, BankruptcyService]
+      providers: [BotService, BankruptcyService],
     }).compile();
     bot = moduleRef.get(BotService);
   });
@@ -24,7 +24,12 @@ describe("BotService.decide", () => {
     });
 
     it("USE_CARD, если в тюрьме и есть карточка", () => {
-      const player = makePlayer({ inJail: true, holdableCards: { test: { templateId: 'ch7', drawnAt: new Date().toISOString(), originDeckId: 'd1' } } });
+      const player = makePlayer({
+        inJail: true,
+        holdableCards: {
+          test: { templateId: "ch7", drawnAt: new Date().toISOString(), originDeckId: "d1" },
+        },
+      });
       const state = makeState({ phase: "ROLLING", players: [player] });
       expect(bot.decide(player, state)).toBe("USE_CARD");
     });
@@ -47,7 +52,7 @@ describe("BotService.decide", () => {
       const state = makeState({
         phase: "BUY_DECISION",
         players: [player],
-        board
+        board,
       });
       expect(bot.decide(player, state)).toBe("BUY");
     });
@@ -60,7 +65,7 @@ describe("BotService.decide", () => {
       const state = makeState({
         phase: "BUY_DECISION",
         players: [player],
-        board
+        board,
       });
       // Раньше возвращался "END_TURN", что приводило к ForbiddenException
       // (END_TURN недопустим в BUY_DECISION) и зависанию бота после дубля +
@@ -77,7 +82,7 @@ describe("BotService.decide", () => {
       const state = makeState({
         phase: "BUY_DECISION",
         players: [player],
-        board
+        board,
       });
       expect(bot.decide(player, state)).toBe("DECLINE_BUY");
     });
@@ -86,7 +91,12 @@ describe("BotService.decide", () => {
   // ─────────────────────── JAIL_DECISION ───────────────────────
   describe("JAIL_DECISION phase", () => {
     it("USE_CARD имеет приоритет над штрафом", () => {
-      const player = makePlayer({ holdableCards: { test: { templateId: 'ch7', drawnAt: new Date().toISOString(), originDeckId: 'd1' } }, money: 1500 });
+      const player = makePlayer({
+        holdableCards: {
+          test: { templateId: "ch7", drawnAt: new Date().toISOString(), originDeckId: "d1" },
+        },
+        money: 1500,
+      });
       const state = makeState({ phase: "JAIL_DECISION", players: [player] });
       expect(bot.decide(player, state)).toBe("USE_CARD");
     });
@@ -115,7 +125,7 @@ describe("BotService.decide", () => {
       const state = makeState({
         phase: "BUILDING",
         players: [player],
-        board
+        board,
       });
       // В фазе BUILDING бот сначала открывает под-фазу строительства,
       // а конкретные действия (BUILD_HOUSE/UNMORTGAGE) выполняет уже в BUILDING_PHASE.
@@ -136,7 +146,7 @@ describe("BotService.decide", () => {
       const state = makeState({
         phase: "BUILDING",
         players: [player],
-        board
+        board,
       });
       expect(bot.decide(player, state)).toBe("OPEN_BUILDING_PHASE");
     });
@@ -147,7 +157,7 @@ describe("BotService.decide", () => {
       const state = makeState({
         phase: "BUILDING",
         players: [player],
-        board
+        board,
       });
       expect(bot.decide(player, state)).toBe("END_TURN");
     });
@@ -202,8 +212,8 @@ describe("BotService.decide", () => {
           finalBid: 0,
           finishReason: null,
           startedAt: Date.now(),
-          closedAt: null
-        }
+          closedAt: null,
+        },
       });
     }
 
@@ -236,7 +246,7 @@ describe("BotService.decide", () => {
       const state = makeAuctionState({
         currentBid: 0,
         highestBidderId: null,
-        meMoney: 100
+        meMoney: 100,
       });
       const me = state.players[0]!;
       expect(bot.decide(me, state)).toBe("AUCTION_PASS");
@@ -278,10 +288,10 @@ describe("BotService.decide", () => {
             fromHoldableCardCount: 0,
             toProperties: [],
             toCash: 50,
-            toHoldableCardCount: 0
+            toHoldableCardCount: 0,
           },
-          counterCount: 0
-        }
+          counterCount: 0,
+        },
       });
       // Чтобы other получал МАЛО и отдавал МНОГО — перевернём стороны:
       // Сейчас other получает cell 0 (200₽) и отдаёт 50₽ → ACCEPT.
@@ -293,7 +303,7 @@ describe("BotService.decide", () => {
         fromHoldableCardCount: 0,
         toProperties: [1], // me просит cell 1 (200₽)
         toCash: 0,
-        toHoldableCardCount: 0
+        toHoldableCardCount: 0,
       };
       // Пересчёт: other (recipient) получает fromProperties=[] (0) + fromCash=50 = 50.
       // other отдаёт toProperties=[1] (200) + toCash=0 = 200. 50/200 = 0.25 < 0.9 → REJECT.
@@ -322,10 +332,10 @@ describe("BotService.decide", () => {
             fromHoldableCardCount: 0,
             toProperties: [1],
             toCash: 0,
-            toHoldableCardCount: 0
+            toHoldableCardCount: 0,
           },
-          counterCount: 0
-        }
+          counterCount: 0,
+        },
       });
       expect(bot.decide(me, state)).toBe("TRADE_ACCEPT");
     });
@@ -346,10 +356,10 @@ describe("BotService.decide", () => {
             fromHoldableCardCount: 0,
             toProperties: [],
             toCash: 0,
-            toHoldableCardCount: 0
+            toHoldableCardCount: 0,
           },
-          counterCount: 1
-        }
+          counterCount: 1,
+        },
       });
       expect(bot.decide(me, state)).toBe("TRADE_ACCEPT");
     });
@@ -369,7 +379,7 @@ describe("BotService.decide", () => {
       const me = makePlayer({
         id: "me",
         money: overrides.money,
-        properties: [...(overrides.propsWithHouses ?? []), ...(overrides.propsToMortgage ?? [])]
+        properties: [...(overrides.propsWithHouses ?? []), ...(overrides.propsToMortgage ?? [])],
       });
       // Используем доску 6 клеток: первые 3 — brown (с домами), последние 3 —
       // lightblue (можно заложить). Так propsWithHouses и propsToMortgage
@@ -392,8 +402,8 @@ describe("BotService.decide", () => {
           phase: "BANKRUPTCY_LIQUIDATE",
           players: [me],
           board,
-          bankruptcy: { playerId: "me", creditorId: null, debt: overrides.debt, stage: 2 }
-        })
+          bankruptcy: { playerId: "me", creditorId: null, debt: overrides.debt, stage: 2 },
+        }),
       };
     }
 
@@ -426,7 +436,7 @@ describe("BotService.decide", () => {
         debt: 1000,
         money: -100,
         propsWithHouses: [0],
-        propsToMortgage: [3]
+        propsToMortgage: [3],
       });
       const d = bot.decide(player, state);
       expect(d).toMatchObject({ kind: "MORTGAGE_FOR_BANKRUPTCY", cellId: 3 });
@@ -450,7 +460,7 @@ describe("BotService.decide", () => {
         phase: "BANKRUPTCY_LIQUIDATE",
         players: [me],
         board,
-        bankruptcy: { playerId: "me", creditorId: null, debt: 100, stage: 2 }
+        bankruptcy: { playerId: "me", creditorId: null, debt: 100, stage: 2 },
       });
       const d = bot.decide(me, state);
       expect(d).toMatchObject({ kind: "SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY", cellId: 3 });
@@ -473,7 +483,7 @@ describe("BotService.decide", () => {
         phase: "BANKRUPTCY_LIQUIDATE",
         players: [me],
         board,
-        bankruptcy: { playerId: "me", creditorId: null, debt: 100, stage: 2 }
+        bankruptcy: { playerId: "me", creditorId: null, debt: 100, stage: 2 },
       });
       const d = bot.decide(me, state);
       // Передовая клетка (houses=3) -> именно её сносим.
@@ -484,7 +494,7 @@ describe("BotService.decide", () => {
       const { state, player } = makeBkState({
         debt: 1000,
         money: -100,
-        propsWithHouses: [0]
+        propsWithHouses: [0],
       });
       const d = bot.decide(player, state);
       expect(d).toMatchObject({ kind: "LIQUIDATE_HOUSES", cellId: 0 });
@@ -511,7 +521,7 @@ describe("BotService.decide", () => {
         phase: "BANKRUPTCY_LIQUIDATE",
         players: [me],
         board,
-        bankruptcy: { playerId: "me", creditorId: null, debt: 100, stage: 2 }
+        bankruptcy: { playerId: "me", creditorId: null, debt: 100, stage: 2 },
       });
       // Передовая клетка (houses=2) — единственная с домами.
       const d = bot.decide(me, state);
@@ -539,7 +549,7 @@ describe("BotService.decide", () => {
       const me = makePlayer({
         id: "me",
         money: -535,
-        properties: [10, 11, 18, 20, 21]
+        properties: [10, 11, 18, 20, 21],
       });
       // 40 «пустых» клеток-заглушек (группа brown — не используется ботом
       // напрямую, нужно только чтобы board имел 40 ячеек как настоящая доска).
@@ -550,7 +560,7 @@ describe("BotService.decide", () => {
           price: 200,
           rent: 20,
           housePrice: 100,
-          mortgageValue: 100
+          mortgageValue: 100,
         }),
       );
       // Незаложенные клетки без домов (группа "lightblue" — все 3 клетки
@@ -568,7 +578,7 @@ describe("BotService.decide", () => {
         price: 200,
         housePrice: 100,
         mortgageValue: 100,
-        houses: 2
+        houses: 2,
       });
       board[21] = makeCell({
         id: 21,
@@ -576,7 +586,7 @@ describe("BotService.decide", () => {
         price: 200,
         housePrice: 100,
         mortgageValue: 100,
-        houses: 2
+        houses: 2,
       });
       for (const id of [10, 11, 18, 20, 21]) {
         board[id].ownerId = "me";
@@ -586,7 +596,7 @@ describe("BotService.decide", () => {
         phase: "BANKRUPTCY_LIQUIDATE",
         players: [me],
         board,
-        bankruptcy: { playerId: "me", creditorId: null, debt: 535, stage: 2 }
+        bankruptcy: { playerId: "me", creditorId: null, debt: 535, stage: 2 },
       });
 
       // Шаг 1: бот видит незаложенные клетки без домов -> MORTGAGE
@@ -620,6 +630,138 @@ describe("BotService.decide", () => {
     it("DECLARE_BANKRUPTCY, если деньги < 0 и нечего продавать/закладывать", () => {
       const { state, player } = makeBkState({ debt: 1000, money: -100 });
       expect(bot.decide(player, state)).toBe("DECLARE_BANKRUPTCY");
+    });
+
+    // КЕЙС ИЗ РЕАЛЬНОЙ ИГРЫ: бот имеет 3 клетки red с 3 домами на каждой
+    // (монополия) и 4 mortgageable клетки в других группах. Долг 710₽.
+    // Сумма 4 mortgageable + 4 sell_mortgaged = 700₽ (не хватает 10₽).
+    // Бот должен сначала заложить, допродать заложенные, и только потом
+    // перейти к продаже домов (LIQUIDATE_HOUSES). НЕЛЬЗЯ сразу после
+    // 4 sell_mortgaged объявлять банкротство.
+    it("после 4 залогов и 4 допродаж бот доходит до LIQUIDATE_HOUSES (монополия red с домами)", () => {
+      const me = makePlayer({ id: "me", money: -710, properties: [8, 9, 14, 21, 23, 24, 34] });
+      const board = Array.from({ length: 40 }, () =>
+        makeCell({ type: "PROPERTY", group: "brown", price: 200, rent: 20, mortgageValue: 100 }),
+      );
+      // 4 mortgageable клетки (группы lightblue/pink/green, без домов)
+      board[8] = makeCell({
+        id: 8,
+        name: "Проспект Мира",
+        group: "lightblue",
+        price: 100,
+        rent: 6,
+        housePrice: 50,
+        mortgageValue: 50,
+      });
+      board[9] = makeCell({
+        id: 9,
+        name: "Площадь Ногина",
+        group: "lightblue",
+        price: 120,
+        rent: 8,
+        housePrice: 50,
+        mortgageValue: 60,
+      });
+      board[14] = makeCell({
+        id: 14,
+        name: "Ростовская наб.",
+        group: "pink",
+        price: 160,
+        rent: 12,
+        housePrice: 100,
+        mortgageValue: 80,
+      });
+      // 3 клетки red с домами (монополия)
+      board[21] = makeCell({
+        id: 21,
+        name: "Грузинский вал",
+        group: "red",
+        price: 220,
+        rent: 18,
+        housePrice: 150,
+        mortgageValue: 110,
+        houses: 3,
+      });
+      board[23] = makeCell({
+        id: 23,
+        name: "Новинский бульв.",
+        group: "red",
+        price: 220,
+        rent: 18,
+        housePrice: 150,
+        mortgageValue: 110,
+        houses: 3,
+      });
+      board[24] = makeCell({
+        id: 24,
+        name: "Смоленская пл.",
+        group: "red",
+        price: 220,
+        rent: 18,
+        housePrice: 150,
+        mortgageValue: 110,
+        houses: 3,
+      });
+      board[34] = makeCell({
+        id: 34,
+        name: "Проспект Вернадского",
+        group: "green",
+        price: 320,
+        rent: 28,
+        mortgageValue: 160,
+      });
+      for (const id of [8, 9, 14, 21, 23, 24, 34]) {
+        board[id].ownerId = "me";
+        board[id].isMortgaged = false;
+      }
+      const state = makeState({
+        phase: "BANKRUPTCY_LIQUIDATE",
+        players: [me],
+        board,
+        bankruptcy: { playerId: "me", creditorId: null, debt: 710, stage: 2 },
+      });
+      // Прогоняем цикл: применяем каждое действие бота локально (как это
+      // делает сервер) и снова зовём decide. Останавливаемся на
+      // CONFIRM_BANKRUPTCY или DECLARE_BANKRUPTCY.
+      let outcome: string | null = null;
+      for (let i = 0; i < 30; i++) {
+        const d = bot.decide(me, state);
+        if (d === null) {
+          outcome = "NULL";
+          break;
+        }
+        if (typeof d === "string") {
+          outcome = d;
+          break;
+        }
+        if (!("cellId" in d)) {
+          outcome = d.kind;
+          break;
+        }
+        if (d.kind === "MORTGAGE_FOR_BANKRUPTCY") {
+          const c = board[d.cellId];
+          c.isMortgaged = true;
+          me.money += c.mortgageValue ?? 0;
+        } else if (d.kind === "SELL_MORTGAGED_PROPERTY_FOR_BANKRUPTCY") {
+          const c = board[d.cellId];
+          me.money += c.mortgageValue ?? 0;
+          c.ownerId = undefined;
+          c.isMortgaged = false;
+        } else if (d.kind === "LIQUIDATE_HOUSES") {
+          const c = board[d.cellId];
+          me.money += Math.floor((c.housePrice ?? 0) / 2);
+          c.houses = (c.houses === 5 ? 4 : c.houses - 1) as 0 | 1 | 2 | 3 | 4 | 5;
+        } else if (d.kind === "SELL_PROPERTY_FOR_BANKRUPTCY") {
+          const c = board[d.cellId];
+          me.money += c.price ?? 0;
+          c.ownerId = undefined;
+        }
+      }
+      // Ожидаем: бот закрывает долг через продажу домов и выходит в
+      // CONFIRM_BANKRUPTCY. Если он сразу объявляет банкротство после
+      // 4 залогов и 4 допродаж (не дойдя до LIQUIDATE_HOUSES) — тест
+      // провалится, и это будет регрессия.
+      expect(outcome).toBe("CONFIRM_BANKRUPTCY");
     });
   });
 
@@ -683,7 +825,7 @@ describe("BotService.decide", () => {
         phase: "BUILDING",
         players: [me, other],
         board,
-        tradeInitiationLog: [{ initiatorId: "me-bot", recipientId: "other", at: Date.now() }]
+        tradeInitiationLog: [{ initiatorId: "me-bot", recipientId: "other", at: Date.now() }],
       });
       const d = bot.decide(me, state);
       expect(d).not.toEqual(expect.objectContaining({ kind: "TRADE_OFFER" }));
@@ -696,7 +838,7 @@ describe("BotService.decide", () => {
       const other = makePlayer({
         id: "other",
         money: 1500,
-        blockedPlayers: ["me-bot"]
+        blockedPlayers: ["me-bot"],
       });
       other.properties = [2];
       board[0].ownerId = "me-bot";

@@ -1041,12 +1041,36 @@ export class BotService {
       return "CONFIRM_BANKRUPTCY";
     }
 
-    // Защитный фикс: если DI не успел зарезолвить this.bankruptcy —
-    // fallback на простую локальную фильтрацию.
-    const listFn =
-      this.bankruptcy && typeof this.bankruptcy.listHousesSellableForLiquidation === "function"
-        ? this.bankruptcy.listHousesSellableForLiquidation.bind(this.bankruptcy)
-        : null;
+    // Локальный список клеток, с которых можно продать дом в фазе
+    // ликвидации. Раньше здесь был хрупкий фоллбэк на
+    // `this.bankruptcy.listHousesSellableForLiquidation(...)` через
+    // опциональный `listFn` — если DI почему-то не отрезолвил
+    // `BankruptcyService` (например, при тестировании или из-за
+    // проблем с circular dependencies), бот молча пропускал шаг 4
+    // и сразу объявлял банкротство, даже когда у него была монополия
+    // с домами, которые можно было бы продать.
+    //
+    // Чтобы избежать такой «тихой» потери хода, дублируем правила
+    // `BankruptcyService.canSellHouseForLiquidation` прямо здесь.
+    // Логика идентична: PROPERTY, принадлежит игроку, не заложена,
+    // есть хотя бы один дом, и правило лесенки.
+    const sellableHouses: typeof state.board = [];
+    for (const cell of state.board) {
+      if (cell.type !== "PROPERTY") continue;
+      if (cell.ownerId !== player.id) continue;
+      if (cell.isMortgaged) continue;
+      if ((cell.houses ?? 0) === 0) continue;
+      if (cell.housePrice === undefined) continue;
+      if (cell.group) {
+        const groupCells = state.board.filter(
+          (c) => c.type === "PROPERTY" && c.group === cell.group && c.ownerId === player.id,
+        );
+        const maxHouses = Math.max(...groupCells.map((c) => c.houses ?? 0));
+        if ((cell.houses ?? 0) < maxHouses) continue;
+      }
+      sellableHouses.push(cell);
+    }
+    sellableHouses.sort((a, b) => (b.housePrice ?? 0) - (a.housePrice ?? 0));
 
     // 2) Залог клетки. Кандидаты: незаложенные клетки игрока без домов
     //    (на самой клетке и в её цветовой группе), mortgageValue > 0.
@@ -1098,11 +1122,11 @@ export class BotService {
     }
 
     // 4) Продажа домов (1 дом с самой «передовой» клетки, правило лесенки).
-    const sellableHouses = listFn ? listFn(state, player) : [];
+    //    `sellableHouses` уже собран выше как локальный список (см. шапку
+    //    функции) — он НЕ зависит от `this.bankruptcy` и работает
+    //    даже если DI почему-то не отрезолвил BankruptcyService.
     if (sellableHouses.length > 0) {
-      const best = [...sellableHouses].sort(
-        (a, b) => (b.housePrice ?? 0) - (a.housePrice ?? 0),
-      )[0]!;
+      const best = sellableHouses[0]!; // уже отсортирован по убыванию housePrice
       return { kind: "LIQUIDATE_HOUSES", cellId: best.id };
     }
 

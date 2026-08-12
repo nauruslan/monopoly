@@ -2958,13 +2958,12 @@ export class GamesService {
     };
     state.phase = "BANKRUPTCY_LIQUIDATE";
     // Журнал: одно сообщение о начале распродажи. Эта функция —
-    // ЕДИНСТВЕННОЕ место, откуда пишется «Игрок распродаёт
+    // ЕДИНСТВЕННОЕ место, откуда пишется «Игрок распродает
     // имущество». Любые внешние вызовы (handleStartTurn, handleBuilding,
     // handleEndTurn, advanceToNextPlayer и shouldStartBankruptcy)
     // делегируют сюда.
     if (!recentlyLogged) {
-      const creditorName = creditor?.displayName ?? "Банк";
-      this.log.logBankruptcyLiquidationStarted(state, player, creditorName, debt);
+      this.log.logBankruptcyLiquidationStarted(state, player, debt);
     }
   }
 
@@ -3046,7 +3045,19 @@ export class GamesService {
       // В сумме с предыдущим залогом игрок получает 100% номинала. Клетка уходит
       // в банк (UNOWNED, isMortgaged=false, houses=0). Делегируем в
       // BankruptcyService.sellMortgagedPropertyToBank.
+      const soldCellName = state.board[action.cellId]?.name ?? `#${action.cellId}`;
+      const soldCellValue = state.board[action.cellId]?.mortgageValue ?? 0;
       this.bankruptcy.sellMortgagedPropertyToBank(state, player, action.cellId);
+      // Журнал: для продажи заложенного участка используем
+      // отдельный хелпер `logBankruptcyMortgagedPropertySold`,
+      // чтобы в журнале было видно отличие от обычной продажи
+      // незаложенной клетки (которую логирует `logPropertySoldToBank`).
+      this.log.logBankruptcyMortgagedPropertySold(
+        state,
+        player,
+        soldCellName,
+        soldCellValue,
+      );
       return {};
     }
     if (action.type === "BANKRUPTCY_CONFIRM" || action.type === "BANKRUPTCY_DECLARE") {

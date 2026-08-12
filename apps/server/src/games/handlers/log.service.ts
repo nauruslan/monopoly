@@ -710,20 +710,47 @@ export class LogService {
 
   /**
    * Журнал: старт процедуры распродажи имущества (фаза BANKRUPTCY_LIQUIDATE).
-   * `creditorName` — человек-читаемое имя кредитора (имя игрока или "Банк").
+   *
+   * Универсальное сообщение: «Игрок распродает имущество (долг N₽)».
+   * Кредитор (игрок или Банк) в журнал не выводится — сумма долга
+   * говорит сама за себя, а контекст «кому должен» читатель увидит
+   * по предыдущим событиям партии (например, оплата ренты, налога,
+   * штрафа и т.п.).
    */
-  logBankruptcyLiquidationStarted(
+  logBankruptcyLiquidationStarted(state: GameState, player: Player, debt: number): GameEvent {
+    return this.create(state, {
+      kind: "BANKRUPTCY_LIQUIDATION",
+      player,
+      message: `💼 ${player.displayName} распродает имущество (долг ${debt}₽)`,
+      type: "system",
+      payload: { amount: debt, liquidation: true },
+    });
+  }
+
+  /**
+   * Журнал: продажа заложенной клетки Банку за дополнительные 50%
+   * (`mortgageValue`) в фазе распродажи (BANKRUPTCY_SELL_MORTGAGED_PROPERTY).
+   *
+   * Текст ОТЛИЧАЕТСЯ от обычной продажи (`logPropertySoldToBank`):
+   *  - здесь клетка была заложена, и игрок «допродаёт» её за
+   *    дополнительные 50% (в сумме с ранее полученным залогом
+   *    получается 100% номинала);
+   *  - сообщение содержит префикс «(распродажа)» и явно указывает,
+   *    что клетка была заложена — чтобы в журнале было видно
+   *    отличие от обычной продажи незаложенной клетки.
+   */
+  logBankruptcyMortgagedPropertySold(
     state: GameState,
     player: Player,
-    creditorName: string,
-    debt: number,
+    cellName: string,
+    amount: number,
   ): GameEvent {
     return this.create(state, {
       kind: "BANKRUPTCY_LIQUIDATION",
       player,
-      message: `💼 ${player.displayName} распродаёт имущество (долг ${debt}₽ перед ${creditorName})`,
+      message: `🏦 (распродажа) ${player.displayName} продал(а) заложенный участок «${cellName}» банку за $${amount}`,
       type: "system",
-      payload: { amount: debt, liquidation: true },
+      payload: { cellId: -1, amount, liquidation: true },
     });
   }
 
@@ -772,7 +799,7 @@ export class LogService {
     return this.create(state, {
       kind: "BANKRUPTCY_DECLARED",
       player,
-      message: `💀 ${player.displayName} объявил(а) банкротство (долг перед ${creditorName})`,
+      message: `💀 ${player.displayName} объявил(а) банкротство`,
       type: "system",
     });
   }

@@ -111,10 +111,22 @@ export function grantJailFreeCard(
   player: Player,
   state: GameState,
   templateId: string,
+  opts?: { drawnCardId?: string | null },
 ): { cardId: string } | null {
   ensureDecksInitialized(state);
   const cards = state.deckCards ?? [];
-  const card = cards.find((c) => c.templateId === templateId && c.state === "IN_DECK");
+  let card: (typeof cards)[0] | undefined;
+  if (opts?.drawnCardId) {
+    // Если передан drawnCardId (только что вытянутая карта),
+    // ищем её конкретным ID, а не по шаблону/состоянию.
+    // Это критично: вытянутая карта в состоянии DRAWN/RESOLVING,
+    // а не IN_DECK, поэтому старый поиск её не находил.
+    card = cards.find((c) => c.cardId === opts.drawnCardId);
+  }
+  if (!card) {
+    // Fallback: поиск по шаблону и состоянию IN_DECK (для совместимости).
+    card = cards.find((c) => c.templateId === templateId && c.state === "IN_DECK");
+  }
   if (!card) return null;
 
   const templatesById = new Map<string, CardTemplate>();
@@ -197,8 +209,18 @@ export function consumeHoldableJailCard(player: Player, state: GameState): strin
  * Используется в `games.service.ts` сразу после восстановления состояния
  * из БД, чтобы у всех игроков был инициализирован пустой объект
  * `holdableCards` (а не `undefined`).
+ *
+ * ВАЖНО: если DeckModule не инициализирован (нет `state.deckCards`),
+ * функция является no-op — мы НЕ инициализируем `holdableCards = {}`
+ * для игроков, потому что без колод карт всё равно нечего держать в
+ * руке, а преждевременная инициализация ломает контракт «поле
+ * остаётся undefined, пока не было ни одной холдабельной карты».
  */
 export function backfillHoldableCards(state: GameState): void {
+  // no-op если DeckModule не инициализирован (нет deckCards).
+  if (!state.deckCards || state.deckCards.length === 0) {
+    return;
+  }
   for (const player of state.players) {
     if (!player.holdableCards) {
       player.holdableCards = {};

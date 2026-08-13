@@ -569,15 +569,37 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
 
     const p = setupCardReveal(jailCard);
 
-    // Новая логика: фишка АНИМИРУЕТСЯ forward/backward к 10,
-    // затем уже в handleResolvingLanding → sendToJail + JAIL_DECISION.
+    // Новая логика: при карточке «Отправляйтесь в тюрьму» сразу после
+    // CONFIRM_CARD:
+    //   1) inJail=true ставится СРАЗУ (в applyCardEffectAndAdvance, ветка
+    //      goto-jail), чтобы UI мог мигать фишкой уже во время показа
+    //      карточки. sendToJail() в handleResolvingLanding идемпотентно
+    //      подтверждает этот флаг.
+    //   2) mustRollAgain и consecutiveDoubles сбрасываются (sendToJail
+    //      обязан это делать, иначе 3-й дубль-эффект зациклится).
+    //   3) Фишка анимируется к клетке 10 в направлении, зависящем от
+    //      исходной позиции (forward если from<10, иначе backward).
+    //   4) pendingJailFromCard=true → handleResolvingLanding выполнит
+    //      sendToJail + перейдёт в JAIL_DECISION.
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
     expect(p.position).toBe(10);
-    expect(p.inJail).toBe(false);
+    // inJail=true ставится заранее для UX (мигание фишки во время
+    // показа карточки). Это намеренное поведение, см. комментарий
+    // в games.service.ts: «Ставим inJail=true СРАЗУ, до MOVE_ANIMATION».
+    expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("MOVE_ANIMATION");
     expect(activeState.moveAnimation?.direction).toMatch(/forward|backward/);
+    // pendingJailFromCard выставляется в applyCardEffectAndAdvance
+    // именно для того, чтобы handleResolvingLanding выполнил sendToJail
+    // при попадании на клетку 10 (в т.ч. для случая «обычного
+    // захода в тюрьму через карточку»). Это НЕ путать с обычным
+    // заходом через кубики: resetTurnFlags сбрасывает этот флаг
+    // на старте каждого хода, чтобы визит клетки 10 не превращался
+    // в арест.
+    expect(activeState.pendingJailFromCard).toBe(true);
+    expect(activeState.pendingJailReason).toBe("card");
 
     await act({ type: "CONFIRM_MOVE_ANIMATION" });
     expect(activeState.phase).toBe("RESOLVING_LANDING");

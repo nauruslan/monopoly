@@ -76,7 +76,7 @@ function makeFreshState(): GameState {
       holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false
+      isBankrupt: false,
     },
     {
       id: "p1",
@@ -91,7 +91,7 @@ function makeFreshState(): GameState {
       holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false
+      isBankrupt: false,
     },
   ];
   return {
@@ -106,7 +106,7 @@ function makeFreshState(): GameState {
     settings: { ...DEFAULT_SETTINGS },
     seed: "test-seed",
     createdAt: new Date().toISOString(),
-    lastActivityAt: new Date().toISOString()
+    lastActivityAt: new Date().toISOString(),
   };
 }
 
@@ -131,11 +131,11 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       create: jest.fn(async (state: GameState) => ({
         id: state.id,
         rngSeed: state.seed,
-        stateSnapshot: state
+        stateSnapshot: state,
       })),
       updateSnapshot: jest.fn(async () => undefined),
       replaceSnapshot: jest.fn(async () => true),
-      findById: jest.fn(async () => null)
+      findById: jest.fn(async () => null),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -154,7 +154,7 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
         TradeService,
         LogService,
         { provide: GameRepository, useValue: repoMock },
-      ]
+      ],
     }).compile();
 
     service = moduleRef.get(GamesService);
@@ -445,20 +445,30 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       deck: "chance",
       card: jailCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 10
     //    (игрок был на 7 < 10, идём по часовой: 7→8→9→10).
     //    Флаги сбрасываются, фаза = MOVE_ANIMATION.
+    //    inJail=true ставится СРАЗУ (для UX-мигания фишки во время
+    //    показа карточки «Идёшь в тюрьму»), justEnteredJail
+    //    выставляется в handleResolvingLanding после анимации.
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
     expect(p.position).toBe(10);
-    expect(p.inJail).toBe(false);
+    // inJail=true уже стоит (см. applyCardEffectAndAdvance, ветка
+    // goto-jail outcome). sendToJail() в handleResolvingLanding
+    // идемпотентен, и там же выставляется justEnteredJail=true.
+    expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("MOVE_ANIMATION");
     expect(activeState.moveAnimation?.direction).toBe("forward");
     expect(activeState.moveAnimation?.steps).toBe(3);
     expect(activeState.justEnteredJail).toBeFalsy();
+    // pendingJailFromCard — авторитетный маркер: после анимации
+    // handleResolvingLanding выполнит sendToJail + JAIL_DECISION.
+    expect(activeState.pendingJailFromCard).toBe(true);
+    expect(activeState.pendingJailReason).toBe("card");
 
     // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
     await act({ type: "CONFIRM_MOVE_ANIMATION" });
@@ -490,18 +500,26 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
       deck: "treasury",
       card: jailCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     // 1) CONFIRM_CARD: анимация forward к клетке 10
     //    (игрок был на 2 < 10, по часовой: 2→3→…→10).
+    //    inJail=true ставится СРАЗУ (для UX-мигания фишки во время
+    //    показа карточки «Идёшь в тюрьму»), финальный
+    //    justEnteredJail=true и phase=JAIL_DECISION выставляются
+    //    в handleResolvingLanding после анимации.
     await act({ type: "CONFIRM_CARD" });
     expect(p.mustRollAgain).toBe(false);
     expect(p.consecutiveDoubles).toBe(0);
     expect(p.position).toBe(10);
-    expect(p.inJail).toBe(false);
+    // inJail=true уже стоит (см. applyCardEffectAndAdvance, ветка
+    // goto-jail outcome).
+    expect(p.inJail).toBe(true);
     expect(activeState.phase).toBe("MOVE_ANIMATION");
     expect(activeState.moveAnimation?.direction).toBe("forward");
     expect(activeState.moveAnimation?.steps).toBe(8);
+    expect(activeState.pendingJailFromCard).toBe(true);
+    expect(activeState.pendingJailReason).toBe("card");
 
     // 2) CONFIRM_MOVE_ANIMATION → RESOLVING_LANDING.
     await act({ type: "CONFIRM_MOVE_ANIMATION" });

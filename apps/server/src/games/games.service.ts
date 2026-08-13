@@ -671,6 +671,11 @@ export class GamesService {
     state.preBuildingPhase = undefined;
     state.jailRollOutcome = undefined;
     state.tradeInitiationLog = [];
+    // Сбрасываем маркеры отложенной отправки в тюрьму (от 3-х дублей,
+    // карточек goto-jail / move target=10). Без этого при следующем
+    // посещении клетки 10 (JAIL-visit) игрок ошибочно арестовывался.
+    state.pendingJailFromCard = false;
+    state.pendingJailReason = undefined;
   }
 
   private async handleStartTurn(
@@ -1373,7 +1378,16 @@ export class GamesService {
     // `applyCardEffectAndAdvance` для move-target=10 и goto-jail
     // outcome. Без этого маркера обычный visit на JAIL через кубики
     // тоже попадал бы сюда (старая регрессия).
-    if (cell.type === "JAIL" && !player.inJail && state.pendingJailFromCard) {
+    //
+    // ВАЖНО: `!player.inJail` ЗДЕСЬ НЕ проверяем — в ветке
+    // `goto-jail` outcome applyCardEffectAndAdvance уже ставит
+    // `player.inJail = true` СРАЗУ (для UX-мигания фишки во время
+    // показа карточки). Маркер `pendingJailFromCard` — авторитетный
+    // источник истины: его сбрасывает только `resetTurnFlags`
+    // (в начале каждого хода) и сам этот блок после отправки в
+    // тюрьму. Так что обычный JAIL-visit через кубики сюда не попадёт.
+    // `sendToJail` идемпотентен (повторный вызов не ломает состояние).
+    if (cell.type === "JAIL" && state.pendingJailFromCard) {
       this.jail.sendToJail(player);
       state.justEnteredJail = true;
       // ВАЖНО: запись в журнал «попал в тюрьму» уже сделана РАНЬШЕ:
@@ -1728,7 +1742,13 @@ export class GamesService {
     }
 
     const card = state.cardContext.card;
-    const outcome = this.cards.applyEffect(card, player, state);
+    // Пробрасываем `deckCardId` в `applyEffect`, чтобы `grantJailFreeCard`
+    // смог найти только что вытянутую карту (в состоянии DRAWN/RESOLVING)
+    // и перевести её в IN_HAND. Без этого `holdableCards` не обновляется
+    // и иконка карточки не появляется в панели игрока.
+    const outcome = this.cards.applyEffect(card, player, state, {
+      drawnCardId: state.cardContext.deckCardId,
+    });
     state.cardContext.applied = true;
 
     // ─── Правило «дубль + карточка» ─────────────────────────────────────

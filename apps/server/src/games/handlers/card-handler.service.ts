@@ -325,6 +325,7 @@ export class CardHandlerService {
     card: Card,
     player: Player,
     state: GameState,
+    ctx?: { drawnCardId?: string | null },
   ):
     | { kind: "stay" }
     | { kind: "move"; target: number; passedGo?: boolean; direction?: "forward" | "backward" }
@@ -408,7 +409,7 @@ export class CardHandlerService {
         //     через {@link syncHoldableCards} (вызывается
         //     внутри {@link grantJailFreeCard}).
         ensureDecksInitialized(state);
-        grantJailFreeCard(player, state, card.id);
+        grantJailFreeCard(player, state, card.id, { drawnCardId: ctx?.drawnCardId ?? null });
         return { kind: "stay" };
       }
 

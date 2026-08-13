@@ -12,7 +12,30 @@ const props = defineProps<{
     position: number;
     color: string;
     icon: string;
+    /**
+     * `true`, если игрок сейчас в тюрьме (по правилам Монополии — на
+     * клетке 10, "JAIL"). Используется для визуальной индикации:
+     * фишка такого игрока "мигает" своим цветом (ярче ↔ приглушённее),
+     * чтобы все клиенты видели, кто из игроков арестован. Источник
+     * истины — `Player.inJail` из `packages/shared/src/types/player.ts`,
+     * сервер присылает его в `GameState.players` через WS-событие
+     * `game:state`. 
+     */
+    inJail?: boolean;
   }[];
+  /**
+   * ID игроков, которых сервер ТОЛЬКО ЧТО отправил в тюрьму
+   * (фаза JAIL_NOTICE: карточка «Иди в тюрьму», попадание на клетку 30,
+   * три дубля подряд), но флаг `inJail=true` ещё не пришёл с сервера
+   * (это произойдёт ПОСЛЕ `CONFIRM_JAIL_NOTICE` + `MOVE_ANIMATION`
+   * в клетку 10). Используется для того, чтобы визуальная индикация
+   * (мигание) начиналась СРАЗУ в момент события, а не через ~1-2 секунды
+   * пока фишка анимируется к клетке 10. Сервер остаётся единственным
+   * источником истины для логики игры; этот набор — только UI-подсказка,
+   * которая автоматически очищается, как только `Player.inJail` приходит
+   * с сервера (см. синхронизацию в `GameView.vue`).
+   */
+  jailedIds?: string[];
   /**
    * Анимированные позиции игроков (`playerId → клетка`).
    * Если не переданы, используется `player.position` напрямую (без анимации).
@@ -104,6 +127,28 @@ function ownerColor(cell: CellType): string | undefined {
   if (!cell.ownerId) return undefined;
   return props.players.find((p) => p.id === cell.ownerId)?.color;
 }
+
+/**
+ * Set ID игроков, которых сервер ТОЛЬКО ЧТО отправил в тюрьму
+ * (фаза JAIL_NOTICE), но `Player.inJail=true` ещё не пришёл с сервера.
+ * Используется для немедленного включения мигания, не дожидаясь
+ * окончания `CONFIRM_JAIL_NOTICE` + `MOVE_ANIMATION` (1-2 секунды).
+ * `Set` (а не массив) даёт O(1) `has()` при рендере каждой фишки.
+ */
+const jailedIdsSet = computed<Set<string>>(() => new Set(props.jailedIds ?? []));
+
+/**
+ * Показывать ли мигание для фишки `p`:
+ *   - `p.inJail` — нормальный случай (игрок в тюрьме, сервер подтвердил);
+ *   - `jailedIdsSet.has(p.id)` — UI-оптимистичный случай (фаза JAIL_NOTICE,
+ *     событие только что произошло, анимация к клетке 10 ещё идёт).
+ * Как только сервер пришлёт реальный `inJail=true`, оптимистичный флаг
+ * снимается в `GameView.vue` (см. `jailedIds` watcher), и фишка
+ * продолжает мигать уже от канонического `p.inJail`.
+ */
+function isInJailed(p: { id: string; inJail?: boolean }): boolean {
+  return !!p.inJail || jailedIdsSet.value.has(p.id);
+}
 </script>
 
 <template>
@@ -126,7 +171,10 @@ function ownerColor(cell: CellType): string | undefined {
             v-for="p in playersOnCell.get(cell.id) || []"
             :key="p.id"
             class="player-token"
+            :class="{ 'in-jail': isInJailed(p) }"
             :style="{ background: p.color, '--token-glow': p.color }"
+            :title="isInJailed(p) ? 'Игрок в тюрьме' : undefined"
+            :aria-label="isInJailed(p) ? `${p.icon} (в тюрьме)` : p.icon"
           >
             {{ p.icon }}
           </div>
@@ -215,5 +263,40 @@ function ownerColor(cell: CellType): string | undefined {
     0 0 8px var(--token-glow),
     0 0 12px var(--token-glow);
   border: 1px solid rgba(255, 255, 255, 0.4);
+  position: relative;
+  z-index: 10;
+  pointer-events: none;
+}
+
+@keyframes jail-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    filter: brightness(1.15) saturate(1.2);
+    box-shadow:
+      0 0 6px var(--token-glow),
+      0 0 10px var(--token-glow);
+  }
+  50% {
+    opacity: 0.55;
+    filter: brightness(0.7) saturate(0.8);
+    box-shadow:
+      0 0 3px var(--token-glow),
+      0 0 5px var(--token-glow);
+  }
+}
+
+.player-token.in-jail {
+  animation: jail-pulse 1.2s ease-in-out infinite;
+  outline: 2px solid var(--token-glow);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player-token.in-jail {
+    animation: none;
+    opacity: 0.6;
+    filter: saturate(0.7);
+  }
 }
 </style>

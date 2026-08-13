@@ -347,9 +347,7 @@ const currentCell = computed<Cell | null>(() => game.currentCell);
  * на «чужую» клетку в тултипе всегда будет владелец клетки текущего
  * игрока, что вводит в заблуждение.
  */
-const cellOwner = computed(() =>
-  players.value.find((p) => p.id === hoveredCell.value?.ownerId),
-);
+const cellOwner = computed(() => players.value.find((p) => p.id === hoveredCell.value?.ownerId));
 
 // BANKRUPTCY: вычисляемые данные для модалки ликвидации
 const bankruptcyPlayer = computed(
@@ -405,6 +403,69 @@ watch(
         // Для простоты пока оставляем creditor = null (Банк).
         showBankruptNotice.value = true;
       }
+    }
+  },
+  { deep: false },
+);
+
+/**
+ * Оптимистичный набор «только что арестованных» игроков.
+ *
+ * Проблема: сервер присылает `Player.inJail = true` ТОЛЬКО ПОСЛЕ
+ * полного цикла `JAIL_NOTICE` (модалка «Вы арестованы! Отправляйтесь
+ * в тюрьму!») → `CONFIRM_JAIL_NOTICE` → `MOVE_ANIMATION` к клетке 10
+ * → `RESOLVING_LANDING`. Это занимает ~1-2 секунды, в течение которых
+ * пользователь НЕ ВИДИТ, что фишка арестована (мигание не работает,
+ * потому что `p.inJail` ещё `false`).
+ *
+ * Решение: в момент входа в фазу `JAIL_NOTICE` мы СРАЗУ добавляем
+ * `state.jailNotice.playerId` (имя поля сервера, см. плагин
+ * jail-handler.service.ts) в `jailedIds`. Board.vue использует
+ * этот набор в дополнение к `p.inJail` для класса `.in-jail` —
+ * мигание начинается МГНОВЕННО в момент события.
+ *
+ * Авто-очистка: когда сервер присылает подтверждение `inJail=true`
+ * (т.е. фишка уже на клетке 10 и анимация завершилась), мы
+ * убираем id из `jailedIds` — дальше мигание идёт уже от
+ * канонического `p.inJail`. Никаких таймеров не нужно, всё
+ * реактивно.
+ */
+const jailedIds = ref<string[]>([]);
+
+watch(
+  () => state.value.phase,
+  (phase) => {
+    if (phase === "JAIL_NOTICE" && state.value.jailNotice?.playerId) {
+      const id = state.value.jailNotice.playerId;
+      if (!jailedIds.value.includes(id)) {
+        jailedIds.value = [...jailedIds.value, id];
+      }
+    }
+    // Когда фаза JAIL_NOTICE заканчивается без подтверждения
+    // (например, пользователь закрыл модалку, не дождавшись confirm),
+    // оптимистичный флаг снимается — иначе фишка так и будет
+    // мигать, хотя `inJail` на сервере не выставился.
+    if (phase !== "JAIL_NOTICE" && phase !== "MOVE_ANIMATION") {
+      if (jailedIds.value.length > 0) jailedIds.value = [];
+    }
+  },
+);
+
+// Как только сервер прислал `inJail=true` для какого-то игрока,
+// убираем его из оптимистичного набора (мигание продолжится уже
+// от канонического `p.inJail`). Это защита от «застрявшего» флага
+// на случай гонок WS-событий.
+watch(
+  () => state.value.players.map((p) => ({ id: p.id, inJail: p.inJail })),
+  (current) => {
+    const stillOptimistic = jailedIds.value.filter((id) => {
+      const p = current.find((x) => x.id === id);
+      // Оставляем в наборе ТОЛЬКО если сервер ещё НЕ подтвердил
+      // inJail=true. Как только подтвердил — флаг больше не нужен.
+      return !p?.inJail;
+    });
+    if (stillOptimistic.length !== jailedIds.value.length) {
+      jailedIds.value = stillOptimistic;
     }
   },
   { deep: false },
@@ -1186,6 +1247,7 @@ function logout() {
             ref="boardRef"
             :cells="cells"
             :players="boardPlayers"
+            :jailed-ids="jailedIds"
             :display-positions="displayPositions"
             :dice-values="diceValues"
             :dice-rolling="diceRolling"

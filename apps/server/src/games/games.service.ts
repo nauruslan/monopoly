@@ -1900,6 +1900,12 @@ export class GamesService {
         // обрывает цепочку дублей (как и через клетку 30).
         player.mustRollAgain = false;
         player.consecutiveDoubles = 0;
+        // Ставим inJail=true СРАЗУ, ещё до MOVE_ANIMATION, чтобы
+        // клиент (мигание фишки) реагировал на событие в момент
+        // показа карточки «Идёшь в тюрьму», а не только когда фишка
+        // анимируется к клетке 10. sendToJail() в handleResolvingLanding
+        // идемпотентно продублирует этот флаг.
+        player.inJail = true;
         // Маркер для handleResolvingLanding: приземление через
         // карточку, а не обычный JAIL-visit через кубики.
         state.pendingJailFromCard = true;
@@ -2025,6 +2031,12 @@ export class GamesService {
       player.position = to;
       player.mustRollAgain = false;
       player.consecutiveDoubles = 0;
+      // Ставим inJail=true СРАЗУ, до MOVE_ANIMATION, чтобы клиент
+      // (мигание фишки) реагировал на событие в момент показа
+      // карточки «Идёшь в тюрьму», а не только когда фишка
+      // анимируется к клетке 10. sendToJail() в handleResolvingLanding
+      // идемпотентно продублирует этот флаг.
+      player.inJail = true;
       state.pendingJailFromCard = true;
       // Причина для лога: "card" (goto-jail outcome).
       state.pendingJailReason = "card";
@@ -3052,12 +3064,7 @@ export class GamesService {
       // отдельный хелпер `logBankruptcyMortgagedPropertySold`,
       // чтобы в журнале было видно отличие от обычной продажи
       // незаложенной клетки (которую логирует `logPropertySoldToBank`).
-      this.log.logBankruptcyMortgagedPropertySold(
-        state,
-        player,
-        soldCellName,
-        soldCellValue,
-      );
+      this.log.logBankruptcyMortgagedPropertySold(state, player, soldCellName, soldCellValue);
       return {};
     }
     if (action.type === "BANKRUPTCY_CONFIRM" || action.type === "BANKRUPTCY_DECLARE") {

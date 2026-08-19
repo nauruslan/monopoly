@@ -3,7 +3,7 @@ export interface Card {
   /**
    * Колода, к которой принадлежит карта:
    *  - "chance"      — Шанс
-   *  - "treasury"    — Общественная казна
+   *  - "treasury"    — Казна
    *  - "luxury-tax"  — Роскошный налог (набор карточек-формул)
    */
   deck: "chance" | "treasury" | "luxury-tax";
@@ -31,17 +31,34 @@ export interface Card {
  * CardEffect — дискриминированное объединение эффектов карточек.
  *
  * Семантика:
- *  - "money"             — начислить/списать amount (со знаком) на счёт игрока.
- *  - "move"              — телепорт на клетку target. Если money задан — начислить
- *                          бонус при прохождении/прибытии на GO.
- *  - "move-relative"     — сдвиг на steps (вперёд/назад) с оборачиванием по 40.
- *  - "goto-jail"         — прямая отправка в тюрьму (клетка 10).
- *  - "jail-free"         — выдать карточку "выйди из тюрьмы бесплатно".
- *  - "go-salary"         — начислить goSalary и перейти на клетку 0.
- *  - "luxury-tax-house"  — формула налога на имущество:
- *                          perHouse       ₽ за каждый ДОМ,
- *                          perHotel       ₽ за каждый ОТЕЛЬ (houses === 5),
- *                          perProperty    ₽ за каждый участок (PROPERTY/RAILROAD/UTILITY).
+ *  - "money"               — начислить/списать amount (со знаком) на счёт игрока.
+ *  - "move"                — телепорт на клетку target. Если money задан — начислить
+ *                            бонус при прохождении/прибытии на GO.
+ *  - "move-relative"       — сдвиг на steps (вперёд/назад) с оборачиванием по 40.
+ *  - "goto-jail"           — прямая отправка в тюрьму (клетка 10).
+ *  - "jail-free"           — выдать карточку "выйди из тюрьмы бесплатно".
+ *  - "go-salary"           — начислить goSalary и перейти на клетку 0.
+ *  - "luxury-tax-house"    — формула налога на имущество:
+ *                            perHouse       ₽ за каждый ДОМ,
+ *                            perHotel       ₽ за каждый ОТЕЛЬ (houses === 5),
+ *                            perProperty    ₽ за каждый участок (PROPERTY/RAILROAD/UTILITY).
+ *  - "nearest-utility"     — телепорт на ближайшее коммунальное предприятие (клетки 12 или 28).
+ *                            После приземления обычный handleResolvingLanding обработает
+ *                            ренту/событие клетки. Движение НЕ проходит через клетку 0.
+ *  - "nearest-railroad"    — телепорт на ближайшую ж/д станцию (5, 15, 25 или 35).
+ *                            Аналогично nearest-utility.
+ *  - "pay-each-player"     — заплатить каждому ПРОТИВНИКУ amountPerPlayer ₽
+ *                            (списание у текущего игрока, зачисление каждому противнику).
+ *                            Себе платить НЕ надо.
+ *  - "money-if-monopoly"   — начислить amount ₽, если у игрока есть хотя бы одна
+ *                            монополия (полный цветной набор). Иначе — no-op.
+ *  - "money-per-property"  — начислить amountPerUnit ₽ за каждый НЕзаложенный
+ *                            участок игрока (PROPERTY/RAILROAD/UTILITY).
+ *                            Заложенные участки НЕ считаются.
+ *  - "money-per-monopoly"  — начислить amountPerMonopoly ₽ за каждую полную
+ *                            монополию игрока (полный цветной набор).
+ *  - "stay"                — нейтральный эффект; не меняет state (используется
+ *                            как fallback / no-op).
  */
 export type CardEffect =
   | { kind: "money"; amount: number }
@@ -65,10 +82,17 @@ export type CardEffect =
    */
   | { kind: "move-relative"; steps: number; direction?: "forward" | "backward" }
   | { kind: "go-salary" }
-  | { kind: "luxury-tax-house"; perHouse: number; perHotel: number; perProperty: number };
+  | { kind: "luxury-tax-house"; perHouse: number; perHotel: number; perProperty: number }
+  | { kind: "nearest-utility" }
+  | { kind: "nearest-railroad" }
+  | { kind: "pay-each-player"; amountPerPlayer: number }
+  | { kind: "money-if-monopoly"; amount: number }
+  | { kind: "money-per-property"; amountPerUnit: number }
+  | { kind: "money-per-monopoly"; amountPerMonopoly: number }
+  | { kind: "stay" };
 
 /**
- * Колода Шанс — 11 карточек.
+ * Колода Шанс — 20 карточек.
  * Колода перемешивается один раз в начале партии, и карты идут по кругу.
  *
  * Для карточек, предписывающих движение НАЗАД (steps < 0), на верхнем
@@ -97,7 +121,7 @@ export const CHANCE_CARDS: Card[] = [
   {
     id: "ch2",
     deck: "chance",
-    text: "Банк выплачивает вам дивиденды 50₽",
+    text: "Банк выплачивает вам дивиденды 50�",
     effect: { kind: "money", amount: 50 },
   },
   {
@@ -115,7 +139,7 @@ export const CHANCE_CARDS: Card[] = [
   {
     id: "ch5",
     deck: "chance",
-    text: "День рождения! Получите 50₽",
+    text: "День рождения! Получите 50�",
     effect: { kind: "money", amount: 50 },
   },
   {
@@ -158,14 +182,6 @@ export const CHANCE_CARDS: Card[] = [
     direction: "backward",
     effect: { kind: "move-relative", steps: -3, direction: "backward" },
   },
-  /**
-   * Классическая карточка Шанс: «Go to Jail» (уже есть как `ch4`) — а вот
-   * «Advance to the nearest Utility» / «Advance to the nearest Railroad»
-   * в нашей колоде закрыты телепортом на ближайшую по правилам клетку.
-   * Добавим одну полезную «назад» карточку «Вернитесь на старт» нельзя
-   * (это всегда вперёд через GO) — но «Назад на 5 клеток» имеет смысл,
-   * особенно если игрок близко к налоговой/тюрьме.
-   */
   {
     id: "ch10",
     deck: "chance",
@@ -173,12 +189,6 @@ export const CHANCE_CARDS: Card[] = [
     direction: "backward",
     effect: { kind: "move-relative", steps: -5, direction: "backward" },
   },
-  /**
-   * Классическая карточка Шанс: «Take a walk on the Boardwalk» — это
-   * телепорт (target = 39) — но мы оставим ещё один кейс НАЗАД:
-   * «Вернитесь на старт» (target = 0) — это `move` вперёд, не назад.
-   * Поэтому «-2 клетки» как дополнительный шаг.
-   */
   {
     id: "ch11",
     deck: "chance",
@@ -186,10 +196,90 @@ export const CHANCE_CARDS: Card[] = [
     direction: "backward",
     effect: { kind: "move-relative", steps: -2, direction: "backward" },
   },
+
+  {
+    id: "ch12",
+    deck: "chance",
+    text: "Пройдите вперёд на 2 клетки",
+    direction: "forward",
+    effect: { kind: "move-relative", steps: 2, direction: "forward" },
+  },
+  {
+    id: "ch13",
+    deck: "chance",
+    text: "Пройдите вперёд на 3 клетки",
+    direction: "forward",
+    effect: { kind: "move-relative", steps: 3, direction: "forward" },
+  },
+  {
+    id: "ch14",
+    deck: "chance",
+    text: "Пройдите вперёд на 5 клеток",
+    direction: "forward",
+    effect: { kind: "move-relative", steps: 5, direction: "forward" },
+  },
+  /**
+   * Ближайшее коммунальное предприятие (клетки 12 и 28).
+   * Сервер при applyEffect выбирает кратчайший путь ВПЕРЁД по часовой
+   * (правила Монополии — «не проходим через СТАРТ»): если фишка на
+   * клетках 1..19 → идём к 12; если на 21..39 → к 28.
+   * Направление определяется сравнением target с from (см. card-handler).
+   */
+  {
+    id: "ch15",
+    deck: "chance",
+    text: "Идите на ближайшее коммунальное предприятие",
+    effect: { kind: "nearest-utility" },
+  },
+  /**
+   * Ближайшая ж/д станция (5, 15, 25, 35).
+   * Сервер при applyEffect выбирает первую ж/д ВПЕРЁД по часовой,
+   * не проходя через СТАРТ (target > from).
+   */
+  {
+    id: "ch16",
+    deck: "chance",
+    text: "Идите на ближайший железнодорожный вокзал",
+    effect: { kind: "nearest-railroad" },
+  },
+  /**
+   * «Вас избрали председателем совета директоров» —
+   * списание 50₽ с каждого ПРОТИВНИКА (зачисление каждому противнику).
+   * Себе платить не нужно. Если противников нет — no-op.
+   */
+  {
+    id: "ch17",
+    deck: "chance",
+    text: "Вас избрали председателем совета директоров. Заплатите каждому игроку по 50₽",
+    effect: { kind: "pay-each-player", amountPerPlayer: 50 },
+  },
+  {
+    id: "ch18",
+    deck: "chance",
+    text: "Банк платит вам дивиденды 200₽",
+    effect: { kind: "money", amount: 200 },
+  },
+  /**
+   * «Наступил срок платежа по вашей ссуде на строительство.
+   * Получите 300₽, если у вас есть монополия».
+   * Если у игрока нет монополии — карта не даёт денег.
+   */
+  {
+    id: "ch19",
+    deck: "chance",
+    text: "Наступил срок платежа по вашей ссуде на строительство. Получите 300₽, если у вас есть монополия",
+    effect: { kind: "money-if-monopoly", amount: 300 },
+  },
+  {
+    id: "ch20",
+    deck: "chance",
+    text: "У вас сломался автомобиль. Ремонт обошелся в 50₽",
+    effect: { kind: "money", amount: -50 },
+  },
 ];
 
 /**
- * Колода Общественная казна — 6 карточек (смесь налогов и прибыли).
+ * Колода Казна — 12 карточек (смесь налогов и прибыли).
  */
 export const TREASURY_CARDS: Card[] = [
   {
@@ -227,6 +317,57 @@ export const TREASURY_CARDS: Card[] = [
     deck: "treasury",
     text: "Школьные сборы: заплатите 50₽",
     effect: { kind: "money", amount: -50 },
+  },
+
+  /**
+   * «Выйдите из тюрьмы бесплатно» — аналог ch7, но из колоды Казна.
+   * Также holdable (transferable=true), чтобы можно было передать.
+   */
+  {
+    id: "tr7",
+    deck: "treasury",
+    text: "Выйдите из тюрьмы бесплатно",
+    effect: { kind: "jail-free" },
+  },
+  {
+    id: "tr8",
+    deck: "treasury",
+    text: "Получите 250₽ за консалтинговые услуги",
+    effect: { kind: "money", amount: 250 },
+  },
+  /**
+   * «На продаже акций вы зарабатываете по 50� за каждый незаложенный
+   * участок». Считаются ВСЕ участки игрока (PROPERTY/RAILROAD/UTILITY),
+   * НЕ находящиеся в залоге.
+   */
+  {
+    id: "tr9",
+    deck: "treasury",
+    text: "На продаже акций вы зарабатываете по 50₽ за каждый незаложенный участок",
+    effect: { kind: "money-per-property", amountPerUnit: 50 },
+  },
+  {
+    id: "tr10",
+    deck: "treasury",
+    text: "Возмещение подоходного налога. Получите 200₽",
+    effect: { kind: "money", amount: 200 },
+  },
+  {
+    id: "tr11",
+    deck: "treasury",
+    text: "Наступил срок исполнения платежа по страхованию жизни. Получите 100₽",
+    effect: { kind: "money", amount: 100 },
+  },
+  /**
+   * «На продаже акций вы зарабатываете по 200₽ за каждую монополию».
+   * Монополия — полный цветной набор (например, все 3 красные улицы).
+   * Если у игрока 2 монополии — 2 × 200₽ = 400₽.
+   */
+  {
+    id: "tr12",
+    deck: "treasury",
+    text: "На продаже акций вы зарабатываете по 200₽ за каждую монополию",
+    effect: { kind: "money-per-monopoly", amountPerMonopoly: 200 },
   },
 ];
 

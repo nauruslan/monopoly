@@ -317,8 +317,12 @@ export class TradeService {
    *  1. Инициализируем DeckModule (lazy, idempotent).
    *  2. Берём первые `fromCount` cardId из `from.holdableCards`.
    *  3. Для каждого cardId вызываем `transferCard({ cardId, from: from.id, to: to.id })`.
-   *  4. Внутри `transferCard` через `syncHoldableCards` обновляются
-   *     `holdableCards` обеих сторон.
+   *  4. После `transferCard` синхронизируем `holdableCards` обеих сторон:
+   *     `syncHoldableCards(from, state, { delta: -1, cardId, templateId })`,
+   *     `syncHoldableCards(to, state, { delta: +1, cardId, templateId })`.
+   *     Без этого UI покупателя не увидит новую карту — DeckService меняет
+   *     только `holderPlayerId` в `state.deckCards`, а `holdableCards` —
+   *     это отдельный слой для панели игрока.
    *
    * Если меньше карт чем `fromCount` — переносим сколько есть.
    * Все параметры в try/catch, чтобы не сломать весь трейд при ошибке.
@@ -342,26 +346,35 @@ export class TradeService {
     ];
     for (const t of allCards) templatesById.set(t.templateId, t);
 
+    const transferOne = (owner: Player, newOwner: Player, cardId: string): void => {
+      // Запоминаем templateId до transfer, т.к. после мутации state.deckCards
+      // ищем по нему для syncHoldableCards.
+      const templateId = owner.holdableCards?.[cardId]?.templateId;
+      const result = transferCard(
+        {
+          gameId: state.id,
+          decks: state.decks ?? [],
+          cards: state.deckCards ?? [],
+          templatesById,
+          emptyDeckPolicy: "SKIP_DRAW",
+        },
+        { cardId, fromPlayerId: owner.id, toPlayerId: newOwner.id },
+      );
+      state.decks = result.decks;
+      state.deckCards = result.cards;
+      if (!templateId) return;
+      // Синхронизируем слой holdableCards (UI читает именно его).
+      syncHoldableCards(owner, state, { delta: -1, cardId, templateId });
+      syncHoldableCards(newOwner, state, { delta: 1, cardId, templateId });
+    };
+
     // 1) Отдаёт `from` → `to`.
     if (fromCount > 0) {
       const fromCardIds = listHoldableCardIds(from).slice(0, fromCount);
       for (const cardId of fromCardIds) {
         try {
-          const result = transferCard(
-            {
-              gameId: state.id,
-              decks: state.decks ?? [],
-              cards: state.deckCards ?? [],
-              templatesById,
-              emptyDeckPolicy: "SKIP_DRAW",
-            },
-            { cardId, fromPlayerId: from.id, toPlayerId: to.id },
-          );
-          // Применяем мутации обратно в state.
-          state.decks = result.decks;
-          state.deckCards = result.cards;
+          transferOne(from, to, cardId);
         } catch (err) {
-          // Если карта не transferable или другая ошибка — пропускаем.
           this.logger.warn(
             `[TradeService] failed to transfer card ${cardId}: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -374,18 +387,7 @@ export class TradeService {
       const toCardIds = listHoldableCardIds(to).slice(0, toCount);
       for (const cardId of toCardIds) {
         try {
-          const result = transferCard(
-            {
-              gameId: state.id,
-              decks: state.decks ?? [],
-              cards: state.deckCards ?? [],
-              templatesById,
-              emptyDeckPolicy: "SKIP_DRAW",
-            },
-            { cardId, fromPlayerId: to.id, toPlayerId: from.id },
-          );
-          state.decks = result.decks;
-          state.deckCards = result.cards;
+          transferOne(to, from, cardId);
         } catch (err) {
           this.logger.warn(
             `[TradeService] failed to transfer card back ${cardId}: ${err instanceof Error ? err.message : String(err)}`,

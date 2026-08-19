@@ -306,7 +306,7 @@ export class LogService {
     cardText: string,
   ): GameEvent {
     const deckLabel =
-      deck === "chance" ? "Шанс" : deck === "treasury" ? "Общ. казна" : "Роскошный налог";
+      deck === "chance" ? "Шанс" : deck === "treasury" ? "КАЗНА" : "Роскошный налог";
     return this.create(state, {
       kind: "CARD_DRAWN",
       player,

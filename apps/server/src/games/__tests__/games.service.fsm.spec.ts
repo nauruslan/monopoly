@@ -305,23 +305,46 @@ describe("GamesService.applyAction (FSM)", () => {
   });
 
   it("CONFIRM_CARD в CARD_REVEAL применяет эффект и сразу переходит в финальную фазу", async () => {
-    const chanceCell = activeState.board.find((c) => c.type === "CHANCE");
-    if (!chanceCell) {
-      return;
-    }
-    activeState.players[0]!.position = chanceCell.id;
-    activeState.lastDice = { dice: [0, 0], isDouble: false };
-    activeState.phase = "RESOLVING_LANDING";
+    // Инициализируем DeckModule (per-field колоды).
+    const { ensureDecksInitialized } = await import("../decks/deck-state-adapter");
+    ensureDecksInitialized(activeState);
 
     // Детерминированно поставим карту с эффектом money, чтобы избежать
     // неоднозначности (move/goto-jail ведут в MOVE_ANIMATION/JAIL_DECISION).
     const { CHANCE_CARDS } = await import("@monopoly/shared");
-    const moneyCard = CHANCE_CARDS.find((c) => c.effect.kind === "money");
-    if (!moneyCard) return;
-    // Перевытягиваем.
+    // Берём конкретную money-карту ch2 «Банк выплачивает вам дивиденды 50₽».
+    const moneyCard = CHANCE_CARDS.find((c) => c.id === "ch2")!;
+    const moneyCardInstance = activeState.deckCards!.find((c) => c.templateId === moneyCard.id);
+    if (!moneyCardInstance) throw new Error("moneyCardInstance not found");
+    const ownerDeck = activeState.decks!.find((d) => d.deckId === moneyCardInstance.originDeckId);
+    if (!ownerDeck) throw new Error("ownerDeck not found");
+
+    // Переходим на клетку, где лежит эта money-карта.
+    const chanceCell = activeState.board.find(
+      (c) => c.type === "CHANCE" && c.id === ownerDeck.boardFieldId,
+    );
+    if (!chanceCell) throw new Error("chanceCell not found");
+    activeState.players[0]!.position = chanceCell.id;
+    activeState.lastDice = { dice: [0, 0], isDouble: false };
     activeState.phase = "RESOLVING_LANDING";
+
+    // Подменяем колоду: кладём money-карту на верх.
+    ownerDeck.topToBottom = [
+      moneyCardInstance.cardId,
+      ...ownerDeck.topToBottom.filter((id) => id !== moneyCardInstance.cardId),
+    ];
+    const idx = activeState.deckCards!.findIndex((c) => c.cardId === moneyCardInstance.cardId);
+    if (idx >= 0) {
+      activeState.deckCards![idx] = {
+        ...activeState.deckCards![idx],
+        state: "IN_DECK",
+        drawnAt: undefined,
+      };
+    }
+
     await act({ type: "CONFIRM_LANDING" });
     expect(activeState.phase).toBe("CARD_REVEAL");
+    expect(activeState.cardContext?.card.id).toBe("ch2");
     const moneyBefore = activeState.players[0]!.money;
     const delta = moneyCard.effect.kind === "money" ? moneyCard.effect.amount : 0;
 

@@ -36,8 +36,8 @@ describe("DeckStateAdapter.ensureDecksInitialized", () => {
     expect(state.decks).toBeDefined();
     // DEFAULT_BOARD: 3 CHANCE + 3 TREASURY + 1 LUXURY_TAX = 7 колод.
     expect(state.decks!.length).toBe(7);
-    // 11 CHANCE + 6 TREASURY + 4 LUXURY_TAX = 21 карта.
-    expect(state.deckCards!.length).toBe(21);
+    // 20 CHANCE + 12 TREASURY + 4 LUXURY_TAX = 36 карт.
+    expect(state.deckCards!.length).toBe(36);
     expect(state.deckSeed).toBe("test-seed-12345");
   });
 
@@ -70,8 +70,8 @@ describe("DeckStateAdapter.ensureDecksInitialized", () => {
     expect(uniqueCards.size).toBe(allTopToBottom.length);
 
     const allTemplateIds = state.deckCards!.map((c) => c.templateId);
-    expect(allTemplateIds.filter((id) => id.startsWith("ch")).length).toBe(11);
-    expect(allTemplateIds.filter((id) => id.startsWith("tr")).length).toBe(6);
+    expect(allTemplateIds.filter((id) => id.startsWith("ch")).length).toBe(20);
+    expect(allTemplateIds.filter((id) => id.startsWith("tr")).length).toBe(12);
     expect(allTemplateIds.filter((id) => id.startsWith("lt")).length).toBe(4);
   });
 
@@ -107,26 +107,24 @@ describe("DeckStateAdapter.setupDecksForBoardPerField", () => {
     }
   });
 
-  it("для 11 CHANCE-карт на 3 клетки: распределение [4, 4, 3]", () => {
+  it("для 20 CHANCE-карт на 3 клетки: распределение суммарно 20", () => {
     const state = makeState();
-    // Подменяем seed-управляемый источник через смену state.seed нельзя
-    // (используется seedrandom по нему), но мы хотим проверить, что
-    // распределение работает — заменяем CHANCE_CARDS через прямой вызов
-    // setupDecksForBoardPerField с шаблонами.
     const result = setupDecksForBoardPerField(state);
     const chanceDecks = result.decks.filter((d) => d.deckType === "CHANCE");
     expect(chanceDecks.length).toBe(3);
-    const sizes = chanceDecks.map((d) => d.topToBottom.length).sort();
-    expect(sizes).toEqual([3, 4, 4]);
+    const total = chanceDecks.reduce((s, d) => s + d.topToBottom.length, 0);
+    expect(total).toBe(20);
   });
 
-  it("для 6 TREASURY-карт на 3 клетки: каждая получает ровно 2", () => {
+  it("для 12 TREASURY-карт на 3 клетки: суммарно 12 (по 4 на клетку)", () => {
     const state = makeState();
     const result = setupDecksForBoardPerField(state);
     const treasuryDecks = result.decks.filter((d) => d.deckType === "COMMUNITY_CHEST");
     expect(treasuryDecks.length).toBe(3);
+    const total = treasuryDecks.reduce((s, d) => s + d.topToBottom.length, 0);
+    expect(total).toBe(12);
     for (const d of treasuryDecks) {
-      expect(d.topToBottom.length).toBe(2);
+      expect(d.topToBottom.length).toBe(4);
     }
   });
 

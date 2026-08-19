@@ -47,7 +47,51 @@ export interface DrawFromDeckResult {
 }
 
 /**
- * CardHandlerService — обработчик карточек Шанс / Общественная казна / Роскошный налог.
+ * ID клеток коммунальных предприятий (для карточки «nearest-utility»).
+ * На DEFAULT_BOARD: 12 — Нефть, 28 — Вода.
+ */
+const UTILITY_FIELDS = [12, 28] as const;
+
+/**
+ * ID клеток железнодорожных станций (для карточки «nearest-railroad»).
+ * На DEFAULT_BOARD: 5, 15, 25, 35.
+ */
+const RAILROAD_FIELDS = [5, 15, 25, 35] as const;
+
+/**
+ * Выбрать ближайшую клетку из списка ВПЕРЁД по часовой стрелке,
+ * не проходя через клетку 0 (СТАРТ).
+ *
+ * Правило Монополии для «Advance to the nearest ...»: идём вперёд
+ * по часовой от текущей позиции, и берём ПЕРВУЮ подходящую клетку.
+ * Если подходящих нет впереди — берём СЛЕДУЮЩУЮ ж/д через круг
+ * (то есть первую в списке), и движение пойдёт «через СТАРТ»
+ * (что для утилит/ЖД по правилам Монополии допустимо — это не
+ * «выводящая» карточка, и начисление goSalary за проход через 0
+ * корректно по правилам).
+ *
+ * @param from текущая позиция игрока
+ * @param candidates список подходящих ID клеток (отсортирован по возрастанию)
+ * @returns `{ target, direction }` — куда идти и в каком направлении
+ */
+function pickNearestForward(
+  from: number,
+  candidates: readonly number[],
+): { target: number; direction: "forward" | "backward" } {
+  // 1) Ищем первую клетку-кандидат с target > from.
+  const sorted = [...candidates].sort((a, b) => a - b);
+  const next = sorted.find((id) => id > from);
+  if (next !== undefined) {
+    return { target: next, direction: "forward" };
+  }
+  // 2) Все кандидаты <= from — берём первую (минимальную), движение
+  //    пойдёт через клетку 0 (forward).
+  const first = sorted[0]!;
+  return { target: first, direction: "forward" };
+}
+
+/**
+ * CardHandlerService — обработчик карточек Шанс / Казна / Роскошный налог.
  *
  * FSM: фазы CARD_REVEAL → CARD_EFFECT.
  *
@@ -71,12 +115,14 @@ export interface DrawFromDeckResult {
  *     Если карта ещё в DRAWN/RESOLVING — возвращает её в низ колоды
  *     (правило Монополии). Если уже USED/IN_HAND — no-op.
  *
- * Если эффект карты — `move` / `move-relative` / `goto-jail`,
- * то после применения сервер переводит партию в:
- *   - `move` / `move-relative` → фазу `MOVE_ANIMATION`;
+ * Если эффект карты — `move` / `move-relative` / `goto-jail` /
+ * `nearest-utility` / `nearest-railroad`, то после применения сервер
+ * переводит партию в:
+ *   - `move` / `move-relative` / `nearest-*` → фазу `MOVE_ANIMATION`;
  *   - `goto-jail` → фазу `JAIL_DECISION`;
- *   - остальные (`money`, `jail-free`, `luxury-tax-house`) → фазу `BUILDING`
- *     (или `ROLLING` при `mustRollAgain`).
+ *   - остальные (`money`, `jail-free`, `luxury-tax-house`, `pay-each-player`,
+ *     `money-if-monopoly`, `money-per-property`, `money-per-monopoly`,
+ *     `stay`) → фазу `BUILDING` (или `ROLLING` при `mustRollAgain`).
  */
 @Injectable()
 export class CardHandlerService {
@@ -260,13 +306,13 @@ export class CardHandlerService {
    * Вернуть вытянутую карту в НИЗ её колоды (правило Монополии
    * «discard to bottom»). Используется GamesService после применения
    * эффекта не-holdable карточки (money / move / move-relative / goto-jail /
-   * luxury-tax-house / go-salary).
+   * luxury-tax-house / go-salary / nearest-* / pay-each-player / *-monopoly / *-property).
    *
    * Для holdable карт (`holdInHand === true`) — no-op: такие карты
    * остаются в IN_HAND (см. {@link grantJailFreeCard}) до момента
    * реального использования через `useCardFromHand`.
    *
-   * Идемпотентно: если карты уже нет в state.deckCards (например,
+   * Идемпоте��тно: если карты уже нет в state.deckCards (например,
    * `deckCardId === ""` для fallback), или её состояние уже
    * не DRAWN/RESOLVING — no-op.
    *
@@ -416,7 +462,7 @@ export class CardHandlerService {
       case "luxury-tax-house": {
         // Формула налога на имущество:
         //   perProperty ₽ за каждый участок (PROPERTY/RAILROAD/UTILITY),
-        //   perHouse    ₽ за каждый ДОМ (houses от 1 до 4),
+        //   perHouse    � за каждый ДОМ (houses от 1 до 4),
         //   perHotel    ₽ за каждый ОТЕЛЬ (houses === 5).
         const { perHouse, perHotel, perProperty } = card.effect;
         let houses = 0;
@@ -438,6 +484,138 @@ export class CardHandlerService {
         player.money -= total;
         return { kind: "stay" };
       }
+
+      case "nearest-utility": {
+        // «Идите на ближайшее коммунальное предприятие».
+        // По правилам Монополии и по спецификации проекта:
+        //  - если фишка на клетках 1..19 → идём к Нефти (12);
+        //  - если фишка на клетках 21..39 → идём к Воде (28).
+        // Движение НЕ проходит через клетку 0 (СТАРТ).
+        const from = player.position;
+        const target = from <= 19 ? 12 : 28;
+        // Направление:
+        //  - 12 > from всегда (т.к. from ∈ 1..19), значит "forward";
+        //  - 28 > from всегда (т.к. from ∈ 21..39), значит "forward".
+        return { kind: "move", target, direction: "forward" };
+      }
+
+      case "nearest-railroad": {
+        // «Идите на ближайший железнодорожный вокзал».
+        // По спецификации проекта:
+        //  - поле события 1..9   → целевое 5;
+        //  - поле события 11..19 → целевое 15;
+        //  - поле события 21..29 → целевое 25;
+        //  - поле события 31..39 → целевое 35.
+        // Направление определяется сравнением target с from: если
+        // target > from — "forward" (по часовой), иначе "backward".
+        // (Сценарий с target <= from для ЖД невозможен при данной
+        // спецификации, но на всякий случай обрабатываем.)
+        const from = player.position;
+        let target: number;
+        if (from <= 9) target = 5;
+        else if (from <= 19) target = 15;
+        else if (from <= 29) target = 25;
+        else target = 35;
+        const direction: "forward" | "backward" = target > from ? "forward" : "backward";
+        return { kind: "move", target, direction };
+      }
+
+      case "pay-each-player": {
+        // «Вас избрали председателем совета директоров. Заплатите каждому игроку по N₽».
+        // Списываем amountPerPlayer у текущего игрока за КАЖДОГО противника
+        // (НЕ считая себя), и зачисляем amountPerPlayer каждому противнику.
+        // Если противников нет — no-op.
+        // Себе платить не надо: «заплатите КАЖДОМУ игроку» = каждому
+        // ОСТАЛЬНОМУ игроку (не самому себе).
+        const amount = card.effect.amountPerPlayer;
+        const opponents = state.players.filter((p) => p.id !== player.id && !p.isBankrupt);
+        if (opponents.length > 0) {
+          const totalCost = amount * opponents.length;
+          // Списываем со счёта инициатора. Баланс может уйти в минус —
+          // банкротство сработает в `applyCardEffectAndAdvance`.
+          player.money -= totalCost;
+          for (const opp of opponents) {
+            opp.money += amount;
+          }
+        }
+        return { kind: "stay" };
+      }
+
+      case "money-if-monopoly": {
+        // «Получите N₽, если у вас есть монополия».
+        // Считаем количество полных цветных наборов у игрока.
+        // Если 0 монополий — карта не даёт денег (no-op).
+        const monopolyCount = this.countMonopolies(player, state);
+        if (monopolyCount > 0) {
+          player.money += card.effect.amount;
+        }
+        return { kind: "stay" };
+      }
+
+      case "money-per-property": {
+        // «Заработайте N₽ за каждый НЕзаложенный участок».
+        // Считаем все участки игрока (PROPERTY/RAILROAD/UTILITY),
+        // НЕ находящиеся в залоге. Если таких нет — no-op (0₽).
+        let units = 0;
+        for (const cellId of player.properties) {
+          const cell = state.board[cellId];
+          if (!cell) continue;
+          if (cell.isMortgaged) continue; // заложенный не считается
+          units += 1;
+        }
+        if (units > 0) {
+          player.money += card.effect.amountPerUnit * units;
+        }
+        return { kind: "stay" };
+      }
+
+      case "money-per-monopoly": {
+        // «Заработайте N₽ за каждую монополию».
+        // Полная цветная группа (например, все 3 красные улицы) = +1 монополия.
+        const monopolyCount = this.countMonopolies(player, state);
+        if (monopolyCount > 0) {
+          player.money += card.effect.amountPerMonopoly * monopolyCount;
+        }
+        return { kind: "stay" };
+      }
+
+      case "stay": {
+        // Нейтральный эффект — ничего не делаем (no-op).
+        return { kind: "stay" };
+      }
     }
+  }
+
+  /**
+   * Подсчитать количество полных цветных наборов (монополий) у игрока.
+   *
+   * Логика (синхронизирована с клиентом, см. CellTooltip.vue:hasMonopoly):
+   *  - Группируем все PROPERTY-клетки доски по `cell.group`.
+   *  - Для каждой группы проверяем: все ли клетки этой группы
+   *    принадлежат `player`.
+   *  - ЗАЛОГ НЕ УЧИТЫВАЕТСЯ — заложенный участок остаётся в собственности
+   *    игрока и не «разбирает» монополию (как в классической Монополии и
+   *    как считает клиент).
+   *  - RAILROAD/UTILITY НЕ считаются монополиями.
+   *
+   * Возвращает целое число монополий (0..8 — столько групп на доске).
+   */
+  private countMonopolies(player: Player, state: GameState): number {
+    const groupsTotal = new Map<string, number>();
+    const groupsOwned = new Map<string, number>();
+    for (const cell of state.board) {
+      if (cell.type !== "PROPERTY" || !cell.group) continue;
+      const g = cell.group;
+      groupsTotal.set(g, (groupsTotal.get(g) ?? 0) + 1);
+      if (cell.ownerId === player.id) {
+        groupsOwned.set(g, (groupsOwned.get(g) ?? 0) + 1);
+      }
+    }
+    let count = 0;
+    for (const [g, total] of groupsTotal) {
+      const owned = groupsOwned.get(g) ?? 0;
+      if (owned === total && total > 0) count += 1;
+    }
+    return count;
   }
 }

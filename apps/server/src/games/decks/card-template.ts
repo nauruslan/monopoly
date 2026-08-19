@@ -26,8 +26,8 @@ interface TemplateOverride {
 const TEMPLATE_OVERRIDES: Readonly<Record<string, TemplateOverride>> = {
   // «Выход из тюрьмы бесплатно» (ch7).
   ch7: { holdInHand: true, transferable: true },
-  // В текущей колоде только одна такая карточка (CHANCE).
-  // Если в TREASURY появится аналогичная — добавить tr_id.
+  // «Выход из тюрьмы бесплатно» (tr7) — аналогичная из колоды Казна.
+  tr7: { holdInHand: true, transferable: true },
 };
 
 /**

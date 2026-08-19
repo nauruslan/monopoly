@@ -32,10 +32,10 @@ export const BOARD: Cell[] = [
     isMortgaged: false,
   },
 
-  // id 2 — общ. казна (тянем карточку)
+  // id 2 — казна (тянем карточку)
   {
     id: 2,
-    name: "Общ. казна",
+    name: "КАЗНА",
     type: "TREASURY",
     icon: "🏛️",
     houses: 0,
@@ -169,10 +169,10 @@ export const BOARD: Cell[] = [
   },
   {
     id: 12,
-    name: "Электрокомпания",
+    name: "Нефть",
     type: "UTILITY",
     group: "utility",
-    icon: "⚡",
+    icon: "🛢️",
     price: 150,
     mortgageValue: 75,
     houses: 0,
@@ -236,7 +236,7 @@ export const BOARD: Cell[] = [
   },
   {
     id: 17,
-    name: "Общ. казна",
+    name: "КАЗНА",
     type: "TREASURY",
     icon: "🏛️",
     houses: 0,
@@ -376,7 +376,7 @@ export const BOARD: Cell[] = [
   },
   {
     id: 28,
-    name: "Водопровод",
+    name: "Вода",
     type: "UTILITY",
     group: "utility",
     icon: "💧",
@@ -441,7 +441,7 @@ export const BOARD: Cell[] = [
   },
   {
     id: 33,
-    name: "Общ. казна",
+    name: "КАЗНА",
     type: "TREASURY",
     icon: "🏛️",
     houses: 0,

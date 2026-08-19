@@ -32,6 +32,7 @@ import { MortgageService } from "./handlers/mortgage.service";
 import { BuildService } from "./handlers/build.service";
 import { LogService } from "./handlers/log.service";
 import { canRollDice, canEndTurn, isCurrentPlayer } from "./turn-permissions";
+import { consumeHoldableJailCard } from "./decks/holdable-cards.registry";
 import type { GameEventKind } from "@monopoly/shared";
 
 export type GameStateChangedCallback = (
@@ -2614,15 +2615,12 @@ export class GamesService {
     }
 
     if (action.type === "USE_JAIL_CARD") {
-      if (Object.keys(player.holdableCards ?? {}).length === 0)
-        throw new ForbiddenException("Нет карточек выхода");
-      // Удаляем первую попавшуюся holdable jail-free карту.
-      const firstJailFreeId = Object.keys(player.holdableCards ?? {}).find(
-        (cid) => player.holdableCards?.[cid]?.templateId === "ch7",
-      );
-      if (firstJailFreeId) {
-        delete player.holdableCards![firstJailFreeId];
-      }
+      // Используем первую попавшуюся holdable jail-free карту через DeckModule.
+      // Это обновляет state.deckCards (IN_HAND → USED) И синхронизирует
+      // player.holdableCards + state.holdableCardsByPlayer, чтобы иконка
+      // сразу пропала в панели игрока.
+      const usedCardId = consumeHoldableJailCard(player, state);
+      if (!usedCardId) throw new ForbiddenException("Нет карточек выхода");
       player.inJail = false;
       player.jailTurns = 0;
       // Журнал: «Игрок использует карточку выхода из тюрьмы».

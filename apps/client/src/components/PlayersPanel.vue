@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { storeToRefs } from "pinia";
-import type { Player, Cell, PropertyGroup, Card } from "@monopoly/shared";
-import { CHANCE_CARDS, TREASURY_CARDS } from "@monopoly/shared";
+import type { Player, Cell, Card } from "@monopoly/shared";
+import { CHANCE_CARDS, TREASURY_CARDS, countActiveMonopolies } from "@monopoly/shared";
 import { useGameStore } from "../stores/game";
 
 /**
@@ -35,21 +35,6 @@ const thinkingPlayerId = computed(() => state.value.botThinking?.playerId ?? nul
  * Реактивна, т.к. берётся через storeToRefs (см. `state` выше).
  */
 const board = computed<Cell[]>(() => state.value.board);
-
-/**
- * Размер цветовой группы (сколько клеток PROPERTY одного цвета
- * присутствует на доске). Используется для определения полной
- * монополии: игрок владеет монополией, если `ownedInGroup === groupSize`
- * для какой-то `PropertyGroup`.
- */
-const groupSizeCache = computed<Record<PropertyGroup, number>>(() => {
-  const cache = {} as Record<PropertyGroup, number>;
-  for (const cell of board.value) {
-    if (cell.type !== "PROPERTY" || !cell.group) continue;
-    cache[cell.group] = (cache[cell.group] ?? 0) + 1;
-  }
-  return cache;
-});
 
 interface PlayerStats {
   /** Сколько ПОЛНЫХ цветовых монополий у игрока. */
@@ -111,13 +96,17 @@ const statsByPlayer = computed<Record<string, PlayerStats>>(() => {
     else ownedByPlayer.set(cell.ownerId, [cell]);
   }
 
-  // Считаем монополии: внутри `ownedByPlayer[ownerId]` группируем по `group`
-  // (только PROPERTY) и сравниваем с `groupSizeCache`.
-  for (const [ownerId, cells] of ownedByPlayer) {
+  // Считаем монополии: используем общий хелпер `countActiveMonopolies`,
+  // чтобы UI и сервер использовали ОДНО И ТО ЖЕ определение «активной»
+  // монополии: ВСЕ участки группы у владельца И ни один не заложен.
+  for (const ownerId of Object.keys(out)) {
     const stats = out[ownerId];
-    if (!stats) continue; // клетка принадлежит неизвестному (выбывшему) игроку
+    if (!stats) continue;
+    stats.monopolies = countActiveMonopolies(ownerId, board.value);
 
-    const ownedInGroup: Partial<Record<PropertyGroup, number>> = {};
+    // Дальше проходим по клеткам для подсчёта домов/отелей/ликвидационной
+    // стоимости. Монополии уже посчитаны выше — здесь их НЕ трогаем.
+    const cells = ownedByPlayer.get(ownerId) ?? [];
     for (const cell of cells) {
       // Дома/отели.
       //
@@ -135,11 +124,6 @@ const statsByPlayer = computed<Record<string, PlayerStats>>(() => {
         stats.houses += cell.houses;
       } else if (cell.houses === 5) {
         stats.hotels += 1;
-      }
-
-      // Подсчёт монополий (только для PROPERTY с заданной группой)
-      if (cell.type === "PROPERTY" && cell.group) {
-        ownedInGroup[cell.group] = (ownedInGroup[cell.group] ?? 0) + 1;
       }
 
       // Ликвидационная стоимость актива.
@@ -177,14 +161,6 @@ const statsByPlayer = computed<Record<string, PlayerStats>>(() => {
       }
 
       stats.assets += cellValue;
-    }
-
-    for (const groupKey of Object.keys(ownedInGroup) as PropertyGroup[]) {
-      const owned = ownedInGroup[groupKey] ?? 0;
-      const total = groupSizeCache.value[groupKey] ?? 0;
-      if (total > 0 && owned === total) {
-        stats.monopolies += 1;
-      }
     }
   }
 

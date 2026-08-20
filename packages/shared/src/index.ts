@@ -39,6 +39,11 @@ export {
   UNMORTGAGE_INTEREST_RATE,
 } from "./data/rent-tables";
 
-// Данные: карточки
+// Данные: колоды колоды (Шанс / Казна / Роскошный налог)
 export { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS, shuffle, drawCard } from "./data/cards";
 export type { Card, CardEffect } from "./data/cards";
+
+// Утилиты: монополии (единая точка истины для сервера и клиента).
+// Используются RentCalculator, BuildService, CardHandlerService,
+// TradeService, CellTooltip.vue и PlayersPanel.vue.
+export { hasActiveMonopoly, countActiveMonopolies, groupHasNoBuildings } from "./monopoly";

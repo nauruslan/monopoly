@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { CHANCE_CARDS, TREASURY_CARDS, LUXURY_TAX_CARDS, type Card } from "@monopoly/shared";
 import type { Player, GameState } from "@monopoly/shared";
+import { countActiveMonopolies } from "@monopoly/shared";
 import { drawCard, returnCardToDeck } from "../decks/deck.service";
 import { cardsToTemplates } from "../decks/card-template";
 import { ensureDecksInitialized } from "../decks/deck-state-adapter";
@@ -123,6 +124,34 @@ function pickNearestForward(
  *   - остальные (`money`, `jail-free`, `luxury-tax-house`, `pay-each-player`,
  *     `money-if-monopoly`, `money-per-property`, `money-per-monopoly`,
  *     `stay`) → фазу `BUILDING` (или `ROLLING` при `mustRollAgain`).
+ *
+ * ## Правило «активной монополии» (NEW)
+ *
+ * В этой версии Монополии понятие «монополия» строже классики:
+ * монополия активна только когда ВСЕ клетки цветовой группы
+ * принадлежат игроку И ни одна из них не заложена. Заложенная клетка
+ * разрушает монополию. Это правило влияет на карточки:
+ *
+ *  - `money-if-monopoly`  (`ch19`) — если есть хотя бы одна активная
+ *    монополия, начисляется `amount`.
+ *  - `money-per-monopoly` (`tr12`) — `amountPerMonopoly` × кол-во
+ *    активных монополий.
+ *
+ * Реализация — общий хелпер `countActiveMonopolies` из
+ * `@monopoly/shared/monopoly.ts`.
+ *
+ * ## Правило «perProperty» для `luxury-tax-house` (FIX)
+ *
+ * Заложенный участок — это СОБСТВЕННОСТЬ игрока, просто переданная
+ * банку в качестве залога. Для целей налогообложения (`luxury-tax-house`)
+ * важен факт владения, а не ликвидность, поэтому `perProperty` учитывает
+ * и заложенные, и незаложенные клетки. Дома/отели на заложенной клетке
+ * существовать не могут (это блокирует `MortgageService.canMortgage`),
+ * поэтому счётчики `houses`/`hotels` остаются корректными.
+ *
+ * Карточка `money-per-property` (`tr9`) по-прежнему считает только
+ * незаложенные участки — это явно указано в её тексте и в JSDoc
+ * эффекта.
  */
 @Injectable()
 export class CardHandlerService {
@@ -312,7 +341,7 @@ export class CardHandlerService {
    * остаются в IN_HAND (см. {@link grantJailFreeCard}) до момента
    * реального использования через `useCardFromHand`.
    *
-   * Идемпоте��тно: если карты уже нет в state.deckCards (например,
+   * Идемпотентно: если карты уже нет в state.deckCards (например,
    * `deckCardId === ""` для fallback), или её состояние уже
    * не DRAWN/RESOLVING — no-op.
    *
@@ -462,8 +491,19 @@ export class CardHandlerService {
       case "luxury-tax-house": {
         // Формула налога на имущество:
         //   perProperty ₽ за каждый участок (PROPERTY/RAILROAD/UTILITY),
-        //   perHouse    � за каждый ДОМ (houses от 1 до 4),
+        //   perHouse    ₽ за каждый ДОМ (houses от 1 до 4),
         //   perHotel    ₽ за каждый ОТЕЛЬ (houses === 5).
+        //
+        // ВАЖНО (FIX): заложенный участок — это СОБСТВЕННОСТЬ игрока,
+        // просто переданная банку в качестве залога. Для целей
+        // налогообложения важен ФАКТ владения, а не ликвидность,
+        // поэтому `perProperty` учитывает и заложенные, и незаложенные
+        // клетки.
+        //
+        // Дома/отели на заложенной клетке существовать не могут
+        // (правило `MortgageService.canMortgage` блокирует залог при
+        // наличии домов в группе), поэтому счётчики `houses`/`hotels`
+        // остаются корректными.
         const { perHouse, perHotel, perProperty } = card.effect;
         let houses = 0;
         let hotels = 0;
@@ -471,7 +511,7 @@ export class CardHandlerService {
         for (const cellId of player.properties) {
           const cell = state.board[cellId];
           if (!cell) continue;
-          if (cell.isMortgaged) continue; // заложенная не считается
+          // Заложенный участок ВСЁ РАВНО принадлежит игроку — учитываем.
           properties += 1;
           if (cell.houses >= 1 && cell.houses <= 4) houses += cell.houses;
           else if (cell.houses === 5) hotels += 1;
@@ -543,9 +583,11 @@ export class CardHandlerService {
 
       case "money-if-monopoly": {
         // «Получите N₽, если у вас есть монополия».
-        // Считаем количество полных цветных наборов у игрока.
-        // Если 0 монополий — карта не даёт денег (no-op).
-        const monopolyCount = this.countMonopolies(player, state);
+        // Считаем количество АКТИВНЫХ полных цветных наборов у игрока
+        // (через общий хелпер `countActiveMonopolies` — учитывает залог:
+        // заложенная клетка разрушает монополию).
+        // Если 0 активных монополий — карта не даёт денег (no-op).
+        const monopolyCount = countActiveMonopolies(player.id, state.board);
         if (monopolyCount > 0) {
           player.money += card.effect.amount;
         }
@@ -572,7 +614,9 @@ export class CardHandlerService {
       case "money-per-monopoly": {
         // «Заработайте N₽ за каждую монополию».
         // Полная цветная группа (например, все 3 красные улицы) = +1 монополия.
-        const monopolyCount = this.countMonopolies(player, state);
+        // Используем общий хелпер `countActiveMonopolies` — он учитывает
+        // залог: заложенная клетка разрушает монополию.
+        const monopolyCount = countActiveMonopolies(player.id, state.board);
         if (monopolyCount > 0) {
           player.money += card.effect.amountPerMonopoly * monopolyCount;
         }
@@ -584,38 +628,5 @@ export class CardHandlerService {
         return { kind: "stay" };
       }
     }
-  }
-
-  /**
-   * Подсчитать количество полных цветных наборов (монополий) у игрока.
-   *
-   * Логика (синхронизирована с клиентом, см. CellTooltip.vue:hasMonopoly):
-   *  - Группируем все PROPERTY-клетки доски по `cell.group`.
-   *  - Для каждой группы проверяем: все ли клетки этой группы
-   *    принадлежат `player`.
-   *  - ЗАЛОГ НЕ УЧИТЫВАЕТСЯ — заложенный участок остаётся в собственности
-   *    игрока и не «разбирает» монополию (как в классической Монополии и
-   *    как считает клиент).
-   *  - RAILROAD/UTILITY НЕ считаются монополиями.
-   *
-   * Возвращает целое число монополий (0..8 — столько групп на доске).
-   */
-  private countMonopolies(player: Player, state: GameState): number {
-    const groupsTotal = new Map<string, number>();
-    const groupsOwned = new Map<string, number>();
-    for (const cell of state.board) {
-      if (cell.type !== "PROPERTY" || !cell.group) continue;
-      const g = cell.group;
-      groupsTotal.set(g, (groupsTotal.get(g) ?? 0) + 1);
-      if (cell.ownerId === player.id) {
-        groupsOwned.set(g, (groupsOwned.get(g) ?? 0) + 1);
-      }
-    }
-    let count = 0;
-    for (const [g, total] of groupsTotal) {
-      const owned = groupsOwned.get(g) ?? 0;
-      if (owned === total && total > 0) count += 1;
-    }
-    return count;
   }
 }

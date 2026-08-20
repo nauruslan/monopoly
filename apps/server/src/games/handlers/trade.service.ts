@@ -424,9 +424,32 @@ export class TradeService {
 
   /**
    * Хелпер: вернуть список ID клеток, которые `player` МОЖЕТ предложить
-   * для торговли (без зданий). Используется ботом и UI.
+   * для торговли. Учитывает правило монополии: если в цветовой группе
+   * клетки у игрока стоит хоть один дом/отель, ни один участок этой
+   * группы нельзя продать/обменять.
+   *
+   * Условия включения клетки в список:
+   *  - принадлежит `player`;
+   *  - на самой клетке нет зданий (`houses === 0`);
+   *  - вся её цветовая группа — без зданий (если группа существует).
    */
   getTradableProperties(player: Player, state: GameState): number[] {
-    return state.board.filter((c) => c.ownerId === player.id && c.houses === 0).map((c) => c.id);
+    return state.board
+      .filter((c) => {
+        if (c.ownerId !== player.id) return false;
+        if (c.houses !== 0) return false;
+        if (c.group && c.type === "PROPERTY") {
+          const groupHasHouses = state.board.some(
+            (other) =>
+              other.type === "PROPERTY" &&
+              other.group === c.group &&
+              other.ownerId === player.id &&
+              other.houses > 0,
+          );
+          if (groupHasHouses) return false;
+        }
+        return true;
+      })
+      .map((c) => c.id);
   }
 }

@@ -117,12 +117,16 @@ describe("BuildService", () => {
 
     it("fail если в ГРУППЕ есть заложенная клетка (наше кастомное правило) — клетка-цель не заложена", () => {
       // Соседняя (id=1) заложена, целевая (id=0) — нет.
+      // С новым правилом «активной монополии» группа с заложенной клеткой
+      // вообще не считается монополией, поэтому первый же guard
+      // `hasActiveMonopoly` возвращает false, и reason — «Нужна монополия…».
+      // Главное: строить нельзя ни при каком из этих исходов.
       const { state, player, cells } = monopolyState({
         isMortgaged: [false, true, false],
       });
       const r = build.canBuild(player, cells[0]!, state);
       expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.reason).toMatch(/заложен|выкупите/);
+      if (!r.ok) expect(r.reason).toMatch(/заложен|выкупите|монополия/);
     });
 
     it("fail если не хватает денег на дом", () => {

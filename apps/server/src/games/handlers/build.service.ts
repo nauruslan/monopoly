@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable } from "@nestjs/common";
-import type { Cell, GameState, Player, PropertyGroup } from "@monopoly/shared";
+import type { Cell, GameState, Player } from "@monopoly/shared";
+import { hasActiveMonopoly } from "@monopoly/shared";
 
 /**
  * BuildService — централизованная логика строительства, сноса, залога
@@ -8,7 +9,7 @@ import type { Cell, GameState, Player, PropertyGroup } from "@monopoly/shared";
  * ## Кастомные правила нашей версии Монополии
  *
  * В этом сервисе ЗАШИТЫ правила, отличающие нашу версию от классической
- * Монополии (см. GDD §5 «Строительство, снос и залог»). Если в будущем
+ * Монополии. Если в будущем
  * потребуется конфигурировать эти правила (например, для классического
  * режима), нужно будет ввести GameSettings-флаги и читать их здесь.
  *
@@ -63,7 +64,13 @@ import type { Cell, GameState, Player, PropertyGroup } from "@monopoly/shared";
  * ЛЮБОЙ участок цветовой группы ЗАЛОЖЕН. Классика разрешает
  * строительство при заложенных участках той же группы, но это
  * упрощает стратегию: либо группа заложена, либо строишься.
- * (В MortgageService этого правила нет — оно здесь, в canBuild.)
+ *
+ * Это правило реализовано через общий хелпер `hasActiveMonopoly`
+ * из `@monopoly/shared/monopoly.ts`: функция возвращает `true`
+ * ТОЛЬКО когда все клетки группы принадлежат игроку И ни одна
+ * не заложена. Явная проверка «mortgagedInGroup» ниже оставлена
+ * для более человеко-читаемого сообщения об ошибке (хелпер бы
+ * просто вернул `false` без объяснений).
  *
  * ## Контракт
  *
@@ -87,9 +94,11 @@ export class BuildService {
    *  1. Клетка принадлежит игроку.
    *  2. Клетка — PROPERTY (не RAILROAD/UTILITY).
    *  3. Клетка НЕ заложена.
-   *  4. У игрока монополия на эту цветовую группу.
-   *  5. **Кастомное правило:** в группе НЕТ заложенных участков
-   *     (см. §6 выше).
+   *  4. У игрока **активная** монополия на эту цветовую группу
+   *     (все клетки группы принадлежат ему и ни одна не заложена).
+   *  5. **Доп. проверка:** в группе нет заложенных участков — эта
+   *     ветка формально дублирует (4) через `hasActiveMonopoly`,
+   *     но оставлена для более понятного сообщения об ошибке.
    *  6. У игрока достаточно денег (`housePrice`).
    *  7. **Правило лесенки:** на этой клетке меньше домов, чем на
    *     любом другом участке группы +1. Т.е. разница не больше 1.
@@ -118,11 +127,14 @@ export class BuildService {
     if (cell.isMortgaged) {
       return { ok: false, reason: "Клетка в залоге — сначала выкупите" };
     }
-    // 4. Монополия
-    if (!this.ownsMonopoly(cell, player, state)) {
+    // 4. Активная монополия (все клетки группы принадлежат игроку
+    //    и ни одна не заложена). Используем общий хелпер shared/monopoly.
+    if (!cell.group || !hasActiveMonopoly(player.id, cell.group, state.board)) {
       return { ok: false, reason: "Нужна монополия на эту цветовую группу" };
     }
-    // 5. Кастомное: нет заложенных участков в группе
+    // 5. Доп. явная проверка для человеко-читаемого сообщения об ошибке.
+    //    `hasActiveMonopoly` уже учитывает залог, но эта ветка даёт
+    //    более конкретный текст: «в группе есть заложенный участок».
     if (cell.group) {
       const mortgagedInGroup = state.board.some(
         (c) => c.group === cell.group && c.ownerId === player.id && c.isMortgaged,
@@ -243,7 +255,7 @@ export class BuildService {
   /**
    * Может ли игрок заложить клетку.
    *
-   * Делегирует проверку в {@link MortgageService.canMortgage}, чтобы
+   * Делегируе�� проверку в {@link MortgageService.canMortgage}, чтобы
    * вся логика залога была в одном месте. Здесь метод оставлен как
    * «единая точка входа» для будущих правил (например, кастомных
    * ограничений для нашей версии).
@@ -492,23 +504,5 @@ export class BuildService {
     }
 
     return totalValue;
-  }
-
-  // ─────────────────────────────────────────────────────────────────────
-  // ВНУТРЕННИЕ ХЕЛПЕРЫ
-  // ─────────────────────────────────────────────────────────────────────
-
-  /**
-   * Проверить, что у `owner` есть ВСЕ клетки в группе `cell.group`.
-   * Используется и здесь (canBuild), и в RentCalculator.
-   * Дублируем, чтобы не тянуть RentCalculator как зависимость —
-   * BuildService должен быть самодостаточным для unit-тестов.
-   */
-  private ownsMonopoly(cell: Cell, owner: Player, state: GameState): boolean {
-    if (!cell.group) return false;
-    const groupKey: PropertyGroup = cell.group;
-    const groupCells = state.board.filter((c) => c.group === groupKey);
-    if (groupCells.length === 0) return false;
-    return groupCells.every((c) => c.ownerId === owner.id);
   }
 }

@@ -6,7 +6,7 @@ import {
   makePlayer,
   makeState,
   makeTradeOffer,
-  resetCounters
+  resetCounters,
 } from "./factories";
 import type { GameState, Player } from "@monopoly/shared";
 
@@ -16,7 +16,7 @@ describe("TradeService", () => {
   beforeEach(async () => {
     resetCounters();
     const moduleRef = await Test.createTestingModule({
-      providers: [TradeService]
+      providers: [TradeService],
     }).compile();
     svc = moduleRef.get(TradeService);
   });
@@ -127,7 +127,7 @@ describe("TradeService", () => {
           fromProperties: [0],
           fromCash: 100,
           toProperties: [1],
-          toCash: 50
+          toCash: 50,
         }),
       );
 
@@ -197,24 +197,73 @@ describe("TradeService", () => {
   });
 
   describe("getTradableProperties", () => {
-    it("возвращает только клетки без зданий", () => {
+    it("возвращает только клетки без зданий И без зданий во всей их цветовой группе", () => {
       const board = makeMonopolyBoard(3);
       const me = makePlayer({ id: "me", properties: [0, 1, 2] });
       board[0]!.ownerId = "me";
       board[1]!.ownerId = "me";
       board[2]!.ownerId = "me";
       board[1]!.houses = 2; // с домом — не торгуется
+      // По новому правилу монополии: если в группе ХОТЬ ОДИН дом стоит,
+      // НИ ОДИН участок группы нельзя продать/обменять. Поэтому теперь
+      // ни 0, ни 2 в tradable не попадают (пока у 1 есть дома).
+      const state = makeState({ players: [me], board });
+      const tradable = svc.getTradableProperties(me, state);
+      expect(tradable).not.toContain(0);
+      expect(tradable).not.toContain(1);
+      expect(tradable).not.toContain(2);
+    });
+
+    it("возвращает ВСЕ клетки группы, если на них самих и во всей группе нет домов", () => {
+      const board = makeMonopolyBoard(3);
+      const me = makePlayer({ id: "me", properties: [0, 1, 2] });
+      board[0]!.ownerId = "me";
+      board[1]!.ownerId = "me";
+      board[2]!.ownerId = "me";
       const state = makeState({ players: [me], board });
       const tradable = svc.getTradableProperties(me, state);
       expect(tradable).toContain(0);
+      expect(tradable).toContain(1);
       expect(tradable).toContain(2);
-      expect(tradable).not.toContain(1);
+    });
+
+    it("возвращает все клетки группы без домов, кроме клеток из группы, где есть хоть один дом", () => {
+      // Делаем доску из ДВУХ групп разных цветов:
+      //  - первая (group "brown"): 2 клетки — у владельца; на одной 1 дом.
+      //  - вторая (group "lightblue"): 3 клетки — у того же владельца; без домов.
+      // Ожидание: первая группа даёт 0 tradable (любой дом в группе блокирует
+      // ВСЮ группу), вторая — все 3 клетки tradable.
+      const board = [...makeMonopolyBoard(2, "brown"), ...makeMonopolyBoard(3, "lightblue")];
+      // Запоминаем индексы групп в собранной доске.
+      const brownIds = [0, 1];
+      const lightblueIds = [2, 3, 4];
+      const me = makePlayer({
+        id: "me",
+        properties: [...brownIds, ...lightblueIds],
+      });
+      for (const id of [...brownIds, ...lightblueIds]) {
+        board[id]!.ownerId = "me";
+      }
+      // Один дом на brown — блокирует всю brown-группу.
+      board[brownIds[1]!]!.houses = 1;
+      const state = makeState({ players: [me], board });
+      const tradable = svc.getTradableProperties(me, state);
+      // brown: ничего нельзя
+      for (const id of brownIds) expect(tradable).not.toContain(id);
+      // lightblue: всё можно
+      for (const id of lightblueIds) expect(tradable).toContain(id);
     });
   });
 
   describe("executeTrade (debt auto-cover)", () => {
     it("при получении денег долг автоматически погашается", () => {
-      const p0 = makePlayer({ id: "p0", money: 0, properties: [0], currentDebt: 100, creditorId: "bank" });
+      const p0 = makePlayer({
+        id: "p0",
+        money: 0,
+        properties: [0],
+        currentDebt: 100,
+        creditorId: "bank",
+      });
       const p1 = makePlayer({ id: "p1", money: 500, properties: [1] });
       const board = makeMonopolyBoard(3);
       board[0]!.ownerId = "p0";
@@ -228,7 +277,7 @@ describe("TradeService", () => {
           fromProperties: [0],
           fromCash: 0,
           toProperties: [1],
-          toCash: 200
+          toCash: 200,
         }),
       );
       svc.executeTrade(state);

@@ -5,6 +5,7 @@ import {
   RAILROAD_RENT_BY_COUNT,
   UTILITY_MULTIPLIER_BY_COUNT,
   UNMORTGAGE_INTEREST_RATE,
+  hasActiveMonopoly,
 } from "@monopoly/shared";
 
 /**
@@ -61,28 +62,42 @@ const props = defineProps<{
   state: GameState | null;
 }>();
 
-/** Сколько станций (RAILROAD) у текущего владельца. */
+/**
+ * Сколько станций (RAILROAD) у текущего владельца.
+ * Заложенные станции НЕ считаются — ренту они не приносят.
+ */
 const ownedRailroadCount = computed<number>(() => {
   if (!props.state || !props.cell?.ownerId) return 0;
-  return props.state.board.filter((c) => c.type === "RAILROAD" && c.ownerId === props.cell!.ownerId)
-    .length;
+  return props.state.board.filter(
+    (c) => c.type === "RAILROAD" && c.ownerId === props.cell!.ownerId && !c.isMortgaged,
+  ).length;
 });
 
-/** Сколько предприятий (UTILITY) у текущего владельца. */
+/**
+ * Сколько предприятий (UTILITY) у текущего владельца.
+ * Заложенные предприятия НЕ считаются — ренту они не приносят.
+ */
 const ownedUtilityCount = computed<number>(() => {
   if (!props.state || !props.cell?.ownerId) return 0;
-  return props.state.board.filter((c) => c.type === "UTILITY" && c.ownerId === props.cell!.ownerId)
-    .length;
+  return props.state.board.filter(
+    (c) => c.type === "UTILITY" && c.ownerId === props.cell!.ownerId && !c.isMortgaged,
+  ).length;
 });
 
-/** Сколько клеток данной цветовой группы ВСЕГО на доске. */
+/**
+ * Сколько клеток данной цветовой группы ВСЕГО на доске.
+ */
 const groupSize = computed<number>(() => {
   if (!props.state || !props.cell?.group) return 0;
   return props.state.board.filter((c) => c.type === "PROPERTY" && c.group === props.cell!.group)
     .length;
 });
 
-/** Сколько клеток группы принадлежит текущему владельцу. */
+/**
+ * Сколько клеток группы принадлежит текущему владельцу.
+ * (Используется только для информационного бейджа «N из M у вас»,
+ *  не путать с проверкой монополии — см. `hasMonopoly` ниже.)
+ */
 const ownedInGroup = computed<number>(() => {
   if (!props.state || !props.cell?.group || !props.cell.ownerId) return 0;
   return props.state.board.filter(
@@ -91,10 +106,17 @@ const ownedInGroup = computed<number>(() => {
   ).length;
 });
 
-/** Есть ли у владельца полная монополия (по цвету). */
-const hasMonopoly = computed<boolean>(
-  () => groupSize.value > 0 && ownedInGroup.value === groupSize.value,
-);
+/**
+ * Есть ли у владельца АКТИВНАЯ монополия по цвету.
+ * «Активная» = ВСЕ клетки группы принадлежат ему И ни одна из них не заложена.
+ * Если хоть один участок заложен — монополия СЧИТАЕТСЯ СЛОМАННОЙ:
+ * рента не удваивается, строить нельзя, бонусные карточки по монополии не даются.
+ */
+const hasMonopoly = computed<boolean>(() => {
+  if (!props.state || !props.cell || props.cell.type !== "PROPERTY") return false;
+  if (!props.cell.ownerId || !props.cell.group) return false;
+  return hasActiveMonopoly(props.cell.ownerId, props.cell.group, props.state.board);
+});
 
 /** Возврат при продаже одного дома = housePrice / 2. */
 const houseRefund = computed<number | undefined>(() => {
@@ -120,6 +142,13 @@ const baseRentFromTable = computed<number>(() => {
   if (rt && rt.length === 6 && typeof rt[0] === "number") return rt[0];
   return props.cell?.rent ?? 0;
 });
+
+/**
+ * Если участок (PROPERTY) заложен — вся рента с этой клетки = ₽0.
+ * Используется в шаблоне, чтобы показать зачёркнутую старую сумму
+ * и «= ₽0» рядом (как при скидке в магазине).
+ */
+const isMortgaged = computed<boolean>(() => props.cell?.isMortgaged === true);
 
 /**
  * Какая именно строка блока рент сейчас активна.
@@ -244,6 +273,12 @@ const sideClass = computed<string>(() => {
         динамически указывает на АКТУАЛЬНУЮ ренту для этой клетки.
       -->
       <div v-if="cell.rentTable && cell.rentTable.length === 6" class="rent-list">
+        <!--
+          При залоге зачёркиваем ТОЛЬКО строку «Рента» и показываем ₽0
+          рядом — остальные строки ренты остаются как есть.
+          (currentRentIndex уже возвращает 0 при isMortgaged, поэтому
+           подсветка .rent-current автоматически указывает на эту строку.)
+        -->
         <div
           class="rent-row"
           :class="{
@@ -252,7 +287,13 @@ const sideClass = computed<string>(() => {
           }"
         >
           <span class="rent-label">Рента</span>
-          <span class="rent-val">₽{{ cell.rentTable[0] }}</span>
+          <span class="rent-val">
+            <template v-if="isMortgaged">
+              <span class="rent-val-strikethrough">₽{{ cell.rentTable[0] }}</span>
+              <span class="rent-val-zero">₽0</span>
+            </template>
+            <template v-else>₽{{ cell.rentTable[0] }}</template>
+          </span>
         </div>
         <div
           class="rent-row"
@@ -336,13 +377,27 @@ const sideClass = computed<string>(() => {
         <span class="val">₽{{ unmortgageCost }}</span>
       </div>
 
-      <!-- Бейдж монополии -->
+      <!-- Бейдж монополии.
+           Теперь учитывается правило: монополия считается активной,
+           только если ВСЕ участки группы принадлежат владельцу и НИ
+           ОДИН из них не заложен (см. hasActiveMonopoly в shared). -->
       <div
         v-if="hasMonopoly"
         class="tooltip-monopoly-badge"
-        title="У владельца полная монополия по этой цветовой группе"
+        title="У владельца активная монополия по этой цветовой группе (все участки его и ни один не заложен)"
       >
         👑 Монополия
+      </div>
+      <!--
+        Подсказка: игрок собрал всю группу, но один из участков заложен —
+        монополия считается «сломанной» и удвоенная рента НЕ работает.
+      -->
+      <div
+        v-else-if="ownedInGroup === groupSize && groupSize > 0 && cell.isMortgaged === false"
+        class="tooltip-note tooltip-warn"
+        title="Один из участков этой цветовой группы заложен — монополия не активна"
+      >
+        ⚠️ Монополия сломана: в группе есть заложенный участок
       </div>
     </template>
 
@@ -604,5 +659,23 @@ const sideClass = computed<string>(() => {
 .mortgaged-footer {
   color: #ff7a7a;
   font-weight: 600;
+}
+/*
+  Визуализация «залог → рента = 0»:
+   - старая сумма перечёркнута по середине (как в магазинах при скидке);
+   - рядом зелёная «= ₽0» — это и есть текущая рента.
+  Подсветка строки (`.rent-current`) указывает именно на строку
+  «Рента» благодаря тому, что `currentRentIndex === 0` при залоге.
+*/
+.rent-val-strikethrough {
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 255, 255, 0.7);
+  text-decoration-thickness: 2px;
+  margin-right: 6px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.rent-val-zero {
+  color: #7ee08a;
+  font-weight: 700;
 }
 </style>

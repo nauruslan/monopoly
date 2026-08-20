@@ -23,6 +23,7 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { useGameStore } from "./game";
 import type { GameState, Player, TradeOffer } from "@monopoly/shared";
+import { groupHasNoBuildings } from "@monopoly/shared";
 
 /** Локальный draft оффера во время редактирования. */
 export interface TradeDraft {
@@ -166,15 +167,46 @@ export const useTradeStore = defineStore("trade", () => {
     return state.value.board.filter((c) => c.ownerId === recipient.value!.id);
   });
 
+  /**
+   * Свойства партнёра, доступные для запроса в обмен.
+   * Правило: клетка без зданий И вся её группа (если есть) тоже без зданий.
+   * Подробнее — см. `myTradableProperties` ниже.
+   */
+  const recipientTradableProperties = computed(() => {
+    if (!state.value || !recipient.value) return [];
+    return state.value.board.filter((c) => {
+      if (c.ownerId !== recipient.value!.id) return false;
+      if (c.houses !== 0) return false;
+      if (c.group && c.type === "PROPERTY") {
+        return groupHasNoBuildings(recipient.value!.id, c.group, state.value!.board);
+      }
+      return true;
+    });
+  });
+
   /** Мои свойства (для UI). */
   const myProperties = computed(() => {
     if (!state.value || !me.value) return [];
     return state.value.board.filter((c) => c.ownerId === me.value!.id);
   });
 
-  /** Свойства, которые я могу отдать (без зданий). */
+  /**
+   * Свойства, которые я могу отдать.
+   * Условия:
+   *  - на самой клетке нет зданий (`houses === 0`);
+   *  - если у клетки есть цветовая группа (PROPERTY), вся группа тоже
+   *    должна быть без зданий (правило монополии — иначе нельзя
+   *    продать/обменять ни один участок этой группы).
+   */
   const myTradableProperties = computed(() => {
-    return myProperties.value.filter((c) => c.houses === 0);
+    if (!state.value || !me.value) return [];
+    return myProperties.value.filter((c) => {
+      if (c.houses !== 0) return false;
+      if (c.group && c.type === "PROPERTY") {
+        return groupHasNoBuildings(me.value!.id, c.group, state.value!.board);
+      }
+      return true;
+    });
   });
 
   /** Заблокировал ли партнёр меня (тогда инициировать нельзя). */
@@ -393,6 +425,7 @@ export const useTradeStore = defineStore("trade", () => {
     inActiveTrade,
     isConfirmPhase,
     recipientProperties,
+    recipientTradableProperties,
     myProperties,
     myTradableProperties,
     isBlockedByPartner,

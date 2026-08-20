@@ -26,7 +26,10 @@ export interface LogEventInput {
 
 /**
  * Контекст для операций распродажи имущества (BANKRUPTCY_LIQUIDATE).
- * Флаги используются для пометки событий в журнале словом "(распродажа)".
+ * Используется для передачи флага `liquidation` в payload события
+ * (UI может использовать его для подсветки).
+ * Текстовая пометка "(распродажа)" в журнале больше НЕ формируется —
+ * журнал должен быть консистентным во всех фазах.
  */
 export type OperationContext = "normal" | "liquidation";
 
@@ -296,22 +299,109 @@ export class LogService {
   }
 
   /**
-   * Вытянутая карточка из колоды Шанс / Казна / Роскошный налог.
-   * в журнале должно быть видно, КАКАЯ карточка вытянута.
+   * Вытянутая карточка из колоды Шанс / Казна.
+   *
+   * В журнале должно быть видно, КАКАЯ карточка вытянута.
+   *
+   * Для карточек с формулами (money-per-property, money-per-monopoly,
+   * money-if-monopoly) этот метод НЕ вызывается — вместо него
+   * используется {@link logCardFormulaApplied}, который формирует
+   * объединённое сообщение (описание карточки + итоговая сумма
+   * в ОДНОЙ записи журнала). Вызывающий код должен проверить
+   * `card.effect.kind` перед вызовом.
+   *
+   * Для карточек-формул Роскошного налога (luxury-tax-house) вместо
+   * этого метода используется {@link logLuxuryTaxCardApplied} —
+   * объединённое сообщение, в котором описание карточки и итоговая
+   * сумма идут в ОДНОЙ записи журнала (так чище и нет дублей).
    */
   logCardDrawn(
     state: GameState,
     player: Player,
-    deck: "chance" | "treasury" | "luxury-tax",
+    deck: "chance" | "treasury",
     cardText: string,
   ): GameEvent {
-    const deckLabel =
-      deck === "chance" ? "Шанс" : deck === "treasury" ? "КАЗНА" : "Роскошный налог";
+    const deckLabel = deck === "chance" ? "Шанс" : "КАЗНА";
     return this.create(state, {
       kind: "CARD_DRAWN",
       player,
       message: `🃏 ${player.displayName} вытянул(а) карту «${deckLabel}»: ${cardText}`,
       type: "chance",
+    });
+  }
+
+  /**
+   * Журнал: ОБЪЕДИНЁННОЕ сообщение для карточки-формулы (Казна / Шанс).
+   *
+   * Используется для карточек с эффектами `money-per-property`,
+   * `money-per-monopoly`, `money-if-monopoly`. В ОДНОЙ записи журнала
+   * показывается и описание карточки (полный текст), и итоговая сумма
+   * с разбивкой формулы. Раньше приходили два отдельных сообщения
+   * (CARD_DRAWN + CARD_FORMULA_RESULT), что засоряло журнал.
+   *
+   * Пример итоговой строки:
+   *   «🃏 Игрок вытянул(а) карту «КАЗНА»: <текст>. Итог: +150₽ (3 уч. × 50₽)»
+   *   «🃏 Игрок вытянул(а) карту «Шанс»: <текст>. Итог: 0₽ (нет активной монополии)»
+   *
+   * `formula` описывает, как именно посчитана сумма, чтобы игроки
+   * видели «почему столько». Используется только для UI-текста.
+   * `zeroReason` — причина нулевого итога (когда условие не выполнено).
+   *
+   * Для таких карт НЕ нужно вызывать {@link logCardDrawn} отдельно —
+   * это объединённое сообщение заменяет обе записи.
+   */
+  logCardFormulaApplied(
+    state: GameState,
+    player: Player,
+    deck: "chance" | "treasury",
+    cardText: string,
+    totalAmount: number,
+    formula: string,
+    zeroReason?: string,
+  ): GameEvent {
+    const deckLabel = deck === "chance" ? "Шанс" : "КАЗНА";
+    const sign = totalAmount > 0 ? "+" : "";
+    const tail =
+      totalAmount === 0 && zeroReason
+        ? `Итог: 0₽ (${zeroReason})`
+        : `Итог: ${sign}${totalAmount}₽ (${formula})`;
+    return this.create(state, {
+      kind: "CARD_DRAWN",
+      player,
+      message: `🃏 ${player.displayName} вытянул(а) карту «${deckLabel}»: ${cardText}. ${tail}`,
+      type: "chance",
+      payload: { amount: totalAmount },
+    });
+  }
+
+  /**
+   * Журнал: объединённое сообщение для карточки-формулы Роскошного налога.
+   *
+   * В этой версии журнал показывает В ОДНОЙ записи и описание карточки
+   * (полный текст), и итоговую сумму с разбивкой по участкам/домам/отелям.
+   * Раньше приходили два отдельных сообщения (CARD_DRAWN + TAX_PAID), что
+   * засоряло журнал и требовало от игрока склеивать информацию вручную.
+   *
+   * Пример итоговой строки:
+   *   «💎 Игрок вытянул(а) карту «Роскошный налог»: <текст карточки>.
+   *     Итог: -475₽ (10 уч. + 2 дом. + 1 отелей)»
+   *
+   * `breakdown` — человеко-читаемая разбивка формулы (например,
+   * «10 уч. + 2 дом. + 1 отелей»); используется ТОЛЬКО для UI-текста.
+   */
+  logLuxuryTaxCardApplied(
+    state: GameState,
+    player: Player,
+    cardText: string,
+    totalAmount: number,
+    breakdown: string,
+  ): GameEvent {
+    return this.create(state, {
+      kind: "TAX_PAID",
+      player,
+      message: `💎 ${player.displayName} вытянул(а) карту «Роскошный налог»: ${cardText}. Итог: -${totalAmount}₽ (${breakdown})`,
+      type: "tax",
+      payload: { cellId: 38, amount: totalAmount },
     });
   }
 
@@ -446,8 +536,11 @@ export class LogService {
   }
 
   /**
-   * Строительство дома/отеля. Поддерживает пометку `liquidation=true`
-   * — в этом случае сообщение содержит префикс «(распродажа)».
+   * Строительство дома/отеля. Параметр `context` оставлен для обратной
+   * совместимости и payload, но в тексте сообщения префикс «(распродажа)»
+   * больше НЕ используется — журнал должен быть консистентным во всех
+   * фазах (BUILDING и BANKRUPTCY_LIQUIDATE), иначе игроки видят разные
+   * форматы для одной и той же операции.
    */
   logHouseBuilt(
     state: GameState,
@@ -465,11 +558,10 @@ export class LogService {
     // дом» подходит и для первого дома, и для второго/третьего/четвёртого.
     // Для отеля (5) тоже используется «построил дом» — это сознательно,
     // журнал фиксирует ФАКТ строительства, а не нюанс «отель».
-    const prefix = context === "liquidation" ? "🏦 (распродажа) " : "🏗️ ";
     return this.create(state, {
       kind: "HOUSE_BUILT",
       player,
-      message: `${prefix}${player.displayName} построил дом на «${cellName}» за $${buildAmount}`,
+      message: `🏗️ ${player.displayName} построил дом на «${cellName}» за $${buildAmount}`,
       type: "buy",
       payload: {
         cellId: -1,
@@ -484,8 +576,11 @@ export class LogService {
   /**
    * Продажа дома/отеля. Поддерживает оба режима:
    *  - "normal"      — обычная продажа в фазе BUILDING / BUILDING_PHASE;
-   *  - "liquidation" — продажа в фазе BANKRUPTCY_LIQUIDATE
-   *                    (формулировка «распродажа»).
+   *  - "liquidation" — продажа в фазе BANKRUPTCY_LIQUIDATE.
+   *
+   * Параметр `context` сохранён для обратной совместимости и payload,
+   * но в тексте сообщения префикс «(распродажа)» больше НЕ используется
+   * — журнал должен быть консистентным во всех фазах.
    */
   logHouseSold(
     state: GameState,
@@ -497,11 +592,10 @@ export class LogService {
     isHotel: boolean,
     context: OperationContext = "normal",
   ): GameEvent {
-    const prefix = context === "liquidation" ? "🏦 (распродажа) " : "🏠 ";
     return this.create(state, {
       kind: "HOUSE_SOLD",
       player,
-      message: `${prefix}${player.displayName} продал(а) ${noun} на «${cellName}» за $${refund}`,
+      message: `🏠 ${player.displayName} продал(а) ${noun} на «${cellName}» за $${refund}`,
       type: "buy",
       payload: {
         cellId: -1,
@@ -515,7 +609,9 @@ export class LogService {
 
   /**
    * Залог клетки (PROPERTY / RAILROAD / UTILITY).
-   * Поддерживает пометку (распродажа).
+   * Параметр `context` сохранён для обратной совместимости и payload,
+   * но в тексте сообщения префикс «(распродажа)» больше НЕ используется
+   * — журнал должен быть консистентным во всех фазах.
    */
   logPropertyMortgaged(
     state: GameState,
@@ -524,11 +620,10 @@ export class LogService {
     mortgageAmount: number,
     context: OperationContext = "normal",
   ): GameEvent {
-    const prefix = context === "liquidation" ? "🏦 (распродажа) " : "🏦 ";
     return this.create(state, {
       kind: "PROPERTY_MORTGAGED",
       player,
-      message: `${prefix}${player.displayName} заложил(а) «${cellName}» и получил(а) $${mortgageAmount}`,
+      message: `🏦 ${player.displayName} заложил(а) «${cellName}» и получил(а) $${mortgageAmount}`,
       type: "buy",
       payload: { cellId: -1, mortgageAmount, liquidation: context === "liquidation" || undefined },
     });
@@ -554,7 +649,9 @@ export class LogService {
 
   /**
    * Продажа клетки Банку за 100% номинала (только в фазе
-   * BANKRUPTCY_LIQUIDATE). Использует контекст "liquidation".
+   * BANKRUPTCY_LIQUIDATE). Префикс «(распродажа)» в тексте сообщения
+   * больше НЕ используется — журнал должен быть консистентным во всех
+   * фазах (флаг `liquidation: true` в payload сохранён для фильтров).
    */
   logPropertySoldToBank(
     state: GameState,
@@ -565,7 +662,7 @@ export class LogService {
     return this.create(state, {
       kind: "BANKRUPTCY_LIQUIDATION",
       player,
-      message: `🏦 (распродажа) ${player.displayName} продал(а) «${cellName}» банку за $${amount}`,
+      message: `🏦 ${player.displayName} продал(а) «${cellName}» банку за $${amount}`,
       type: "system",
       payload: { cellId: -1, amount, liquidation: true },
     });
@@ -735,9 +832,9 @@ export class LogService {
    *  - здесь клетка была заложена, и игрок «допродаёт» её за
    *    дополнительные 50% (в сумме с ранее полученным залогом
    *    получается 100% номинала);
-   *  - сообщение содержит префикс «(распродажа)» и явно указывает,
-   *    что клетка была заложена — чтобы в журнале было видно
-   *    отличие от обычной продажи незаложенной клетки.
+   *  - сообщение явно указывает, что клетка была заложена — чтобы
+   *    в журнале было видно отличие от обычной продажи незаложенной
+   *    клетки. Префикс «(распродажа)» в тексте больше НЕ используется.
    */
   logBankruptcyMortgagedPropertySold(
     state: GameState,
@@ -748,7 +845,7 @@ export class LogService {
     return this.create(state, {
       kind: "BANKRUPTCY_LIQUIDATION",
       player,
-      message: `🏦 (распродажа) ${player.displayName} продал(а) заложенный участок «${cellName}» банку за $${amount}`,
+      message: `🏦 ${player.displayName} продал(а) заложенный участок «${cellName}» банку за $${amount}`,
       type: "system",
       payload: { cellId: -1, amount, liquidation: true },
     });

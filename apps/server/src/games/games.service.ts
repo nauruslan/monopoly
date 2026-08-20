@@ -18,6 +18,7 @@ import {
   Card,
   Cell,
   CHANCE_CARDS,
+  countActiveMonopolies,
 } from "@monopoly/shared";
 import { GameRepository } from "../db/repositories/game.repository";
 import { GameInitializerService } from "./game-initializer.service";
@@ -1250,7 +1251,18 @@ export class GamesService {
       const card = drawResult.card;
       const deckName = cell.type === "CHANCE" ? "chance" : "treasury";
       // Журнал: фиксируем, какая карточка была вытянута.
-      this.log.logCardDrawn(state, player, deckName, card.text);
+      // Для карточек-формул (money-if-monopoly, money-per-property,
+      // money-per-monopoly) обычный logCardDrawn НЕ вызывается —
+      // объединённое сообщение (описание + итог) формируется
+      // позже в applyCardEffectAndAdvance через logCardFormulaApplied,
+      // когда уже известны суммы по имуществу игрока.
+      const isFormulaCard =
+        card.effect.kind === "money-if-monopoly" ||
+        card.effect.kind === "money-per-property" ||
+        card.effect.kind === "money-per-monopoly";
+      if (!isFormulaCard) {
+        this.log.logCardDrawn(state, player, deckName, card.text);
+      }
       state.cardContext = {
         playerId: player.id,
         deck: deckName,
@@ -1298,11 +1310,17 @@ export class GamesService {
       // Вариант "luxury" (id=38) — карточка-формула из колоды LUXURY_TAX_CARDS.
       // Сервер вытягивает карту, кладёт её в cardContext, фаза CARD_REVEAL
       // (модалка с описанием формулы; списывание — после CONFIRM_CARD в CARD_EFFECT).
+      //
+      // Журнал: в отличие от других карт, luxury-tax пишет в журнал
+      // ОДНО объединённое сообщение (описание + итоговая сумма) после
+      // применения эффекта в CARD_EFFECT, поэтому здесь (CARD_REVEAL)
+      // отдельный `logCardDrawn` НЕ вызывается.
       if (cell.taxVariant === "luxury") {
         const drawResult = this.cards.drawFromDeck("luxury-tax", state);
         const card = drawResult.card;
-        // Журнал: фиксируем «вытянутую карточку-формулу».
-        this.log.logCardDrawn(state, player, "luxury-tax", card.text);
+        // Никаких отдельных сообщений в журнал здесь не пишем —
+        // объединённое сообщение с итогом появится после CONFIRM_CARD
+        // (см. ветку `card.effect.kind === "luxury-tax-house"` ниже).
         state.cardContext = {
           playerId: player.id,
           deck: "luxury-tax",
@@ -2093,10 +2111,14 @@ export class GamesService {
     // не может привести к минусу, но мы всё равно вызываем проверку —
     // она no-op, если `player.money >= 0`.
     if (card.effect.kind === "luxury-tax-house") {
-      // Журнал: Роскошный налог с разбивкой по участкам/домам/отелям.
-      // «Игрок заплатил Роскошный налог — сумма (формула
-      // сумма=участки+дома+отели)».
-      // Пересчитываем properties/houses/hotels для UI-сообщения.
+      // Журнал: Роскошный налог — ОБЪЕДИНЁННОЕ сообщение (описание
+      // карточки + итоговая сумма + разбивка формулы) в ОДНОЙ записи.
+      // Раньше приходили два отдельных сообщения (logCardDrawn для
+      // вытянутой карточки + logLuxuryTaxPaid для суммы), что
+      // засоряло журнал и требовало от игрока склеивать информацию
+      // вручную.
+      //
+      // Пересчитываем properties/houses/hotels для разбивки в UI.
       let houses = 0;
       let hotels = 0;
       let properties = 0;
@@ -2109,7 +2131,108 @@ export class GamesService {
       }
       const { perHouse, perHotel, perProperty } = card.effect;
       const total = perHouse * houses + perHotel * hotels + perProperty * properties;
-      this.log.logLuxuryTaxPaid(state, player, total, houses, hotels, properties);
+      const breakdown = `${properties} уч. + ${houses} дом. + ${hotels} отелей`;
+      this.log.logLuxuryTaxCardApplied(state, player, card.text, total, breakdown);
+    }
+
+    // Журнал: ОБЪЕДИН�ННОЕ сообщение для карточек-формул
+    // (money-if-monopoly, money-per-property, money-per-monopoly).
+    // Описание карточки и итоговая сумма идут в ОДНОЙ записи журнала.
+    // Обычный logCardDrawn для этих карт был подавлен выше (см. ветку
+    // CHANCE/TREASURY в handleResolvingLanding), чтобы избежать
+    // дублирования.
+    if (
+      card.effect.kind === "money-if-monopoly" ||
+      card.effect.kind === "money-per-property" ||
+      card.effect.kind === "money-per-monopoly"
+    ) {
+      // state.cardContext гарантированно существует — функция бросает
+      // BadRequestException в начале, если его нет.
+      // Карточки-формулы money-if-monopoly/money-per-property/
+      // money-per-monopoly приходят ТОЛЬКО из колод chance/treasury
+      // (luxury-tax-house — отдельная колода luxury-tax), поэтому
+      // здесь безопасно сузить тип.
+      const deckName = state.cardContext!.deck as "chance" | "treasury";
+      if (card.effect.kind === "money-if-monopoly") {
+        // Журнал: «Получите N₽, если у вас есть монополия».
+        const amount = card.effect.amount;
+        const monopolies = countActiveMonopolies(player.id, state.board);
+        if (monopolies > 0) {
+          this.log.logCardFormulaApplied(
+            state,
+            player,
+            deckName,
+            card.text,
+            amount,
+            "есть активная монополия",
+          );
+        } else {
+          this.log.logCardFormulaApplied(
+            state,
+            player,
+            deckName,
+            card.text,
+            0,
+            "",
+            "нет активной монополии",
+          );
+        }
+      } else if (card.effect.kind === "money-per-property") {
+        // Журнал: «Заработайте N₽ за каждый незаложенный участок».
+        const amountPerUnit = card.effect.amountPerUnit;
+        let units = 0;
+        for (const cellId of player.properties) {
+          const c = state.board[cellId];
+          if (!c || c.isMortgaged) continue;
+          units += 1;
+        }
+        const total = amountPerUnit * units;
+        if (units === 0) {
+          this.log.logCardFormulaApplied(
+            state,
+            player,
+            deckName,
+            card.text,
+            0,
+            "",
+            "нет незаложенных участков",
+          );
+        } else {
+          this.log.logCardFormulaApplied(
+            state,
+            player,
+            deckName,
+            card.text,
+            total,
+            `${units} уч. × ${amountPerUnit}₽`,
+          );
+        }
+      } else {
+        // money-per-monopoly: «Заработайте N� за каждую монополию».
+        const amountPerMonopoly = card.effect.amountPerMonopoly;
+        const monopolies = countActiveMonopolies(player.id, state.board);
+        const total = amountPerMonopoly * monopolies;
+        if (monopolies === 0) {
+          this.log.logCardFormulaApplied(
+            state,
+            player,
+            deckName,
+            card.text,
+            0,
+            "",
+            "нет активных монополий",
+          );
+        } else {
+          this.log.logCardFormulaApplied(
+            state,
+            player,
+            deckName,
+            card.text,
+            total,
+            `${monopolies} монополий × ${amountPerMonopoly}₽`,
+          );
+        }
+      }
     }
 
     // Правило «discard to bottom»: возвращаем не-holdable карту в

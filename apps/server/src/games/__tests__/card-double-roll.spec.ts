@@ -43,7 +43,7 @@ function makeFreshState(): GameState {
       holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false
+      isBankrupt: false,
     },
     {
       id: "p1",
@@ -58,7 +58,7 @@ function makeFreshState(): GameState {
       holdableCards: {},
       properties: [],
       consecutiveDoubles: 0,
-      isBankrupt: false
+      isBankrupt: false,
     },
   ];
   return {
@@ -73,7 +73,7 @@ function makeFreshState(): GameState {
     settings: { ...DEFAULT_SETTINGS },
     seed: "test-seed",
     createdAt: new Date().toISOString(),
-    lastActivityAt: new Date().toISOString()
+    lastActivityAt: new Date().toISOString(),
   };
 }
 
@@ -98,11 +98,11 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       create: jest.fn(async (state: GameState) => ({
         id: state.id,
         rngSeed: state.seed,
-        stateSnapshot: state
+        stateSnapshot: state,
       })),
       updateSnapshot: jest.fn(async () => undefined),
       replaceSnapshot: jest.fn(async () => true),
-      findById: jest.fn(async () => null)
+      findById: jest.fn(async () => null),
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -121,7 +121,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
         TradeService,
         LogService,
         { provide: GameRepository, useValue: repoMock },
-      ]
+      ],
     }).compile();
 
     service = moduleRef.get(GamesService);
@@ -160,7 +160,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       card: (CHANCE_CARDS.find((c) => c.id === card.id) ??
         TREASURY_CARDS.find((c) => c.id === card.id))!,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     return p;
   }
@@ -187,7 +187,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ forward к клетке 20
     //    (а не телепортируется мгновенно, как раньше — это был баг).
@@ -252,7 +252,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     // 1) CONFIRM_CARD: анимация к 20 ВПЕРЁД (forward, 2→...→20).
     await act({ type: "CONFIRM_CARD" });
@@ -287,7 +287,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     // 1) CONFIRM_CARD: фишка АНИМИРУЕТСЯ backward (30→29→...→20, 10 шагов).
     //    ВАЖНО: НЕ через СТАРТ (это было бы 30 шагов вперёд, что
@@ -336,7 +336,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: parkingCard.deck,
       card: parkingCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     // 1) CONFIRM_CARD → MOVE_ANIMATION (анимация к 20, forward — from=2 < to=20).
     //    Здесь from=2 (Казна) < to=20, поэтому по правилу
@@ -373,23 +373,16 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     expect(canRollDice(activeState, nextPlayer)).toBe(true);
   });
 
-  it("полный цикл: дубль 1-1 + попадание на PARKING (id=20) через кубики → ROLLING (право на ещё один бросок)", async () => {
-    // Правила Монополии: парковка как «визит» через кубики — это
-    // нейтральная клетка, и правило дублей ДЕЙСТВУЕТ: игрок должен
-    // бросить ещё раз. Никакого «отдыха» здесь нет — это не
-    // телепорт по карточке, а обычный ход через нейтральную клетку.
-    //
-    // ВАЖНО: `justArrivedAtParking` НЕ ставится при обычном попадании
-    // на парковку (через кубики) — этот флаг предназначен ТОЛЬКО для
-    // телепорта по карточке «Отправляйтесь на парковку», где право на
-    // ещё один бросок ТЕРЯЕТСЯ по правилам Монополии.
+  it("полный цикл: дубль 1-1 + попадание на PARKING (id=20) через кубики → BUILDING (правило «отдыха»)", async () => {
+    // BUGFIX 2026-08 #3: Бесплатная парковка — специальное поле.
+    // Даже при дубле цепочка «бросок → движение → эффект» ОБРЫВАЕТСЯ,
+    // `mustRollAgain`/`consecutiveDoubles` сбрасываются, фаза = BUILDING.
+    // Это поведение унифицировано с попаданием через карточку.
     const p = activeState.players[activeState.currentPlayerIndex]!;
-    // Игрок встаёт ровно на 18, чтобы дубль [1,1] довёл его на 20 (PARKING).
     p.position = 18;
     p.mustRollAgain = true;
     p.consecutiveDoubles = 1;
     activeState.lastDice = { dice: [1, 1], isDouble: true };
-    // Симулируем начало фазы анимации движения (handleMoveAnimation).
     activeState.phase = "MOVE_ANIMATION";
 
     // 1) CONFIRM_MOVE_ANIMATION: handleMoveAnimation сдвигает позицию
@@ -399,22 +392,22 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
     expect(activeState.phase).toBe("RESOLVING_LANDING");
 
     // 2) CONFIRM_LANDING: handleResolvingLanding → клетка PARKING →
-    //    `mustRollAgain` СОХРАНЯЕТСЯ, фаза ROLLING (право на ещё
-    //    один бросок по правилу дублей).
+    //    «отдых», цепочка дублей ОБРЫВАЕТСЯ (аналог ареста по
+    //    карточке «Отправляйтесь на парковку»).
     await act({ type: "CONFIRM_LANDING" });
 
-    // Позиция — парковка, mustRollAgain СОХРАНЁН.
+    // Позиция — парковка, mustRollAgain СБРОШЕН, consecutiveDoubles=0.
     expect(p.position).toBe(20);
-    expect(p.mustRollAgain).toBe(true);
-    expect(p.consecutiveDoubles).toBe(1);
-    // Фаза — ROLLING (игрок бросает ещё раз).
-    expect(activeState.phase).toBe("ROLLING");
-    // Флаг justArrivedAtParking НЕ выставлен (это не телепорт-карточка).
-    expect(activeState.justArrivedAtParking).toBeFalsy();
+    expect(p.mustRollAgain).toBe(false);
+    expect(p.consecutiveDoubles).toBe(0);
+    // Фаза — BUILDING (игрок может только завершить ход).
+    expect(activeState.phase).toBe("BUILDING");
+    // Флаг justArrivedAtParking ставится ВСЕГДА (для всех попаданий).
+    expect(activeState.justArrivedAtParking).toBe(true);
 
-    // Финальная проверка: можно бросить кубики, завершение хода заблокировано.
-    expect(canEndTurn(activeState, p)).toBe(false);
-    expect(canRollDice(activeState, p)).toBe(true);
+    // Финальная проверка: бросок кубиков заблокирован, завершение хода разрешено.
+    expect(canEndTurn(activeState, p)).toBe(true);
+    expect(canRollDice(activeState, p)).toBe(false);
   });
 
   it("move-relative карта (назад/вперёд на N) при дубле: mustRollAgain СОХРАНЯЕТСЯ (регресс #1)", async () => {
@@ -454,7 +447,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: backCard.deck,
       card: backCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     // 1) CONFIRM_CARD — move-relative не сбрасывает mustRollAgain,
     //    фаза MOVE_ANIMATION (перемещение через анимацию, не телепорт).
@@ -502,7 +495,7 @@ describe("GamesService.applyAction: regression дубль + карточка Ш�
       deck: goCard.deck,
       card: goCard,
       applied: false,
-        deckCardId: null
+      deckCardId: null,
     };
     const moneyBefore = p.money;
     const goSalary = activeState.settings.goSalary;

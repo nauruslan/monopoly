@@ -290,16 +290,19 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Без дубля: обычный визит, можно завершить ход.
+    // BUGFIX 2026-08 #3: PARKING — специальное поле «отдых».
+    // БЕЗУСЛОВНО сбрасывает mustRollAgain/consecutiveDoubles и
+    // ставит justArrivedAtParking=true (для всех попаданий — и по
+    // карточке, и через кубики). Фаза = BUILDING.
     expect(p.mustRollAgain).toBe(false);
+    expect(p.consecutiveDoubles).toBe(0);
+    expect(activeState.justArrivedAtParking).toBe(true);
     expect(activeState.phase).toBe("BUILDING");
-    // justArrivedAtParking НЕ ставится (это не телепорт по карточке).
-    expect(activeState.justArrivedAtParking).toBeFalsy();
     expect(canEndTurn(activeState, p)).toBe(true);
     expect(canRollDice(activeState, p)).toBe(false);
   });
 
-  it("PARKING visit с дублём: mustRollAgain сохранён, фаза ROLLING", async () => {
+  it("PARKING visit с дублём: mustRollAgain сброшен (правило отдыха), фаза BUILDING", async () => {
     const p = activeState.players[activeState.currentPlayerIndex]!;
     p.position = 18; // дубль [1,1] = 2 → 18+2=20 (PARKING)
     p.mustRollAgain = true;
@@ -312,15 +315,15 @@ describe("GamesService.applyAction: спецклетки при дубле (GO, 
     expect(activeState.phase).toBe("RESOLVING_LANDING");
     await act({ type: "CONFIRM_LANDING" });
 
-    // Главная проверка: mustRollAgain сохранён, фаза ROLLING.
-    // Это ОТЛИЧАЕТСЯ от карточки «Отправляйтесь на парковку», где
-    // право на ещё один бросок ТЕРЯЕТСЯ.
-    expect(p.mustRollAgain).toBe(true);
-    expect(p.consecutiveDoubles).toBe(1);
-    expect(activeState.phase).toBe("ROLLING");
-    expect(activeState.justArrivedAtParking).toBeFalsy();
-    expect(canRollDice(activeState, p)).toBe(true);
-    expect(canEndTurn(activeState, p)).toBe(false);
+    // BUGFIX 2026-08 #3: даже при дубле PARKING принудительно
+    // останавливает игрока. Правило дублей НЕ действует на парковке —
+    // цепочка бросок→движение→эффект обрывается (аналог ареста).
+    expect(p.mustRollAgain).toBe(false);
+    expect(p.consecutiveDoubles).toBe(0);
+    expect(activeState.phase).toBe("BUILDING");
+    expect(activeState.justArrivedAtParking).toBe(true);
+    expect(canRollDice(activeState, p)).toBe(false);
+    expect(canEndTurn(activeState, p)).toBe(true);
   });
 
   // 4) GOTO_JAIL (id=30) + карточка «Отправляйтесь в тюрьму»

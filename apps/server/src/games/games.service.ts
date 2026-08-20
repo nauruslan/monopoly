@@ -1330,36 +1330,38 @@ export class GamesService {
       state.phase = "BUILDING";
       return {};
     }
-    // PARKING (id=20) — «отдых» по правилам Монополии: цепочка
-    // «бросок → движение → эффект» обрывается.
+    // PARKING (id=20) — специальное поле «отдых» по правилам Монополии.
+    // BUGFIX 2026-08 #3: раньше здесь действовало правило дублей —
+    // при дубле игрок мог БРОСИТЬ ЕЩЁ РАЗ после попадания на парковку.
+    // По классическим правилам Монополии Бесплатная парковка
+    // принудительно ОСТАНАВЛИВАЕТ цепочку бросок→движение→эффект
+    // (аналог «просто посещения»/ареста). Поэтому теперь:
+    //  - `mustRollAgain` БЕЗУСЛОВНО сбрасывается, `consecutiveDoubles=0`;
+    //  - `justArrivedAtParking` ставится ВСЕГДА (не только по
+    //    карточке), чтобы `canRollDice`/`canEndTurn` работали
+    //    единообразно для всех вариантов попадания;
+    //  - фаза = BUILDING (игрок может только завершить ход).
     //
-    // ВАЖНО: правило дублей действует и здесь, как для Тюрьмы-визита:
-    //  - Без дубля: фаза BUILDING, `mustRollAgain` сбрасывается.
-    //  - С дублём: `mustRollAgain` СОХРАНЯЕТСЯ, фаза ROLLING — игрок
-    //    бросает ещё раз (правило дублей действует на любой
-    //    «нейтральной» клетке, в т.ч. Бесплатная парковка).
-    //
-    // Флаг `state.justArrivedAtParking` ставится ТОЛЬКО при попадании
-    // по карточке «Отправляйтесь на парковку» (см.
-    // applyCardEffectAndAdvance в `move`-ветке). В этом случае
-    // право на ещё один бросок (после дубля) ТЕРЯЕТСЯ по правилам
-    // Монополии — фаза становится BUILDING безусловно (даже если
-    // бы `mustRollAgain` был `true`, он уже сброшен в
-    // applyCardEffectAndAdvance).
+    // Это касается ВСЕХ сценариев попадания на парковку:
+    //  - обычный бросок кубиков;
+    //  - дубль (правило дублей НЕ действует на парковке);
+    //  - карточка «Отправляйтесь на парковку» (target=20).
     if (cell.type === "PARKING") {
-      if (state.justArrivedAtParking) {
-        // Карточка «Отправляйтесь на парковку»: «отдых» (аналог
-        // ареста), цепочка дублей обрывается. `mustRollAgain` уже
-        // сброшен в applyCardEffectAndAdvance. Фаза = BUILDING,
-        // можно только завершить ход.
-        state.phase = "BUILDING";
-      } else if (player.mustRollAgain) {
-        // Дубль: сохраняем право на повторный бросок.
-        state.phase = "ROLLING";
-      } else {
-        // Без дубля: обычный отдых, можно завершить ход.
-        state.phase = "BUILDING";
-      }
+      // Сбрасываем флаги дублей — парковка останавливает игрока.
+      player.mustRollAgain = false;
+      player.consecutiveDoubles = 0;
+      // Ставим justArrivedAtParking для всех попаданий (включая
+      // прямой бросок). Это:
+      //  1) унифицирует поведение клиента (UI блокирует кнопку
+      //     «Бросить кубики» через canRollDice);
+      //  2) фиксирует «состояние отдыха» для логирования и
+      //     обработки на следующем ходу (флаг сбрасывается в
+      //     resetTurnFlags при начале нового хода).
+      state.justArrivedAtParking = true;
+      // Для карточки «Отправляйтесь на парковку» applyCardEffectAndAdvance
+      // уже сбросил mustRollAgain/consecutiveDoubles — повторно
+      // присваивать `false` тут безвредно.
+      state.phase = "BUILDING";
       return {};
     }
     // JAIL (id=10) — после анимации, инициированной карточкой
@@ -2596,7 +2598,61 @@ export class GamesService {
     }
 
     if (action.type === "PAY_JAIL_FINE") {
-      if (player.money < 50) throw new ForbiddenException("Недостаточно денег");
+      // BUGFIX 2026-08 #2: раньше при `player.money < 50` бросался
+      // ForbiddenException — и для бота это означало «игра остановлена»,
+      // потому что бот не умел нажать кнопку и получить модалку банкротства.
+      // Теперь: если не хватает на штраф — НЕ бросаем исключение, а
+      // пытаемся покрыть долг распродажей (домов/залога клеток). Если
+      // покрыть можно — переходим в BANKRUPTCY_LIQUIDATE (фаза
+      // распродажи). Если нельзя — сразу банкротство. Это
+      // симметрично поведению при оплате ренты/налога с дефицитом.
+      if (player.money < 50) {
+        const need = 50 - player.money;
+        const canCover = this.bankruptcy.canCoverDebt(state, player, need);
+        if (canCover) {
+          // Переводим игрока в фазу распродажи с целевым долгом `need`.
+          // Деньги НЕ списываем — игрок будет ликвидировать имущество
+          // и пополнять баланс, после чего автоматически оплатит штраф.
+          // Если по какой-то причине баланс уже в минусе с прошлого хода —
+          // `shouldStartBankruptcy` корректно обработает.
+          if (player.money < 0) {
+            // Уже отрицательный — общий триггер банкротства.
+            if (this.shouldStartBankruptcy(state, player, null, 50)) {
+              return {};
+            }
+            // Если после shouldStartBankruptcy игрок всё ещё жив и в плюсе
+            // — продолжаем как обычный jail-escape (баланс >= 50, штраф списываем).
+            if (player.money >= 50) {
+              player.money -= 50;
+              player.inJail = false;
+              player.jailTurns = 0;
+              this.log.logJailEscaped(state, player, "pay");
+              state.phase = "ROLLING";
+              return {};
+            }
+            // Иначе — оставляем в банкротстве (фаза уже выставлена).
+            return {};
+          }
+          // 0 <= money < 50, нужно добрать `need` через распродажу.
+          // Запускаем процедуру распродажи с debt=need и creditor=null
+          // (штраф идёт в Банк, а не другому игроку). Игрок остаётся
+          // в тюрьме — фаза BANKRUPTCY_LIQUIDATE.
+          this.startBankruptcyProcedure(state, player, null, need);
+          return {};
+        }
+        // Нечем покрыть — сразу банкротство (как при неплатёже ренты).
+        this.log.logBankruptcyDeclared(state, player, "Банк");
+        this.bankruptcy.handle(state, player, null, 50);
+        this.checkGameOver(state);
+        this.advanceToNextPlayer(state);
+        const next = state.players[state.currentPlayerIndex];
+        if (state.status === "active" && next && !next.isBankrupt) {
+          this.beginNextPlayerTurn(state);
+        } else {
+          state.phase = "BUILDING";
+        }
+        return {};
+      }
       // Списываем полную сумму. Если у игрока ровно 50₽ — баланс
       // уйдёт в 0, и это НЕ банкротство (долга нет, штраф оплачен).
       // Если по какой-то причине игрок в минусе (например, с

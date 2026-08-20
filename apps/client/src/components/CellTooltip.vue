@@ -417,9 +417,7 @@ const sideClass = computed<string>(() => {
             'rent-dimmed': ownedRailroadCount !== n && ownedRailroadCount > 0,
           }"
         >
-          <span class="rent-label"
-            >{{ n }} станц{{ n === 1 ? "ия" : n < 5 ? "ии" : "ий" }} у владельца</span
-          >
+          <span class="rent-label">{{ n }} вокзал{{ n === 1 ? "" : "а" }}</span>
           <span class="rent-val">₽{{ RAILROAD_RENT_BY_COUNT[n] }}</span>
         </div>
       </div>

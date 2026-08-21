@@ -24,6 +24,17 @@
  *  4. **Финальный transform задаётся через CSS-переменную `--face-transform`**
  *     по `props.values` через inline style. Базовая наклонная поза
  *     кубика в покое — через CSS-переменную `--die-angle`.
+ *
+ *  5. **Точки на гранях**. Каждая точка получает явный класс `pos-N`
+ *     (N = 1..9), привязанный к фиксированной ячейке CSS-grid 3x3
+ *     через `grid-area`. Это гарантирует:
+ *       - все точки выровнены по одним и тем же осям (3 столбца / 3 строки);
+ *       - одинаковые отступы со всех сторон (через `padding` грани и
+ *         `justify-self: center; align-self: center` у точки в ячейке);
+ *       - точки центрированы относительно своих ячеек, а не привязаны
+ *         к порядку элементов в DOM (в отличие от старого nth-child);
+ *       - раскладка не зависит от того, в каком порядке Vue генерирует
+ *         классы, что устраняет риски со scoped-CSS Vue.
  */
 import { ref, watch, onBeforeUnmount, computed } from "vue";
 
@@ -78,6 +89,30 @@ const DICE_ROT: Record<number, { x: number; y: number }> = {
   4: { x: 90, y: 0 },
   5: { x: 0, y: 90 },
   6: { x: 0, y: 180 },
+};
+
+/**
+ * Карта "значение грани -> массив позиций точек (1..9)" для шаблона.
+ *  Позиции соответствуют ячейкам grid 3x3 в `.face`:
+ *    1 2 3
+ *    4 5 6
+ *    7 8 9
+ *
+ *  Стандартная раскладка игральной кости:
+ *    1: {5}                — центр
+ *    2: {1, 9}             — диагональ противоположная
+ *    3: {1, 5, 9}          — главная диагональ
+ *    4: {1, 3, 7, 9}       — четыре угла
+ *    5: {1, 3, 5, 7, 9}    — четыре угла + центр
+ *    6: {1, 2, 3, 7, 8, 9} — две крайние колонки полностью
+ */
+const DICE_DOTS: Record<number, number[]> = {
+  1: [5],
+  2: [1, 9],
+  3: [1, 5, 9],
+  4: [1, 3, 7, 9],
+  5: [1, 3, 5, 7, 9],
+  6: [1, 2, 3, 7, 8, 9],
 };
 
 /**
@@ -188,75 +223,68 @@ const die1Style = computed(() => ({
 const die2Style = computed(() => ({
   "--face-transform": faceTransforms.value[1],
 }));
+
+/**
+ * Возвращает массив позиций точек (1..9) для грани со значением `value`.
+ * Используется в шаблоне для рендера `<span class="dot pos-N">` строго
+ * в тех ячейках grid, где должна быть точка. Это исключает зависимость
+ * от порядка элементов в DOM и обеспечивает выравнивание по одним
+ * и тем же осям.
+ */
+function dotsFor(value: number): number[] {
+  const v = Math.max(1, Math.min(6, Math.floor(value)));
+  // `noUncheckedIndexedAccess` в строгом TS делает индексирование
+  // `Record<number, ...>` типом `T | undefined`. Поскольку ключи 1..6
+  // захардкожены и `v` clamp'ится в этот диапазон — безопасно вернуть
+  // дефолт через явное приведение к не-undefined.
+  const dots = DICE_DOTS[v];
+  return dots ?? (DICE_DOTS[1] as number[]);
+}
 </script>
 
 <template>
   <div class="dice-area">
     <!-- Кубик #1 -->
     <div class="die die-1" :class="phase" :style="die1Style">
-      <div class="face front face-1">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face front" data-value="1">
+        <span v-for="pos in dotsFor(1)" :key="`f1-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face back face-6">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face back" data-value="6">
+        <span v-for="pos in dotsFor(6)" :key="`f6-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face right face-2">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face right" data-value="2">
+        <span v-for="pos in dotsFor(2)" :key="`f2-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face left face-5">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face left" data-value="5">
+        <span v-for="pos in dotsFor(5)" :key="`f5-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face top face-3">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face top" data-value="3">
+        <span v-for="pos in dotsFor(3)" :key="`f3-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face bottom face-4">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face bottom" data-value="4">
+        <span v-for="pos in dotsFor(4)" :key="`f4-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
     </div>
 
     <!-- Кубик #2 -->
     <div class="die die-2" :class="phase" :style="die2Style">
-      <div class="face front face-1">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face front" data-value="1">
+        <span v-for="pos in dotsFor(1)" :key="`s1-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face back face-6">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face back" data-value="6">
+        <span v-for="pos in dotsFor(6)" :key="`s6-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face right face-2">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face right" data-value="2">
+        <span v-for="pos in dotsFor(2)" :key="`s2-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face left face-5">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face left" data-value="5">
+        <span v-for="pos in dotsFor(5)" :key="`s5-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face top face-3">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face top" data-value="3">
+        <span v-for="pos in dotsFor(3)" :key="`s3-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
-      <div class="face bottom face-4">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span
-        ><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div class="face bottom" data-value="4">
+        <span v-for="pos in dotsFor(4)" :key="`s4-${pos}`" class="dot" :class="`pos-${pos}`"></span>
       </div>
     </div>
   </div>
@@ -353,49 +381,85 @@ const die2Style = computed(() => ({
 }
 
 .dot {
-  width: 10px;
-  height: 10px;
+  width: 70%;
+  height: 70%;
+  max-width: 14px;
+  max-height: 14px;
+  aspect-ratio: 1 / 1;
+  justify-self: center;
+  align-self: center;
   border-radius: 50%;
   background: radial-gradient(circle at 30% 30%, #2d2d3d, #0f0f1a);
-  align-self: center;
-  justify-self: center;
   display: none;
   box-shadow:
     inset 0 2px 4px rgba(0, 0, 0, 0.5),
     0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
-.face-1 .dot:nth-child(5) {
+.dot.pos-1 {
+  grid-area: 1 / 1;
+}
+.dot.pos-2 {
+  grid-area: 1 / 2;
+}
+.dot.pos-3 {
+  grid-area: 1 / 3;
+}
+.dot.pos-4 {
+  grid-area: 2 / 1;
+}
+.dot.pos-5 {
+  grid-area: 2 / 2;
+}
+.dot.pos-6 {
+  grid-area: 2 / 3;
+}
+.dot.pos-7 {
+  grid-area: 3 / 1;
+}
+.dot.pos-8 {
+  grid-area: 3 / 2;
+}
+.dot.pos-9 {
+  grid-area: 3 / 3;
+}
+
+.face[data-value="1"] .dot.pos-5 {
   display: block;
 }
-.face-2 .dot:nth-child(1),
-.face-2 .dot:nth-child(9) {
+
+.face[data-value="2"] .dot.pos-1,
+.face[data-value="2"] .dot.pos-9 {
   display: block;
 }
-.face-3 .dot:nth-child(1),
-.face-3 .dot:nth-child(5),
-.face-3 .dot:nth-child(9) {
+
+.face[data-value="3"] .dot.pos-1,
+.face[data-value="3"] .dot.pos-5,
+.face[data-value="3"] .dot.pos-9 {
   display: block;
 }
-.face-4 .dot:nth-child(1),
-.face-4 .dot:nth-child(3),
-.face-4 .dot:nth-child(7),
-.face-4 .dot:nth-child(9) {
+
+.face[data-value="4"] .dot.pos-1,
+.face[data-value="4"] .dot.pos-3,
+.face[data-value="4"] .dot.pos-7,
+.face[data-value="4"] .dot.pos-9 {
   display: block;
 }
-.face-5 .dot:nth-child(1),
-.face-5 .dot:nth-child(3),
-.face-5 .dot:nth-child(5),
-.face-5 .dot:nth-child(7),
-.face-5 .dot:nth-child(9) {
+
+.face[data-value="5"] .dot.pos-1,
+.face[data-value="5"] .dot.pos-3,
+.face[data-value="5"] .dot.pos-5,
+.face[data-value="5"] .dot.pos-7,
+.face[data-value="5"] .dot.pos-9 {
   display: block;
 }
-.face-6 .dot:nth-child(1),
-.face-6 .dot:nth-child(4),
-.face-6 .dot:nth-child(7),
-.face-6 .dot:nth-child(3),
-.face-6 .dot:nth-child(6),
-.face-6 .dot:nth-child(9) {
+
+.face[data-value="6"] .dot.pos-1,
+.face[data-value="6"] .dot.pos-2,
+.face[data-value="6"] .dot.pos-3,
+.face[data-value="6"] .dot.pos-7,
+.face[data-value="6"] .dot.pos-8,
+.face[data-value="6"] .dot.pos-9 {
   display: block;
 }
 </style>

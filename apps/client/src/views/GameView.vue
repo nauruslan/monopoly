@@ -1,5 +1,5 @@
-﻿<script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+<script setup lang="ts">
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute, useRouter } from "vue-router";
 import Board from "../components/Board.vue";
@@ -38,6 +38,33 @@ const router = useRouter();
 const auth = useAuthStore();
 const game = useGameStore();
 const settings = useSettingsStore();
+
+/**
+ * Локальный флаг: игрок только что нажал «Завершить ход».
+ * Используется, чтобы НЕ показывать «Имя, ваш ход!» на долю секунды,
+ * пока сервер обработает END_TURN и переключит currentPlayerIndex/фазу.
+ *
+ * Ставится в onEndTurn, сбрасывается когда:
+ *   - currentPlayerIndex изменился (значит сервер уже переключил ход);
+ *   - или фаза стала НЕ BUILDING и НЕ END_TURN (например, START_TURN у следующего игрока).
+ */
+/**
+ * Локальный щит информационной панели хода:
+ *   - 'pending'  — игрок только что нажал «Завершить ход» (или сервер
+ *                  авто-завершил ход бота). Панель пустая до смены
+ *                  currentPlayerIndex. Убирает мерцание «Игрок1, ваш ход!»
+ *                  между нажатием и приходом нового состояния.
+ *   - 'flashing' — currentPlayerIndex ТОЛЬКО ЧТО сменился (1 тик).
+ *                  Панель пустая ещё один кадр, чтобы не показать
+ *                  старого игрока пока computed пересчитывается.
+ *   - 'none'     — обычное состояние, панель показывает текст.
+ */
+const turnInfoShield = ref<"none" | "pending" | "flashing">("none");
+/**
+ * currentPlayerIndex того игрока, чей ход только что завершился.
+ * Используется в watcher'е, чтобы решить — ставить ли 'flashing' при смене.
+ */
+const lastFinishedIndex = ref(-1);
 
 const players = computed(() => state.value.players);
 // На доске показываем только живых игроков. Банкроты (`isBankrupt`)
@@ -230,6 +257,172 @@ const canTrade = computed(() => {
   return true;
 });
 const mustRollAgain = computed(() => currentPlayer.value?.mustRollAgain === true);
+
+/**
+ * Текст информационной панели хода (слот #turn-info в Board).
+ * Приоритеты (см. шаблон в Board.vue):
+ *   1) Дубль                — игрок только что выбросил дубль, бросок обязателен;
+ *   2) Завершите ход        — фаза BUILDING и нет дубля;
+ *   3) Имя, ваш ход!        — во всех остальных случаях, когда ход человека.
+ * Если сейчас ход не наш (бот/чужой) — панель пуста (turn-info-text = "").
+ */
+/**
+ * Текст информационной панели хода (слот #turn-info в Board).
+ *
+ * Сообщения показываются ВСЕМ клиентам — не только человеку, чей ход:
+ *   1) Дубль                     — игрок только что выбросил дубль, бросок обязателен;
+ *   2) Имя, завершите ход!       — фаза BUILDING и нет дубля;
+ *   3) Имя, ваш ход!             — во всех остальных случаях, когда ход активен.
+ *
+ * Если статус игры не активен или текущий игрок банкрот — панель пуста.
+ */
+/**
+ * Сбрасываем щит, когда сервер переключил currentPlayerIndex.
+ *
+ * Сценарий 1 (человек нажал END_TURN):
+ *   pending=true → idx сменился → flashing=true (1 тик) → none.
+ *
+ * Сценарий 2 (бот завершил ход через CONFIRM_END_TURN):
+ *   idx сменился → если предыдущая фаза была BUILDING/END_TURN →
+ *   flashing=true (1 тик) → none.
+ *
+ * Без этого при смене currentPlayerIndex на 1 кадр успевает
+ * проскочить «Бот1, ваш ход!» (computed уже знает про нового
+ * currentPlayer, но сервер ещё не прислал финальные данные).
+ */
+watch(
+  () => state.value.currentPlayerIndex,
+  (newIdx, oldIdx) => {
+    // Если индекс реально сменился — ставим flashing на 1 тик,
+    // чтобы панель НЕ показала старого игрока с текстом «ваш ход».
+    if (oldIdx !== undefined && newIdx !== oldIdx) {
+      lastFinishedIndex.value = oldIdx;
+      turnInfoShield.value = "flashing";
+      // Снимаем flashing после nextTick — гарантируем, что DOM успел
+      // отрендерить пустую панель, и только потом показываем нового игрока.
+      nextTick(() => {
+        if (turnInfoShield.value === "flashing") {
+          turnInfoShield.value = "none";
+        }
+      });
+    }
+  },
+);
+
+const targetTurnInfoText = computed<string>(() => {
+  // Локальный щит: пока висит 'pending' или 'flashing' — НИЧЕГО не показываем.
+  //   - 'pending'  : между нажатием «Завершить ход» и приходом нового state.
+  //   - 'flashing' : 1 тик после смены currentPlayerIndex (независимо от того,
+  //                  был это клик человека или авто-CONFIRM_END_TURN бота).
+  if (turnInfoShield.value !== "none") return "";
+
+  // ROOT-CAUSE ФИКС: панель гаснет ТОЛЬКО в фазе END_TURN (500мс
+  // между ходами). Без этого для БОТА на эти 500мс успевало появиться
+  // «Бот0, ваш ход!»: сервер присылал phase="END_TURN" с idx ЕЩЁ на
+  // старом боте, computed видел status=active && phase!=BUILDING и
+  // рисовал «ваш ход».
+  //
+  // ВСЕ остальные «активные» фазы (аукцион, торговля, CARD_REVEAL,
+  // JAIL_NOTICE, TAX_PAYMENT, PAY_RENT, BANKRUPTCY_LIQUIDATE,
+  // RESOLVING_LANDING, DICE_ANIMATION, MOVE_ANIMATION, ...) — это
+  // часть хода ТЕКУЩЕГО игрока, и панель показывает «Имя, ваш ход!».
+  if (state.value.phase === "END_TURN") return "";
+
+  // Дубль показываем и человеку, и боту (всем видно).
+  if (mustRollAgain.value) return "Дубль! Бросьте кубики еще раз!";
+
+  const phase = state.value.phase;
+  const playerName = currentPlayer.value?.displayName ?? currentPlayer.value?.icon ?? "Игрок";
+
+  // Фаза BUILDING и нет дубля — завершите ход.
+  if (phase === "BUILDING" && !mustRollAgain.value) {
+    return playerName + ", завершите ход!";
+  }
+
+  // Любая другая активная фаза — ваш ход (для человека и бота).
+  if (state.value.status === "active" && currentPlayer.value && !currentPlayer.value.isBankrupt) {
+    return playerName + ", ваш ход!";
+  }
+  return "";
+});
+
+/**
+ * Тон (визуальный класс) панели: double / end / your / none.
+ * Соответствует turnInfoText. Сейчас все три тона имеют ОДИНАКОВУЮ стилистику
+ * (один фон и рамка), различается только цвет текста и небольшой акцент
+ * (жирность/мигание для дубля).
+ */
+const targetTurnInfoTone = computed<"double" | "end" | "your" | "none">(() => {
+  // END_TURN — единственная фаза, где панель пустая (см. turnInfoText).
+  if (state.value.phase === "END_TURN") return "none";
+  if (mustRollAgain.value) return "double";
+  if (state.value.phase === "BUILDING" && !mustRollAgain.value) return "end";
+  if (state.value.status === "active" && currentPlayer.value && !currentPlayer.value.isBankrupt) {
+    return "your";
+  }
+  return "none";
+});
+
+const TURN_INFO_DEBOUNCE_MS = 150;
+const displayedTurnInfoText = ref<string>("");
+const displayedTurnInfoTone = ref<"double" | "end" | "your" | "none">("none");
+let turnInfoDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let lastKnownPlayerIndex = state.value.currentPlayerIndex;
+
+function clearTurnInfoDebounce() {
+  if (turnInfoDebounceTimer) {
+    clearTimeout(turnInfoDebounceTimer);
+    turnInfoDebounceTimer = null;
+  }
+}
+
+function applyTargetImmediately() {
+  clearTurnInfoDebounce();
+  displayedTurnInfoText.value = targetTurnInfoText.value;
+  displayedTurnInfoTone.value = targetTurnInfoTone.value;
+}
+
+watch([targetTurnInfoText, targetTurnInfoTone], ([newText, newTone]) => {
+  // Мгновенно: пустой target (защита от вспышки END_TURN).
+  if (newText === "" || newTone === "none") {
+    applyTargetImmediately();
+    return;
+  }
+  // Если сменился игрок — обновляем сразу (не ждём дебаунса),
+  // иначе 500мс будет висеть «Бот0, ваш ход!».
+  if (state.value.currentPlayerIndex !== lastKnownPlayerIndex) {
+    lastKnownPlayerIndex = state.value.currentPlayerIndex;
+    applyTargetImmediately();
+    return;
+  }
+  // Иначе — дебаунс 500мс.
+  clearTurnInfoDebounce();
+  turnInfoDebounceTimer = setTimeout(() => {
+    displayedTurnInfoText.value = newText;
+    displayedTurnInfoTone.value = newTone;
+    turnInfoDebounceTimer = null;
+  }, TURN_INFO_DEBOUNCE_MS);
+});
+
+watch(
+  () => state.value.currentPlayerIndex,
+  () => {
+    lastKnownPlayerIndex = state.value.currentPlayerIndex;
+    applyTargetImmediately();
+  },
+);
+
+onBeforeUnmount(clearTurnInfoDebounce);
+
+// При mount сразу показываем актуальное состояние turn-info,
+// иначе при старте новой игры панель будет пустой, пока target
+// не изменится (debounce не сработает, т.к. watcher не запустится
+// на первый setup).
+onMounted(() => {
+  displayedTurnInfoText.value = targetTurnInfoText.value;
+  displayedTurnInfoTone.value = targetTurnInfoTone.value;
+  lastKnownPlayerIndex = state.value.currentPlayerIndex;
+});
 
 // Залог/выкуп по правилам Монополии возможен В ЛЮБОЙ «своей» фазе
 // хода — аналогично торговле (см. canTrade). Это удобно: если
@@ -1217,6 +1410,9 @@ function onEndTurn() {
     console.warn("End turn rejected: not my turn or wrong phase");
     return;
   }
+  // Ставим щит ДО отправки, чтобы Vue реактивно скрыл «ваш ход» немедленно.
+  turnInfoShield.value = "pending";
+  lastFinishedIndex.value = state.value.currentPlayerIndex;
   dispatchAction({ type: "END_TURN" });
 }
 
@@ -1255,24 +1451,44 @@ function logout() {
             @cell-hover="onCellHover"
             @cell-leave="onCellLeave"
             @dice-roll-done="onDiceRollDone"
-          />
+          >
+            <template #players>
+              <PlayersPanel
+                class="board-center-panel"
+                :players="players"
+                :current-player-id="currentPlayerId"
+              />
+            </template>
+            <template #turn-info>
+              <div
+                class="board-center-panel turn-info"
+                :class="displayedTurnInfoTone"
+                role="status"
+                aria-live="polite"
+              >
+                <span class="turn-info-text">{{ displayedTurnInfoText }}</span>
+              </div>
+            </template>
+            <template #actions>
+              <ActionsPanel
+                class="board-center-panel"
+                :can-roll="canRoll && !showAuctionModal"
+                :can-build="canBuild && !showAuctionModal"
+                :can-end-turn="canEndTurn && !showAuctionModal"
+                :can-trade="canTrade && !showAuctionModal"
+                :can-mortgage="canMortgage && !showAuctionModal"
+                :must-roll-again="mustRollAgain"
+                @open-trade="onOpenTrade"
+                @open-mortgage="onOpenMortgage"
+                @open-build="onOpenBuild"
+                @roll="onRoll"
+                @end-turn="onEndTurn"
+              />
+            </template>
+          </Board>
         </div>
 
         <aside class="sidebar">
-          <PlayersPanel :players="players" :current-player-id="currentPlayerId" />
-          <ActionsPanel
-            :can-roll="canRoll && !showAuctionModal"
-            :can-build="canBuild && !showAuctionModal"
-            :can-end-turn="canEndTurn && !showAuctionModal"
-            :can-trade="canTrade && !showAuctionModal"
-            :can-mortgage="canMortgage && !showAuctionModal"
-            :must-roll-again="mustRollAgain"
-            @open-trade="onOpenTrade"
-            @open-mortgage="onOpenMortgage"
-            @open-build="onOpenBuild"
-            @roll="onRoll"
-            @end-turn="onEndTurn"
-          />
           <LogPanel />
         </aside>
       </div>
@@ -1416,44 +1632,196 @@ function logout() {
 }
 
 .layout {
-  display: flex;
-  flex-direction: row;
-  gap: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 800px) 1fr;
+  grid-template-rows: 1fr;
   align-items: stretch;
-  width: 100%;
+  justify-items: stretch;
+  gap: 24px;
+  margin: 0 50px;
+  width: auto;
   box-sizing: border-box;
+  min-height: calc(100vh - 80px);
+  height: calc(100vh - 80px);
 }
 .board-area {
-  flex: 0 0 60%;
-  max-width: 60%;
-  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
   align-items: stretch;
 }
 .sidebar {
-  flex: 1 1 40%;
-  max-width: 40%;
-  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
   align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
 .sidebar > * {
   width: 100%;
   box-sizing: border-box;
   align-self: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+:deep(.board-center-panel) {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+:deep(.board-center-panel .players-grid) {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+:deep(.board-center-panel .player-card) {
+  padding: 6px 8px;
+  font-size: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+:deep(.board-center-panel .player-header) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+:deep(.board-center-panel .player-avatar) {
+  width: 22px !important;
+  height: 22px !important;
+  font-size: 11px !important;
+  flex-shrink: 0;
+}
+:deep(.board-center-panel .player-name) {
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+:deep(.board-center-panel .player-money) {
+  font-size: 13px;
+  font-weight: 800;
+}
+:deep(.board-center-panel .player-stats) {
+  font-size: 9.5px;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 4px;
+}
+:deep(.board-center-panel .stat-row) {
+  font-size: 9.5px;
+  line-height: 1.3;
+}
+:deep(.board-center-panel .stat-row-assets) {
+  margin-top: 2px;
+  padding-top: 3px;
+}
+:deep(.board-center-panel .holdable-mini) {
+  font-size: 10px;
+}
+:deep(.board-center-panel .thinking-indicator) {
+  margin-top: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+:deep(.board-center-panel .actions) {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+:deep(.board-center-panel .action-btn) {
+  padding: 0;
+  font-size: 0;
+  min-width: 0;
+}
+
+:deep(.board-center-panel .double-banner) {
+  display: none;
+}
+
+:deep(.board-center-panel.turn-info) {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 2px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+:deep(.board-center-panel.turn-info .turn-info-text) {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: #f5e9ff;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+:deep(.board-center-panel.turn-info.double) {
+  background: transparent;
+  border: none;
+}
+:deep(.board-center-panel.turn-info.double .turn-info-text) {
+  color: #f5e9ff;
+  font-weight: 800;
+}
+:deep(.board-center-panel.turn-info.end) {
+  background: transparent;
+  border: none;
+}
+:deep(.board-center-panel.turn-info.end .turn-info-text) {
+  color: #f5e9ff;
+}
+:deep(.board-center-panel.turn-info.your) {
+  background: transparent;
+  border: none;
+}
+:deep(.board-center-panel.turn-info.your .turn-info-text) {
+  color: #f5e9ff;
+}
+:deep(.board-center-panel.turn-info.none) {
+  background: transparent;
+  border: none;
+}
+:deep(.board-center-panel.turn-info.none .turn-info-text) {
+  color: transparent;
 }
 @media (max-width: 1100px) {
   .layout {
-    flex-direction: column;
-  }
-  .board-area,
-  .sidebar {
-    flex: 1 1 100%;
-    max-width: 100%;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
   }
 }
 .connecting {

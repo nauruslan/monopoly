@@ -19,7 +19,7 @@ const props = defineProps<{
      * чтобы все клиенты видели, кто из игроков арестован. Источник
      * истины — `Player.inJail` из `packages/shared/src/types/player.ts`,
      * сервер присылает его в `GameState.players` через WS-событие
-     * `game:state`. 
+     * `game:state`.
      */
     inJail?: boolean;
   }[];
@@ -180,18 +180,23 @@ function isInJailed(p: { id: string; inJail?: boolean }): boolean {
           </div>
         </CellComp>
       </template>
-
-      <!-- Центральная панель -->
       <div class="board-center">
-        <slot name="center">
-          <div class="logo">Монополия</div>
-          <div class="logo-sub">neon edition</div>
-        </slot>
-        <Dice
-          :values="diceValues ?? [1, 1]"
-          :rolling="diceRolling ?? false"
-          @roll-done="onDiceRollDone"
-        />
+        <div class="board-center-players">
+          <slot name="players" />
+        </div>
+        <div class="board-center-dice">
+          <Dice
+            :values="diceValues ?? [1, 1]"
+            :rolling="diceRolling ?? false"
+            @roll-done="onDiceRollDone"
+          />
+        </div>
+        <div class="board-center-turn-info">
+          <slot name="turn-info" />
+        </div>
+        <div class="board-center-actions">
+          <slot name="actions" />
+        </div>
       </div>
     </div>
   </div>
@@ -202,6 +207,8 @@ function isInJailed(p: { id: string; inJail?: boolean }): boolean {
   display: flex;
   justify-content: center;
   align-items: center;
+  width: 800px;
+  height: 800px;
 }
 
 .board {
@@ -223,32 +230,61 @@ function isInJailed(p: { id: string; inJail?: boolean }): boolean {
 .board-center {
   grid-column: 2 / span 9;
   grid-row: 2 / span 9;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr) 80px 40px 80px;
+  align-items: stretch;
+  justify-items: stretch;
+  gap: 6px;
+  padding: 10px;
   background: rgba(10, 10, 26, 0.6);
   border: 1px dashed rgba(77, 158, 255, 0.4);
   border-radius: 8px;
-  padding: 20px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.logo {
-  font-size: clamp(24px, 4vw, 48px);
-  font-weight: 800;
-  letter-spacing: 4px;
-  color: var(--neon-cyan, #4d9eff);
-  text-shadow:
-    0 0 10px rgba(77, 158, 255, 0.8),
-    0 0 20px rgba(77, 158, 255, 0.5);
+.board-center-players {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-.logo-sub {
-  margin-top: 8px;
-  font-size: clamp(10px, 1.5vw, 14px);
-  letter-spacing: 6px;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.5);
+.board-center-turn-info {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.board-center-dice {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 2px 0;
+}
+
+.board-center-actions {
+  grid-column: 1;
+  grid-row: 4;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .player-token {

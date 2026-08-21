@@ -237,8 +237,7 @@ function formatAssets(value: number): string {
 </script>
 
 <template>
-  <div class="panel">
-    <div class="panel-title">Игроки</div>
+  <div class="players-wrap">
     <div class="players-grid">
       <div
         v-for="p in players"
@@ -266,10 +265,6 @@ function formatAssets(value: number): string {
         </div>
         <div class="player-money">₽{{ p.money.toLocaleString() }}</div>
 
-        <!--
-          Блок статистики: Собственность / Монополии / Дома / Отели / Карточки / Активы.
-          Для банкротов скрываем (там нет смысла — все нули).
-        -->
         <div v-if="!p.isBankrupt" class="player-stats">
           <div class="stat-row" :title="`Собственность: ${p.properties.length} клеток`">
             <span class="stat-label">Собственность</span>
@@ -324,6 +319,17 @@ function formatAssets(value: number): string {
 </template>
 
 <style scoped>
+.players-wrap {
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
 .jail-badge,
 .bot-badge,
 .bankrupt-badge {
@@ -368,7 +374,6 @@ function formatAssets(value: number): string {
   animation: card-pulse 1.2s ease-in-out infinite;
 }
 
-/* === Блок статистики === */
 .player-stats {
   margin-top: 8px;
   padding-top: 6px;
@@ -411,7 +416,6 @@ function formatAssets(value: number): string {
   color: var(--gold);
   text-shadow: 0 0 8px rgba(194, 178, 235, 0.35);
 }
-/* Список карточек в строке «Карточки» — без числового значения, только иконки */
 .stat-value-cards {
   min-width: 0;
   gap: 3px;

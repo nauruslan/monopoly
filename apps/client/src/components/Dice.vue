@@ -265,16 +265,16 @@ const die2Style = computed(() => ({
 <style scoped>
 .dice-area {
   display: flex;
-  gap: 26px;
+  gap: 18px;
   align-items: center;
-  margin-top: 4px;
-  perspective: 320px;
+  margin-top: 0;
+  perspective: 280px;
   perspective-origin: center center;
 }
 
 .die {
-  width: 60px;
-  height: 60px;
+  width: 50px;
+  height: 50px;
   position: relative;
   transform-style: preserve-3d;
   transform: rotateY(var(--die-angle, 0deg)) var(--face-transform, rotateX(0deg) rotateY(0deg));
@@ -287,9 +287,6 @@ const die2Style = computed(() => ({
   --die-angle: -8deg;
 }
 
-/* 2-секундная keyframe-анимация крутки 
-   Применяется ТОЛЬКО когда класс .rolling на элементе.
-*/
 .die.rolling {
   animation: diceRotate 2s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
@@ -298,28 +295,16 @@ const die2Style = computed(() => ({
   animation-delay: 0.08s;
 }
 
-/* кубик показывает ровно серверные значения 
-   Класс .final добавляется после завершения keyframes-анимации.
-   animation: none гарантирует, что keyframes-кадры больше не применяются,
-   и transform из inline style (CSS-переменных) — единственный источник.
-   transition: transform плавно доводит кубик от последнего кадра
-   keyframes-анимации (rotateX(720) rotateY(540) rotateZ(360)) к
-   финальной грани из --face-transform. Короткий «доворот» 250мс
-   заканчивается ровно на серверном значении. */
 .die.final {
   animation: none;
   transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* плавный transition на смену грани.*/
 .die.idle {
   animation: none;
   transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* 2 секунды крутки с 720° по X, 540° по Y, 360° по Z.
-   Без forwards в .die.rolling — после 2 секунд transform снимается
-   и к финальной грани нас ведёт CSS-transition на .die.final. */
 @keyframes diceRotate {
   from {
     transform: rotateX(0deg) rotateY(0deg) rotateZ(0deg);
@@ -331,17 +316,17 @@ const die2Style = computed(() => ({
 
 .face {
   position: absolute;
-  width: 60px;
-  height: 60px;
-  border-radius: 18px;
+  width: 50px;
+  height: 50px;
+  border-radius: 14px;
   background: linear-gradient(145deg, #ffffff, #f0f0f0);
   box-shadow:
-    0 10px 30px rgba(0, 0, 0, 0.4),
+    0 8px 24px rgba(0, 0, 0, 0.4),
     inset 0 2px 0 rgba(255, 255, 255, 0.8);
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   grid-template-rows: repeat(3, 1fr);
-  padding: 9px;
+  padding: 7px;
   box-sizing: border-box;
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
@@ -349,27 +334,27 @@ const die2Style = computed(() => ({
 }
 
 .face.front {
-  transform: translateZ(30px);
+  transform: translateZ(25px);
 }
 .face.back {
-  transform: translateZ(-30px) rotateY(180deg);
+  transform: translateZ(-25px) rotateY(180deg);
 }
 .face.right {
-  transform: translateX(30px) rotateY(90deg);
+  transform: translateX(25px) rotateY(90deg);
 }
 .face.left {
-  transform: translateX(-30px) rotateY(-90deg);
+  transform: translateX(-25px) rotateY(-90deg);
 }
 .face.top {
-  transform: translateY(-30px) rotateX(90deg);
+  transform: translateY(-25px) rotateX(90deg);
 }
 .face.bottom {
-  transform: translateY(30px) rotateX(-90deg);
+  transform: translateY(25px) rotateX(-90deg);
 }
 
 .dot {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: radial-gradient(circle at 30% 30%, #2d2d3d, #0f0f1a);
   align-self: center;

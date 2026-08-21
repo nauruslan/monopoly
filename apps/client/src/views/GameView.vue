@@ -30,6 +30,7 @@ import { useAuctionStore } from "../stores/auction";
 import { useJailStore } from "../stores/jail";
 import { useSettingsStore } from "../stores/settings";
 import { useSocket, disconnectSocket } from "../composables/useSocket";
+import { useBotAutoConfirm } from "../composables/useBotAutoConfirm";
 import type { Cell, GameAction, TradeOffer, Phase, BoardSide } from "@monopoly/shared";
 import { getCellSide } from "@monopoly/shared";
 
@@ -935,11 +936,15 @@ watch(
         showTaxModal.value = true;
         // Если ходит бот — авто-CONFIRM_TAX через 2с (как PAY_RENT).
         if (currentPlayer.value?.kind === "bot") {
-          setTimeout(() => {
-            if (state.value.phase === "TAX_PAYMENT") {
-              sendConfirmForCurrentPhase("TAX_PAYMENT", { type: "CONFIRM_TAX" });
-            }
-          }, 2000);
+          autoConfirm.schedule(
+            "TAX_PAYMENT",
+            () => {
+              if (state.value.phase === "TAX_PAYMENT") {
+                sendConfirmForCurrentPhase("TAX_PAYMENT", { type: "CONFIRM_TAX" });
+              }
+            },
+            2000,
+          );
         }
       }
     }
@@ -964,11 +969,15 @@ watch(
         showRentModal.value = true;
         // Если ходит бот — авто-CONFIRM_RENT_PAYMENT через 2с.
         if (currentPlayer.value?.kind === "bot") {
-          setTimeout(() => {
-            if (state.value.phase === "PAY_RENT") {
-              sendConfirmForCurrentPhase("PAY_RENT", { type: "CONFIRM_RENT_PAYMENT" });
-            }
-          }, 2000);
+          autoConfirm.schedule(
+            "PAY_RENT",
+            () => {
+              if (state.value.phase === "PAY_RENT") {
+                sendConfirmForCurrentPhase("PAY_RENT", { type: "CONFIRM_RENT_PAYMENT" });
+              }
+            },
+            2000,
+          );
         }
       } else {
         // Страховка: если сервер не положил rentContext (аномалия),
@@ -991,7 +1000,7 @@ watch(
     // reconnect'а или повторного mount), и модалка появлялась повторно.
     if (newPhase === "CARD_REVEAL" && isCurrentPlayerActive.value) {
       if (state.value.cardContext?.card) {
-        // Свежая карта с сервера — синхронизируем UI и ��оказываем модалку.
+        // Свежая карта с сервера — синхронизируем UI и показываем модалку.
         lastDrawnCard.value = state.value.cardContext.card;
         cardText.value = state.value.cardContext.card.text;
         cardDeck.value =
@@ -1002,11 +1011,23 @@ watch(
         // сервер применит её эффект. Раньше confirm слал сервер сам, что
         // вызывало рассинхрон с анимацией у других игроков.
         if (currentPlayer.value?.kind === "bot") {
-          setTimeout(() => {
-            if (state.value.phase === "CARD_REVEAL") {
-              sendConfirmForCurrentPhase("CARD_REVEAL", { type: "CONFIRM_CARD" });
-            }
-          }, 2500);
+          // Токен: ID текущей карточки. Дополнительная защита от гонки
+          // CARD_REVEAL -> MOVE_ANIMATION -> CARD_REVEAL (новая карта).
+          // autoConfirm.schedule() уже отменяет предыдущий таймер,
+          // но это страховка для callback'ов уже в очереди microtasks.
+          const cardId = state.value.cardContext?.card?.id;
+          autoConfirm.schedule(
+            "CARD_REVEAL",
+            () => {
+              if (
+                state.value.phase === "CARD_REVEAL" &&
+                state.value.cardContext?.card?.id === cardId
+              ) {
+                sendConfirmForCurrentPhase("CARD_REVEAL", { type: "CONFIRM_CARD" });
+              }
+            },
+            2500,
+          );
         }
       } else {
         // Страховка: если модалку нечем заполнить (или WS-событие
@@ -1040,11 +1061,23 @@ watch(
       // Если ходит бот — авто-CONFIRM_JAIL_NOTICE через 2.5с (как CARD_REVEAL).
       // 2-3с — требование пользователя: дать зрителям увидеть окно.
       if (currentPlayer.value?.kind === "bot") {
-        setTimeout(() => {
-          if (state.value.phase === "JAIL_NOTICE") {
-            sendConfirmForCurrentPhase("JAIL_NOTICE", { type: "CONFIRM_JAIL_NOTICE" });
-          }
-        }, 2500);
+        // Токен: reason + playerId, чтобы таймер сработал только для ТОЙ ЖЕ
+        // тюрьмы. Защита от двух тюрем подряд (например, после 3 дублей).
+        const reason = state.value.jailNotice?.reason;
+        const pid = state.value.jailNotice?.playerId;
+        autoConfirm.schedule(
+          "JAIL_NOTICE",
+          () => {
+            if (
+              state.value.phase === "JAIL_NOTICE" &&
+              state.value.jailNotice?.reason === reason &&
+              state.value.jailNotice?.playerId === pid
+            ) {
+              sendConfirmForCurrentPhase("JAIL_NOTICE", { type: "CONFIRM_JAIL_NOTICE" });
+            }
+          },
+          2500,
+        );
       }
     }
     if (newPhase !== "JAIL_NOTICE") {
@@ -1068,20 +1101,28 @@ watch(
     // не отправлялся клиентом, и сервер был вынужден слать его сам по
     // своему таймеру (что приводило к рассинхрону).
     if (newPhase === "RESOLVING_LANDING" && isCurrentPlayerActive.value) {
-      setTimeout(() => {
-        if (state.value.phase === "RESOLVING_LANDING") {
-          sendConfirmForCurrentPhase("RESOLVING_LANDING", { type: "CONFIRM_LANDING" });
-        }
-      }, 400);
+      autoConfirm.schedule(
+        "RESOLVING_LANDING",
+        () => {
+          if (state.value.phase === "RESOLVING_LANDING") {
+            sendConfirmForCurrentPhase("RESOLVING_LANDING", { type: "CONFIRM_LANDING" });
+          }
+        },
+        400,
+      );
     }
     // END_TURN — пауза 500мс, потом авто-CONFIRM_END_TURN.
     // ВАЖНО: от ЛЮБОГО текущего игрока.
     if (newPhase === "END_TURN" && isCurrentPlayerActive.value) {
-      setTimeout(() => {
-        if (state.value.phase === "END_TURN") {
-          sendConfirmForCurrentPhase("END_TURN", { type: "CONFIRM_END_TURN" });
-        }
-      }, 500);
+      autoConfirm.schedule(
+        "END_TURN",
+        () => {
+          if (state.value.phase === "END_TURN") {
+            sendConfirmForCurrentPhase("END_TURN", { type: "CONFIRM_END_TURN" });
+          }
+        },
+        500,
+      );
     }
     // BANKRUPTCY_LIQUIDATE: открываем модалку ликвидации ТОЛЬКО для
     // текущего игрока-человека. Бот сам решает через BANKRUPTCY_*
@@ -1181,6 +1222,14 @@ function onTradeCancel() {
  */
 const displayPositions = ref<Record<string, number>>({});
 let animTimers: Record<string, number> = {};
+
+/**
+ * Менеджер авто-подтверждений фаз для бота/системы.
+ * См. apps/client/src/composables/useBotAutoConfirm.ts — решает баг
+ * "старая карточка закрывает новую": при входе в фазу CARD_REVEAL
+ * повторно schedule("CARD_REVEAL", ...) ОТМЕНЯЕТ предыдущий таймер.
+ */
+const autoConfirm = useBotAutoConfirm();
 
 // Анимация на парковку (id=20) и в тюрьму (id=10) для карточек
 //
@@ -1314,6 +1363,12 @@ function animatePlayerTo(playerId: string, from: number, to: number) {
 onBeforeUnmount(() => {
   for (const id of Object.values(animTimers)) clearInterval(id);
   animTimers = {};
+  // Сбрасываем все таймеры автоподтверждения для бота (CARD_REVEAL,
+  // JAIL_NOTICE, TAX_PAYMENT, PAY_RENT, RESOLVING_LANDING, END_TURN).
+  // Без этого, если компонент размонтируется во время активной фазы,
+  // отложенный setTimeout сработает после unmount и вызовет sendAction
+  // на оторванном от стора состоянии.
+  autoConfirm.cancelAll();
 });
 
 //  Модалка карточки (фаза CARD_REVEAL)
@@ -1328,6 +1383,7 @@ onBeforeUnmount(() => {
 
 function onCloseCard() {
   if (!showCardModal.value) return; // защита от двойного onCloseCard
+  autoConfirm.cancel("CARD_REVEAL");
   showCardModal.value = false;
   // Очищаем lastDrawnCard в сторе, чтобы при следующей карточке watcher
   // в сторе (если он там нужен) сработал корректно. UI-источник истины
@@ -1347,18 +1403,21 @@ function onCloseCard() {
  */
 function onCloseJailNotice() {
   if (!showJailNoticeModal.value) return; // защита от двойного onClose
+  autoConfirm.cancel("JAIL_NOTICE");
   showJailNoticeModal.value = false;
   sendConfirmForCurrentPhase("JAIL_NOTICE", { type: "CONFIRM_JAIL_NOTICE" });
 }
 
 // Модалка фиксированного налога (фаза TAX_PAYMENT)
 function onCloseTax() {
+  autoConfirm.cancel("TAX_PAYMENT");
   showTaxModal.value = false;
   sendConfirmForCurrentPhase("TAX_PAYMENT", { type: "CONFIRM_TAX" });
 }
 
 // Модалка аренды (фаза PAY_RENT)
 function onCloseRent() {
+  autoConfirm.cancel("PAY_RENT");
   showRentModal.value = false;
   sendConfirmForCurrentPhase("PAY_RENT", { type: "CONFIRM_RENT_PAYMENT" });
 }
